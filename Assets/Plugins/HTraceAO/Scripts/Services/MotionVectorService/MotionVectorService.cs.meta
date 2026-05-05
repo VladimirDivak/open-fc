@@ -1,0 +1,10 @@
+fileFormatVersion: 2
+guid: df0eb24117414875bc12dbf2f3df4657
+timeCreated: 1742712246
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Scripts/Services/MotionVectorService/MotionVectorService.cs
+  uploadId: 896260

@@ -1,0 +1,176 @@
+# CLAUDE.md
+
+Guidance for Claude Code when working in this repository.
+
+## Project
+
+`open-farcry` is a Unity 6 LTS port/reimplementation effort for Far Cry 1 assets and runtime behavior. Original Far Cry data is not committed to the project; tools read it from a local game installation.
+
+External paths used by the developer:
+
+- `~/Documents/farcry-game/` - Far Cry 1 installation, expected to contain `FCData/*.pak`, `Levels/*/level.pak`, and `.cry` level files.
+- `~/Documents/farcry-sources/` - CryEngine 1 C++ source reference for binary formats and runtime behavior.
+
+Generated/imported project-side cache assets should live under `Assets/FCData/`.
+
+## Unity Setup
+
+- Unity Editor: `6000.4.3f1`
+- Render pipeline: URP `17.4.0`
+- Main packages: UniTask, Cinemachine 3, Input System, AI Navigation, Timeline, SharpZipLib, Odin Inspector.
+- Runtime settings asset: `Assets/Resources/FcFileSystemSettings.asset`
+- Render assets: `Assets/Settings/PC_RPAsset.asset` and `Assets/Settings/PC_Renderer.asset`
+
+Open the project in Unity Editor and use Play Mode for runtime checks. Editor tooling is under the `OpenFarCry` Unity menu.
+
+Headless Linux build:
+
+```bash
+unity -batchmode -projectPath "/home/vladimir/Unity Projects/open-farcry" \
+  -buildTarget Linux64 -buildLinux64Player ./Build/OpenFarCry
+```
+
+EditMode tests, when present:
+
+```bash
+unity -batchmode -projectPath "/home/vladimir/Unity Projects/open-farcry" \
+  -runTests -testPlatform EditMode
+```
+
+## Repository Notes
+
+This checkout currently has a `.git` directory entry that does not behave as a normal Git worktree. Do not rely on `git status` for safety checks unless Git is repaired or initialized.
+
+Avoid editing generated Unity folders unless explicitly needed:
+
+- `Library/`
+- `Temp/`
+- `Logs/`
+- `UserSettings/`
+
+Prefer source edits in `Assets/Scripts/`, package changes in `Packages/`, and Unity settings changes in `ProjectSettings/` or `Assets/Settings/`.
+
+## Implemented Code
+
+### File System
+
+Assembly: `OpenFarCry.FileSystem`
+
+Key files:
+
+- `Assets/Scripts/FileSystem/FcFileSystem.cs`
+- `Assets/Scripts/FileSystem/PakArchive.cs`
+- `Assets/Scripts/FileSystem/FcFileSystemSettings.cs`
+- `Assets/Scripts/FileSystem/Editor/FcFileSystemEditorInit.cs`
+
+Current behavior:
+
+- `FcFileSystem.Initialize()` loads `FcFileSystemSettings` from `Resources/FcFileSystemSettings`.
+- It mounts all `*.pak` files under `<gameInstallPath>/FCData`.
+- Mount order is alphabetical, and lookup is reverse order (last mounted wins), matching patch PAK override behavior.
+- Paths are normalized to lower-case forward-slash virtual paths.
+- `PakArchive` uses `Unity.SharpZipLib.Zip.ZipFile`.
+- `ReadAllBytesAsync` offloads decompression to the thread pool with UniTask, then returns to the main thread.
+- In the editor, `[InitializeOnLoad]` initializes the VFS after domain reloads so editor tools can use it outside Play Mode.
+
+When adding file-system features, preserve thread-safety around mount/index state and do not block the Unity main thread for heavy decompression or parsing.
+
+### CGF Importer
+
+Assembly: `OpenFarCry.Importer`
+
+Key files:
+
+- `Assets/Scripts/Importer/Cgf/CgfData.cs`
+- `Assets/Scripts/Importer/Cgf/CgfParser.cs`
+- `Assets/Scripts/Importer/Cgf/CgfMeshBuilder.cs`
+- `Assets/Scripts/Importer/Editor/CgfImporterWindow.cs`
+
+Work status (2026-05-05):
+
+- Added animation import pipeline for character models:
+  - `CAL` parsing (`$AnimDir`/`$AnimationDir` directives, dummy `?` entries, fallback to `<model>_*.caf` when needed).
+  - `CAF` parsing for controller/timing chunks (`0x0827`, `0x0826` where available).
+  - Legacy Unity `Animation` clip generation (`localPosition`/`localRotation`) and attach to imported prefab.
+- Fixed duplicate/empty clips in Unity `Animation` component by rebuilding clip list before attach/save.
+- Added `BoneAnim` parsing (`0x0290`) and controllerID-to-bone-path mapping for clip curve binding.
+- Updated skeleton/bind-pose handling:
+  - `BoneInitialPos` matrix parsing corrected for translation row in `SBoneInitPosMatrix`.
+  - Bindposes now built as inverse of default global pose, with scale removal (`NoScale`-style).
+  - Bone local scales forced to `Vector3.one` when reconstructing transforms from bind matrices.
+- Fixed major character skinning/animation mismatch:
+  - `BoneNameList 0x0744` uses `NAME_ENTITY.name[64]`; reading 32 bytes corrupts bone names.
+  - Cry runtime remaps `CryLink.BoneID` into hierarchy/runtime bone indices; Unity import now mirrors this for bone weights, bone names, bind poses, and hierarchy reconstruction.
+  - Skinned mesh vertex positions must be reconstructed from `CryLink.offset` in bind pose (`boneDefaultGlobal.TransformPointOLD(offset) * weight`). Some models store raw mesh vertices in an offset space, so using raw `CryVertex.P*` with Unity bindposes makes pivots drift and animated vertices explode.
+  - Cry OLD row-vector matrices (`TransformPointOLD`, `SetTranslationOLD`) must be converted into Unity column-vector matrices before basis conversion.
+  - Coordinate conversion is now baked into mesh/bindpose/bone/animation data with a proper Z-up to Unity Y-up rotation `(x, y, z) -> (x, z, -y)`.
+  - Imported prefab roots should remain ergonomic: position zero, identity rotation, scale one.
+
+Current behavior:
+
+- `CgfParser` validates `FILE_HEADER` and chunk table bounds, computes per-chunk sizes from offsets, and rejects invalid offsets.
+- Implemented chunk support includes `Mesh`, `Node`, `BoneNameList` (`0x0744` and `0x0745` variants), and `BoneInitialPos` (`0x0001`).
+- Parser handles alignment/padding-sensitive layouts for mesh/node chunks (bool fields before ints/matrices).
+- Parsed data keeps `ChunkID` links and multiple mesh chunks (`MeshChunks`, `MeshByChunkID`, `NodeByChunkID`), not only a single mesh.
+- Importer selects a primary mesh via `Node.ObjectID -> MeshChunkID` (fallback: first mesh chunk).
+- Mesh build keeps UV V-flip (`1 - v`) and groups faces into Unity submeshes by `MatID` (material count is tied to resulting submesh count).
+- `Import Skeleton` toggle exists in the importer window:
+  - ON: creates `SkinnedMeshRenderer`, applies mesh bone weights/bindposes, and builds a bone hierarchy from node data + bind-pose-derived local transforms.
+  - OFF: imports as plain `MeshFilter` + `MeshRenderer` for geometry debugging.
+- Coordinate-system/scale conversion is baked into imported data. Do not reintroduce a negative root scale or final root rotation as a shortcut; it makes prefabs hard to use and can hide bind/animation-space mismatches.
+- Caching/saving is deterministic by source virtual path:
+  - mesh: `Assets/FCData/<virtual_path_without_ext>.asset`
+  - prefab: `Assets/FCData/<virtual_path_without_ext>.prefab`
+- On import with saving enabled, existing cached prefab can be reused instead of rebuilding if compatibility checks pass (currently UV0 presence + submesh/material count).
+- Cache compatibility also checks generated mesh name/version (`CgfMeshBuilder.MeshCacheVersionName`) so older meshes are rebuilt after importer-space or skinning changes.
+
+Treat the CGF importer as incremental and format-sensitive. When changing binary parsing, cross-check against CryEngine source in `~/Documents/farcry-sources/`, especially ResourceCompiler and CryChunkedFile code.
+
+Detailed importer notes are in `~/Documents/farcry-sources/docs/OpenFarCry_Unity_CGF_CAF_Importer.md`. Read that before changing CGF/CAF transform, bind pose, bone mapping, or animation code.
+
+Known limitations (current state):
+
+- `.cga` is currently treated as geometry preview; controller/timing/`*.anm` animation pipeline is not implemented.
+- No automatic Unity `Avatar` generation or Mecanim retarget setup.
+
+## Target Architecture
+
+```text
+FCData/*.pak
+  -> FcFileSystem / PakArchive
+  -> format importers
+  -> Unity runtime objects or cached assets under Assets/FCData/
+```
+
+Planned/importer areas:
+
+- `.cgf` / `.cga` static and animated meshes
+- `.dds` textures
+- `.cry` level files
+- `.lua` scripts and mission/entity behavior
+- level PAK mounting with bind roots such as `levels/<level-name>`
+
+## Coding Conventions
+
+- Use C# namespaces matching assemblies, e.g. `OpenFarCry.FileSystem` and `OpenFarCry.Importer.Cgf`.
+- Keep runtime assemblies separate from editor-only code via `Editor/` folders and editor asmdefs.
+- Use UniTask for async Unity-facing work already following project patterns.
+- Prefer explicit binary parsing with `BinaryReader`; document offsets and chunk assumptions where the format is ambiguous.
+- Preserve path normalization semantics in VFS code: lower-case, forward slashes, trimmed leading/trailing slashes.
+- Do not commit or generate original Far Cry copyrighted data into the repository.
+- Avoid broad asset churn from Unity serialization unless the task requires changing those assets.
+
+## Useful References
+
+CryEngine source reference path:
+
+- `~/Documents/farcry-sources/CryCommon/`
+- `~/Documents/farcry-sources/ResourceCompilerPC/ChunkFileReader.cpp`
+- `~/Documents/farcry-sources/ResourceCompilerPC/CryChunkedFile.cpp`
+- `~/Documents/farcry-sources/Cry3DEngine/`
+
+Far Cry install reference path:
+
+- `~/Documents/farcry-game/FCData/*.pak`
+- `~/Documents/farcry-game/Levels/*/level.pak`
+- `~/Documents/farcry-game/Levels/*/*.cry`

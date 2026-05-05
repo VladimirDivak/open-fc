@@ -1,0 +1,10 @@
+fileFormatVersion: 2
+guid: f23e59f86535f15498687154d683da19
+timeCreated: 1729952288
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Scripts/Passes/URP/PrePassURP.cs
+  uploadId: 896260

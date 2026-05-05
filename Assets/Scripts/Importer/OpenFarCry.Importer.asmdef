@@ -1,0 +1,13 @@
+{
+    "name": "OpenFarCry.Importer",
+    "rootNamespace": "OpenFarCry.Importer",
+    "references": [
+        "OpenFarCry.FileSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "noEngineReferences": false
+}

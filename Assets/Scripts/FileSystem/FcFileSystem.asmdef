@@ -1,0 +1,17 @@
+{
+    "name": "OpenFarCry.FileSystem",
+    "rootNamespace": "OpenFarCry.FileSystem",
+    "references": [
+        "UniTask"
+    ],
+    "precompiledReferences": [
+        "Unity.SharpZipLib.dll",
+        "Sirenix.OdinInspector.Attributes.dll"
+    ],
+    "autoReferenced": true,
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "noEngineReferences": false
+}

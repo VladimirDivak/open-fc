@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: a2ed7eaf53bd83f44a4c74d84a7dd0fe
+ShaderIncludeImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Resources/HTraceAO/Headers/HMath.hlsl
+  uploadId: 896260

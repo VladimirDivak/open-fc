@@ -1,0 +1,61 @@
+# Unity generated folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# Unity generated files
+*.csproj
+*.sln
+*.slnx
+*.unityproj
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+sysinfo.txt
+
+# Unity crash/debug artifacts
+*.stackdump
+crashlytics-build.properties
+
+# IDE/editor local state
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+*.user
+*.userprefs
+*.suo
+*.tmp
+*.pid
+*.pidb.meta
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Local agent/tool state
+.agents/
+.codex/
+.claude/settings.local.json
+
+# OpenFarCry generated import cache from game PAK assets
+Assets/FCData/
+!Assets/FCData.meta
+
+# Unity per-user settings
+[Uu]ser[Ss]ettings/
+*.pdb.meta

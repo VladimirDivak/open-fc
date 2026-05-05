@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: aa8a3260a4efc624dbade1d950349253
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Sample Scene/Sample Scene AO URP/White Material.mat
+  uploadId: 896260

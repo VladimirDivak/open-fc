@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 6a851b465b35bff4ea50143492c87cb1
+ComputeShaderImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Resources/HTraceAO/Computes/HRenderSSAO.compute
+  uploadId: 896260

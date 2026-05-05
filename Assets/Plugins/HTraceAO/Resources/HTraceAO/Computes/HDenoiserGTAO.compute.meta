@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: abba56b94db9d874fa12efe3f2e96eae
+ComputeShaderImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Resources/HTraceAO/Computes/HDenoiserGTAO.compute
+  uploadId: 896260

@@ -1,0 +1,17 @@
+{
+    "name": "OpenFarCry.Importer.Editor",
+    "rootNamespace": "OpenFarCry.Importer.Editor",
+    "references": [
+        "OpenFarCry.Importer",
+        "OpenFarCry.FileSystem",
+        "OpenFarCry.FileSystem.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": false,
+    "noEngineReferences": false
+}

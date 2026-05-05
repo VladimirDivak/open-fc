@@ -1,0 +1,130 @@
+// Parts of this shader are largely based on MiniEngine shader, with some modifications. The copyright of said shader is as follow:
+//
+// Copyright (c) Microsoft. All rights reserved.
+// This code is licensed under the MIT License (MIT).
+// THIS CODE IS PROVIDED *AS IS* WITHOUT WARRANTY OF
+// ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING ANY
+// IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR
+// PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
+//
+// Developed by Minigraph
+//
+// Author:  James Stanard
+//
+
+#pragma kernel RenderOcclusion
+
+#include "../Headers/HMain.hlsl"
+
+#define TILE_DIM 16
+
+float4 _InvThicknessTable[3];
+float4 _SampleWeightTable[3];
+float2 _DepthScale;
+
+float  _RejectFadeoff;
+float _Intensity;
+
+int _SliceXR;
+int _PassNumber;
+
+H_TEXTURE_ARRAY(_DepthTiled);
+H_RW_TEXTURE(float, _Occlusion_Output);
+
+groupshared float Depth_LDS[TILE_DIM * TILE_DIM];
+
+// ------------------------ SSAO FUNCTIONS -------------------------
+float TestSamplePair(float Depth, float InvRange, uint Coord, int Offset)
+{
+    float Disocclusion1 = Depth_LDS[Coord + Offset] * InvRange - Depth;
+    float Disocclusion2 = Depth_LDS[Coord - Offset] * InvRange - Depth;
+    
+    float pseudoDisocclusion1 = saturate(_RejectFadeoff * Disocclusion1);
+    float pseudoDisocclusion2 = saturate(_RejectFadeoff * Disocclusion2);
+
+    return saturate(
+    clamp(Disocclusion1, pseudoDisocclusion2, 1.0) +
+    clamp(Disocclusion2, pseudoDisocclusion1, 1.0) -
+    pseudoDisocclusion1 * pseudoDisocclusion2);
+}
+
+float TestSamples(uint CenterCoord, uint OffsetX, uint OffsetY, float CenterDepth, float InvThickness)
+{
+    float InvRange = InvThickness * CenterDepth;
+    float Depth = InvThickness - 0.5;
+
+    if (OffsetY == 0)
+    {
+        // Axial
+        return 0.5 * (
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetX) +
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetX * TILE_DIM));
+    }
+    else if (OffsetX == OffsetY)
+    {
+        // Diagonal
+        return 0.5 * (
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetX * TILE_DIM - OffsetX) +
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetX * TILE_DIM + OffsetX));
+    }
+    else
+    {
+        // L-Shaped
+        return 0.25 * (
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetY * TILE_DIM + OffsetX) +
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetY * TILE_DIM - OffsetX) +
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetX * TILE_DIM + OffsetY) +
+        TestSamplePair(Depth, InvRange, CenterCoord, OffsetX * TILE_DIM - OffsetY));
+    }
+}
+
+
+// ------------------------ SSAO RENDER -------------------------
+[numthreads(8, 8, 1)]
+void RenderOcclusion(uint3 pixCoord : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID, uint groupIndex : SV_GroupIndex, uint groupID : SV_GroupID)
+{
+    
+    _DepthScale = ceil(_DepthScale - 1);
+
+    float4 DepthSamples;
+    DepthSamples.x = H_LOAD_ARRAY_LOD(_DepthTiled, clamp(int2(pixCoord.xy + groupThreadID.xy - 3) - int2(1,0), 0, _DepthScale), pixCoord.z, _PassNumber).x;
+    DepthSamples.y = H_LOAD_ARRAY_LOD(_DepthTiled, clamp(int2(pixCoord.xy + groupThreadID.xy - 3) - int2(0,0), 0, _DepthScale), pixCoord.z, _PassNumber).x;
+    DepthSamples.z = H_LOAD_ARRAY_LOD(_DepthTiled, clamp(int2(pixCoord.xy + groupThreadID.xy - 3) - int2(0,1), 0, _DepthScale), pixCoord.z, _PassNumber).x;
+    DepthSamples.w = H_LOAD_ARRAY_LOD(_DepthTiled, clamp(int2(pixCoord.xy + groupThreadID.xy - 3) - int2(1,1), 0, _DepthScale), pixCoord.z, _PassNumber).x;
+
+    int FlattenedSampleCoord = groupThreadID.x * 2 + groupThreadID.y * 2 * TILE_DIM;
+    Depth_LDS[FlattenedSampleCoord] = DepthSamples.w;
+    Depth_LDS[FlattenedSampleCoord + 1] = DepthSamples.z;
+    Depth_LDS[FlattenedSampleCoord + TILE_DIM] = DepthSamples.x;
+    Depth_LDS[FlattenedSampleCoord + TILE_DIM + 1] = DepthSamples.y;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    uint CenterCoord = groupThreadID.x + groupThreadID.y * TILE_DIM + 4 * TILE_DIM + 4;
+    const float CenterDepth = 1.0 / Depth_LDS[CenterCoord];
+    
+    float Occlusion = 0.0;
+    // Occlusion += _SampleWeightTable[0].y * TestSamples(CenterCoord, 2, 0, CenterDepth, _InvThicknessTable[0].y);
+    // Occlusion += _SampleWeightTable[0].w * TestSamples(CenterCoord, 4, 0, CenterDepth, _InvThicknessTable[0].w);
+    // Occlusion += _SampleWeightTable[1].x * TestSamples(CenterCoord, 1, 1, CenterDepth, _InvThicknessTable[1].x);
+    // Occlusion += _SampleWeightTable[2].x * TestSamples(CenterCoord, 2, 2, CenterDepth, _InvThicknessTable[2].x);
+    // Occlusion += _SampleWeightTable[2].w * TestSamples(CenterCoord, 3, 3, CenterDepth, _InvThicknessTable[2].w);
+    // Occlusion += _SampleWeightTable[1].z * TestSamples(CenterCoord, 1, 3, CenterDepth, _InvThicknessTable[1].z);
+    // Occlusion += _SampleWeightTable[2].z * TestSamples(CenterCoord, 2, 4, CenterDepth, _InvThicknessTable[2].z); 
+
+    Occlusion += _SampleWeightTable[0].x * TestSamples(CenterCoord, 1, 0, CenterDepth, _InvThicknessTable[0].x);
+    Occlusion += _SampleWeightTable[0].y * TestSamples(CenterCoord, 2, 0, CenterDepth, _InvThicknessTable[0].y);
+    Occlusion += _SampleWeightTable[0].z * TestSamples(CenterCoord, 3, 0, CenterDepth, _InvThicknessTable[0].z);
+    Occlusion += _SampleWeightTable[0].w * TestSamples(CenterCoord, 4, 0, CenterDepth, _InvThicknessTable[0].w);
+    Occlusion += _SampleWeightTable[1].x * TestSamples(CenterCoord, 1, 1, CenterDepth, _InvThicknessTable[1].x);
+    Occlusion += _SampleWeightTable[2].x * TestSamples(CenterCoord, 2, 2, CenterDepth, _InvThicknessTable[2].x);
+    Occlusion += _SampleWeightTable[2].w * TestSamples(CenterCoord, 3, 3, CenterDepth, _InvThicknessTable[2].w);
+    Occlusion += _SampleWeightTable[1].y * TestSamples(CenterCoord, 1, 2, CenterDepth, _InvThicknessTable[1].y);
+    Occlusion += _SampleWeightTable[1].z * TestSamples(CenterCoord, 1, 3, CenterDepth, _InvThicknessTable[1].z);
+    Occlusion += _SampleWeightTable[1].w * TestSamples(CenterCoord, 1, 4, CenterDepth, _InvThicknessTable[1].w);
+    Occlusion += _SampleWeightTable[2].y * TestSamples(CenterCoord, 2, 3, CenterDepth, _InvThicknessTable[2].y);
+    Occlusion += _SampleWeightTable[2].z * TestSamples(CenterCoord, 2, 4, CenterDepth, _InvThicknessTable[2].z);
+    
+    uint WriteIndex = _SliceXR ? floor(pixCoord.z / uint(2)) : pixCoord.z;
+    _Occlusion_Output[H_COORD(pixCoord.xy * 4 + uint2(WriteIndex % 4, WriteIndex / 4))] = lerp(1, Occlusion, _Intensity);
+}

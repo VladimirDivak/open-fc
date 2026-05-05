@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: ca78f6ef2cc06454598f9c8cfba5069a
+ComputeShaderImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Resources/HTraceAO/Computes/HDepthPyramidGTAO.compute
+  uploadId: 896260

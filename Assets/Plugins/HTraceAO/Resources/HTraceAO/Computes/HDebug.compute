@@ -1,0 +1,136 @@
+#pragma kernel Debug
+#pragma kernel SBSDraw
+
+#include "Common.hlsl"
+#include "../Headers/HMain.hlsl"
+#include "../Headers/HMath.hlsl"
+#include "../Headers/HSpaceTransforms.hlsl"
+
+#pragma multi_compile _ _GBUFFER_NORMALS_OCT
+
+uint _DebugSwitch;
+int _BuffersSwitch;
+uint _TemporalSamplecount;
+
+H_TEXTURE(_HTraceBufferAO);
+H_RW_TEXTURE(float4, _Debug_Output);
+
+
+void DebugFinal(uint3 pixCoord)
+{    
+    if (_DebugSwitch == 1)
+    {
+        if (_BuffersSwitch == 0) // Multi
+        {
+            uint2 QuadSize = _ScreenSize.xy / 2;
+            uint2 QuadIndex = pixCoord.xy / QuadSize; // (0,0), (1,0), (0,1), (1,1)
+            uint2 LocalCoord = pixCoord.xy % QuadSize;
+            uint2 SampleCoord = LocalCoord * 2;
+        
+            float4 Output = float4(0, 0, 0, 1);
+
+            if (HBUFFER_DEPTH(SampleCoord.xy) <= UNITY_RAW_FAR_CLIP_VALUE)
+            {
+                _Debug_Output[H_COORD(pixCoord.xy)] = Output;
+                return;
+            }
+            
+            if (QuadIndex.x == 0 && QuadIndex.y == 0) // Bottom Left
+            {
+                Output = float4(HBUFFER_NORMAL_WS(SampleCoord).xyz, 1);
+            }
+            else if (QuadIndex.x == 1 && QuadIndex.y == 0) // Bottom Right
+            {
+                float2 motionVector = HBUFFER_MOTION_VECTOR(SampleCoord).xy;
+                float motionMask = HBUFFER_MOTION_MASK(SampleCoord).x;
+                Output = float4(motionVector * 5, motionMask * 0.05, 1);
+            }
+            else if (QuadIndex.x == 0 && QuadIndex.y == 1) // Top Left
+            {
+                Output = float4(H_LINEAR_EYE_DEPTH(HBUFFER_DEPTH(SampleCoord).x).xxx / 20.0f, 1);
+            }
+            else if (QuadIndex.x == 1 && QuadIndex.y == 1) // Top Right
+            {
+                Output = H_LOAD(_HTraceBufferAO, SampleCoord.xy).xxxx;
+            }
+            
+            _Debug_Output[H_COORD(pixCoord.xy)] = Output;
+            return;
+        }
+        
+        if (HBUFFER_DEPTH(pixCoord.xy) <= UNITY_RAW_FAR_CLIP_VALUE)
+        {
+            _Debug_Output[H_COORD(pixCoord.xy)] = 0;
+            return;
+        }
+        
+        if (_BuffersSwitch == 1) // Depth
+        {
+            _Debug_Output[H_COORD(pixCoord.xy)] = float4(H_LINEAR_EYE_DEPTH(HBUFFER_DEPTH(pixCoord.xy).x).xxx / 20.0f, 1);
+        }
+        if (_BuffersSwitch == 3) // Normal
+        {
+            _Debug_Output[H_COORD(pixCoord.xy)] = float4(HBUFFER_NORMAL_WS(pixCoord.xy).xyz, 1);
+        }
+        if (_BuffersSwitch == 4) // Motion Mask
+        {
+            _Debug_Output[H_COORD(pixCoord.xy)] = float4(HBUFFER_MOTION_MASK(pixCoord.xy).xxx, 1);
+        }
+        if (_BuffersSwitch == 5)  // Motion Vectors
+        {
+            _Debug_Output[H_COORD(pixCoord.xy)] = float4(HBUFFER_MOTION_VECTOR(pixCoord.xy).xy * 5, 0, 1);
+        }
+    }
+
+    if (HBUFFER_DEPTH(pixCoord.xy) <= UNITY_RAW_FAR_CLIP_VALUE)
+    {
+        _Debug_Output[H_COORD(pixCoord.xy)] = 0;
+        return;
+    }
+
+    if (_DebugSwitch == 2) // AO
+    {
+        _Debug_Output[H_COORD(pixCoord.xy)] = H_LOAD(_HTraceBufferAO, pixCoord.xy).x;
+    }
+    
+    if (_DebugSwitch == 3) // Temporal Disocclusion
+    {
+        float3 TemporalDebugData = UnpackTemporalData(asuint(H_LOAD(_HTraceBufferAO, pixCoord.xy / _HScaleFactorAO).x));
+        float3 Output = TemporalDebugData.y < 2 ? float3(1,0,0) : TemporalDebugData.yyy / float(_TemporalSamplecount);
+        _Debug_Output[H_COORD(pixCoord.xy)] = float4(Output, 1);
+    }
+
+    if (_DebugSwitch == 4) // Motion Rejection Mask
+    {
+        _Debug_Output[H_COORD(pixCoord.xy)] = H_LOAD(_HTraceBufferAO, pixCoord.xy).x;
+    }
+}
+
+
+[numthreads(8, 8, 1)]
+void Debug(uint3 pixCoord : SV_DispatchThreadID)
+{
+    
+    DebugFinal(pixCoord);
+}
+
+
+float _sbsValue;
+H_TEXTURE(_TestGlobal);
+H_TEXTURE(_Input_1);
+H_TEXTURE(_Input_2);
+
+[numthreads(8, 8, 1)]
+void SBSDraw(int3 pixCoord : SV_DispatchThreadID)
+{
+    
+    float4 captureA = H_LOAD(_Input_1, pixCoord.xy); 
+    float4 captureB = H_LOAD(_Input_2, pixCoord.xy);
+    
+    float4 result = pixCoord.x < _sbsValue * _ScreenParams.x ? captureA : captureB;
+    result = pixCoord.x == int(_sbsValue * _ScreenParams.x) ? float4(0,0,0,1) : result;
+    result = pixCoord.x - 1 == int(_sbsValue * _ScreenParams.x) ? float4(0,0,0,1) : result;
+    result = pixCoord.x + 1 == int(_sbsValue * _ScreenParams.x) ? float4(0,0,0,1) : result;
+    
+    _Debug_Output[H_COORD(pixCoord.xy)] = result;
+}

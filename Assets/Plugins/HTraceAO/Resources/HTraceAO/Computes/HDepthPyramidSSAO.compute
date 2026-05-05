@@ -1,0 +1,81 @@
+#pragma kernel DepthDownsample_1
+#pragma kernel DepthDownsample_2
+
+#include "../Headers/HMain.hlsl"
+#include "../Headers/HMath.hlsl"
+#include "../Headers/HSpaceTransforms.hlsl"
+
+H_TEXTURE(_DepthIntermediate);
+
+H_RW_TEXTURE(float, _DepthPyramid_OutputMIP0);
+H_RW_TEXTURE(float, _DepthPyramid_OutputMIP1);
+H_RW_TEXTURE(float, _DepthPyramid_OutputMIP2);
+H_RW_TEXTURE(float, _DepthPyramid_OutputMIP3);
+H_RW_TEXTURE(float, _DepthIntermediate_Output);
+H_RW_TEXTURE_ARRAY(float, _DepthTiled_OutputMIP0);
+H_RW_TEXTURE_ARRAY(float, _DepthTiled_OutputMIP1);
+H_RW_TEXTURE_ARRAY(float, _DepthTiled_OutputMIP2);
+H_RW_TEXTURE_ARRAY(float, _DepthTiled_OutputMIP3);
+
+groupshared float Depth_LDS[16][16];
+
+float FetchLinearDepth(uint2 pixCoord)
+{
+    pixCoord = clamp(pixCoord, 0, _ScreenSize.xy - 1);
+    float Depth = HBUFFER_DEPTH(pixCoord);
+    Depth = Depth >= 0.9999f ? 0 : Depth;
+        
+    return H_LINEAR_01_DEPTH(Depth);
+}
+
+
+// ------------------------ DOWNSAMPLE PASS 1 ------------------------
+[numthreads(8, 8, 1)]
+void DepthDownsample_1(uint3 pixCoord : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint GroupIndex : SV_GroupIndex, uint3 groupThreadID : SV_GroupThreadID)
+{
+    
+    Depth_LDS[groupThreadID.x + 0][groupThreadID.y + 0] = FetchLinearDepth(pixCoord.xy * 2 + uint2(0, 0));
+    Depth_LDS[groupThreadID.x + 8][groupThreadID.y + 0] = FetchLinearDepth(pixCoord.xy * 2 + uint2(8, 0));
+    Depth_LDS[groupThreadID.x + 0][groupThreadID.y + 8] = FetchLinearDepth(pixCoord.xy * 2 + uint2(0, 8));
+    Depth_LDS[groupThreadID.x + 8][groupThreadID.y + 8] = FetchLinearDepth(pixCoord.xy * 2 + uint2(8, 8));
+    GroupMemoryBarrierWithGroupSync();
+    
+    float Depth = Depth_LDS[groupThreadID.x][groupThreadID.y];
+    uint Slice = (pixCoord.x % 4) + (pixCoord.y % 4) * 4;
+
+    _DepthPyramid_OutputMIP0[H_COORD(pixCoord.xy)] = Depth;
+    _DepthTiled_OutputMIP0[uint3(pixCoord.xy / 4, H_INDEX_ARRAY(Slice))] = Depth;
+
+    if (all(groupThreadID % 2 == 0)) 
+    {
+        pixCoord.xy /= 2;
+        Slice = (pixCoord.x % 4) + (pixCoord.y % 4) * 4;
+        
+        _DepthIntermediate_Output[H_COORD(pixCoord.xy)] = Depth;
+
+        _DepthPyramid_OutputMIP1[H_COORD(pixCoord.xy)] = Depth;
+        _DepthTiled_OutputMIP1[uint3(pixCoord.xy / 4, H_INDEX_ARRAY(Slice))] = Depth;
+    }
+}
+
+
+// ------------------------ DOWNSAMPLE PASS 2 ------------------------
+[numthreads(8, 8, 1)]
+void DepthDownsample_2(uint3 pixCoord : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint GroupIndex : SV_GroupIndex, uint3 groupThreadID : SV_GroupThreadID)
+{
+    
+    float Depth = H_LOAD(_DepthIntermediate, pixCoord.xy * 2).x;
+    uint Slice = (pixCoord.x % 4) + (pixCoord.y % 4) * 4;
+    
+    _DepthPyramid_OutputMIP2[H_COORD(pixCoord.xy)] = Depth;
+    _DepthTiled_OutputMIP2[uint3(pixCoord.xy / 4, H_INDEX_ARRAY(Slice))] = Depth;
+    
+    if (all(groupThreadID % 2 == 0))
+    {
+        pixCoord.xy /= 2;
+        uint Slice = (pixCoord.x % 4) + (pixCoord.y % 4) * 4;
+
+        _DepthPyramid_OutputMIP3[H_COORD(pixCoord.xy)] = Depth;
+        _DepthTiled_OutputMIP3[uint3(pixCoord.xy / 4, H_INDEX_ARRAY(Slice))] = Depth;
+    }
+}

@@ -1,0 +1,272 @@
+#pragma kernel RenderGTAO
+
+#pragma multi_compile _ TEMPORAL_ACCUMULATION
+#pragma multi_compile _ VISIBILITY_BITMASKS
+#pragma multi_compile _ VR_COMPATIBILITY
+#pragma multi_compile _ CHECKERBOARDING
+#pragma multi_compile _ FALLOFF
+
+#include "Common.hlsl"
+#include "../Headers/HMain.hlsl"
+#include "../Headers/HMath.hlsl"
+#include "../Headers/HSpaceTransforms.hlsl"
+#include "../Headers/HDRP files/RaytracingSampling.hlsl"
+#pragma multi_compile _ _GBUFFER_NORMALS_OCT
+
+int _IndexXR;
+int _StepCount;
+int _SliceCount;
+int _DepthLodOffset;
+int _Checkerboarding;
+int _TemporalSamplecount;
+
+float _Radius;
+float _Thickness;
+float _ScreenSpaceRadiusScale;
+float4 _DepthToViewParams;
+
+H_TEXTURE(_Occlusion);
+H_TEXTURE(g_DepthPyramidTexture);
+H_RW_TEXTURE(uint, _Occlusion_Output);
+H_RW_TEXTURE(float3, _NormalDownsampled_Output);
+
+RWStructuredBuffer<uint2> _TracingCoords;
+RWStructuredBuffer<uint> _RayCounter;
+
+
+// ------------------------ GTAO FUNCTIONS -------------------------
+
+// Cosine weighted arc integration
+float IntegrateArcCosineWeighted(float2 Horizons, half N)
+{
+    float2 Arc = -cos(2 * Horizons - N) + cos(N) + 2 * Horizons * sin(N);
+    return 0.25 * (Arc.x + Arc.y);
+}
+
+// Fast view-space position
+float3 GetPositionVS(float2 pixCoordNDC, float Depth, float DepthLinear)
+{
+    #ifdef VR_COMPATIBILITY
+    return ComputeViewSpacePosition(pixCoordNDC, Depth, UNITY_MATRIX_I_P) * float3(1, -1, 1);
+    #endif 
+    
+    float3 PositionVS = float3((pixCoordNDC * _DepthToViewParams.xy + _DepthToViewParams.zw) * DepthLinear, DepthLinear);
+    return PositionVS * float3(1,-1, 1);
+}
+
+// Horizon processing for non-bitmask variant
+float UpdateHorizon(uint LOD, float MinHorizon, float2 SampleCoordNDC, float2 Faloff, float3 PositionCenterVS, float3 ViewDirection)
+{
+    float DepthSample = H_SAMPLE_LOD(g_DepthPyramidTexture, H_SAMPLER_POINT_CLAMP, min(SampleCoordNDC * HRenderScale.xy, HRenderScale.xy), LOD).x * 0.99920f;
+
+    float DepthFrontLinear = H_LINEAR_EYE_DEPTH(DepthSample);
+    float3 SampleDeltaFront = GetPositionVS(SampleCoordNDC, DepthSample, DepthFrontLinear) - PositionCenterVS;
+    float SampleDist = length(float3(SampleDeltaFront.x, SampleDeltaFront.y, SampleDeltaFront.z * (1 + 2 * (1 - _Thickness))));
+    
+    float DeltaLengthSquared = dot(SampleDeltaFront, SampleDeltaFront);
+    float SampleHorizon = dot(ViewDirection, SampleDeltaFront) * rsqrt(DeltaLengthSquared); // Same as: dot(normalize(SampleDeltaFront), ViewDirection);
+    float SampleHorizonWeight = saturate(SampleDist * Faloff.x + Faloff.y);
+    
+    return lerp(MinHorizon, SampleHorizon, SampleHorizonWeight);
+}
+
+
+// Horizon processing for bitmask variant
+float2 PrepareHorizon(uint LOD, float MinHorizon, float2 SampleCoordNDC, float2 Faloff, float3 PositionCenterVS, float3 ViewDirection)
+{
+    float DepthSample = H_SAMPLE_LOD(g_DepthPyramidTexture, H_SAMPLER_POINT_CLAMP, min(SampleCoordNDC * HRenderScale.xy, HRenderScale.xy), LOD).x * 0.99920f;
+
+    float DepthFrontLinear = H_LINEAR_EYE_DEPTH(DepthSample);
+    float3 SampleDeltaFront = GetPositionVS(SampleCoordNDC, DepthSample, DepthFrontLinear) - PositionCenterVS;
+    
+    float HorizonAngle = dot(SampleDeltaFront, ViewDirection);
+    float DeltaLengthSquared = dot(SampleDeltaFront, SampleDeltaFront);
+    float2 SampleHorizon = rsqrt(float2(DeltaLengthSquared, DeltaLengthSquared + _Thickness * _Thickness - (HorizonAngle * _Thickness * 2.0f)));
+    SampleHorizon *= float2(HorizonAngle, HorizonAngle - _Thickness);
+    
+    if (FALLOFF)
+    {
+        float SampleHorizonWeight = saturate(length(SampleDeltaFront) * Faloff.x + Faloff.y);
+        SampleHorizon = lerp(MinHorizon, SampleHorizon, SampleHorizonWeight);
+    }
+    
+    return H_PI_HALF - SampleHorizon * H_PI_HALF; // acos(clamp(SampleHorizon, MinHorizon, 1));
+}
+
+// Visibility bitmask processing
+void UpdateBitmask(inout uint Bitmask, float2 HorizonSamples)
+{
+    uint2 HorizonInt = uint2(floor(HorizonSamples.xy * 32.0));
+    uint HorizonMin = HorizonInt.x < 32u ? 0xFFFFFFFFu << HorizonInt.x : 0u;
+    uint HorizonMax = HorizonInt.y != 0u ? 0xFFFFFFFFu >> (32u - HorizonInt.y) : 0u;
+    uint OccludedBits = HorizonMin & HorizonMax;            
+    Bitmask = Bitmask | OccludedBits;   
+}
+
+float2 SliceSampleNoise(uint2 pixCoord)
+{
+    float2 Noise;
+    if (TEMPORAL_ACCUMULATION)
+    {
+        uint FrameCounter = _FrameCount;
+        if (CHECKERBOARDING) FrameCounter = (FrameCounter + 1) / 2;
+        Noise.x = GetBNDSequenceSample(pixCoord.xy, FrameCounter % max(2, _TemporalSamplecount), 0);
+        Noise.y = GetBNDSequenceSample(pixCoord.xy, FrameCounter % max(2, _TemporalSamplecount), 1);
+    }
+    else
+    {
+        if (_HScaleFactorAO > 1)
+        {
+            uint Scrambling = 11;
+            uint Tile = 7;
+            uint TileDouble = Tile * Tile;
+            uint Jitter = (pixCoord.x % Tile) + (pixCoord.y % Tile) * Tile;
+            Noise.x = (((Jitter * Scrambling) % TileDouble) + 0.695f) / TileDouble;
+        }
+        else
+        {
+            Noise.x =  frac(52.9829189 * frac(dot(pixCoord.xy,  float2(0.06711056, 0.00583715))));  
+        }
+        Noise.y = GetBNDSequenceSample(pixCoord.xy, 0, 0);  
+    }
+    return Noise;
+}
+
+
+// ------------------------ GTAO RENDER -------------------------
+[numthreads(8, 8, 1)]
+void RenderGTAO(uint3 pixCoord : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex, uint groupID : SV_GroupID)
+{
+    if (CHECKERBOARDING)
+    {
+        uint RayCounterOffsetVR = 0;
+        uint IndirectCoordOffsetVR = 0;
+        
+        
+        uint RayIndex = groupID * 64 + groupIndex;
+        if (RayIndex >= _RayCounter[1 + RayCounterOffsetVR])
+            return;
+        
+        pixCoord.xy = _TracingCoords[RayIndex + IndirectCoordOffsetVR]; 
+    }
+    else
+    {
+    }
+    
+    pixCoord.xy *= _HScaleFactorAO;
+    const float2 pixCoordNDC = (pixCoord.xy + 0.5f) * _ScreenSize.zw;
+    
+    // Initialize center pixel data
+    const float DepthCenter = HBUFFER_DEPTH(pixCoord.xy);
+    const float DepthLinearCenter = H_LINEAR_EYE_DEPTH(DepthCenter * 0.999750f);
+    const float3 NormalCenterWS = HBUFFER_NORMAL_WS(pixCoord.xy);
+    const float3 NormalCenterVS = H_TRANSFORM_WORLD_TO_VIEW_NORMAL(NormalCenterWS) * float3(1, -1, -1);
+    const float3 PositionCenterVS = GetPositionVS(pixCoordNDC, DepthCenter * 0.999750f, DepthLinearCenter);
+    const float3 ViewDirection = -normalize(PositionCenterVS);
+
+    if (DepthCenter <= 1e-7)
+    {
+        _Occlusion_Output[H_COORD(pixCoord.xy / _HScaleFactorAO)] = 0;
+        return;
+    }
+    
+    // Initialize main vars
+    const float Radius = _Radius;
+    const float Distribution = 3.2;
+    const float FalloffRange = 0.6f * Radius;
+    const float FalloffFrom = Radius * (1.0f - 0.6f);
+    const float FalloffMul = -1.0f / FalloffRange;
+    const float FalloffAdd = FalloffFrom / FalloffRange + 1.0f;
+    const float SliceCount = _SliceCount;
+    const float StepCount = _StepCount;
+    
+    // Initialize noise
+    const float2 Noise = SliceSampleNoise(pixCoord.xy);
+
+    // Initialze helpers
+    const float ScreenSpaceRadius = Radius / (DepthLinearCenter * _ScreenSpaceRadiusScale);
+    const float MinStep = 1.3f / ScreenSpaceRadius;
+    const float2 Remap = float2(1.0f + 1.5f * H_PI / 32.0f, 1.5f * H_PI_HALF / 32.0f);
+    
+    float AmbientOcclusion = 0;
+    float TotalWeight = 0;
+    
+    for (int Slice = 0; Slice < SliceCount; Slice++)
+    {
+        float SliceSeed = float(Slice + Noise.x) / float(SliceCount);
+        float Phi = SliceSeed * H_PI;
+        
+        float3 SliceDirection = float3(cos(Phi), sin(Phi), 0);
+        float2 SamplingDirection = float2(SliceDirection.x, -SliceDirection.y);
+        
+        float3 OrthoDirectionVec = SliceDirection - (dot(SliceDirection, ViewDirection) * ViewDirection);
+        float3 AxisVec = normalize(cross(OrthoDirectionVec, ViewDirection));
+        float3 ProjectedNormal = NormalCenterVS - AxisVec * dot(NormalCenterVS , AxisVec);
+        float NormalSign = sign(dot(OrthoDirectionVec, ProjectedNormal));
+        float ProjectedNormalLength = length(ProjectedNormal);
+        float CosN = saturate(dot(ProjectedNormal, ViewDirection) / ProjectedNormalLength);
+        float N = NormalSign * HFastACos(CosN);
+
+        float OcclusionAccumulation = 0;
+        uint VisibilityBitmask = 0;
+        
+        float2 MaxHorizons, MinHorizons;
+        MinHorizons.x = MaxHorizons.x = cos(N - H_PI_HALF);
+        MinHorizons.y = MaxHorizons.y = cos(N + H_PI_HALF);
+        
+        for (int Step = 0; Step < StepCount; Step++)
+        {
+            float StepSeed = float(Slice + Step * StepCount);
+            float StepNoise = frac(Noise.y + StepSeed) ;
+            float StepStride = (Step + StepNoise) / (StepCount); StepStride = pow(abs(StepStride), Distribution) + MinStep;
+            float2 SampleOffset = StepStride * SamplingDirection * ScreenSpaceRadius;
+            uint DepthLOD = clamp(log2(length(SampleOffset)) - 4, 0, 4); // TODO: add lod control here?
+            SampleOffset = round(SampleOffset) * _ScreenSize.zw;
+
+            if (VISIBILITY_BITMASKS)
+            {
+                float2 HorizonSamplesA = PrepareHorizon(DepthLOD, MinHorizons.x, pixCoordNDC - SampleOffset, float2(FalloffMul, FalloffAdd), PositionCenterVS, ViewDirection);
+                float2 HorizonSamplesB = PrepareHorizon(DepthLOD, MinHorizons.y, pixCoordNDC + SampleOffset, float2(FalloffMul, FalloffAdd), PositionCenterVS, ViewDirection);
+
+                HorizonSamplesA = saturate(((N + HorizonSamplesA + H_PI_HALF) / H_PI) * Remap.x - Remap.y); 
+                HorizonSamplesA = HorizonSamplesA * HorizonSamplesA * (3.0f - 2.0f * HorizonSamplesA);
+
+                HorizonSamplesB = saturate(((N - HorizonSamplesB + H_PI_HALF) / H_PI) * Remap.x - Remap.y); 
+                HorizonSamplesB = HorizonSamplesB * HorizonSamplesB * (3.0f - 2.0f * HorizonSamplesB);
+
+                UpdateBitmask(VisibilityBitmask, HorizonSamplesA.xy);
+                UpdateBitmask(VisibilityBitmask, HorizonSamplesB.yx);
+            }
+            else
+            {
+                float2 HorizonSamples;
+                HorizonSamples.x = UpdateHorizon(DepthLOD, MinHorizons.x, pixCoordNDC - SampleOffset, float2(FalloffMul, FalloffAdd), PositionCenterVS, ViewDirection);
+                HorizonSamples.y = UpdateHorizon(DepthLOD, MinHorizons.y, pixCoordNDC + SampleOffset, float2(FalloffMul, FalloffAdd), PositionCenterVS, ViewDirection);
+                
+                MaxHorizons.x = max(MaxHorizons.x, HorizonSamples.x);
+                MaxHorizons.y = max(MaxHorizons.y, HorizonSamples.y);  
+            }
+        }
+        
+        if (VISIBILITY_BITMASKS)
+        {
+            float SliceOcclusion = float(countbits(VisibilityBitmask)) / float(32);
+            AmbientOcclusion += (1.0f - SliceOcclusion) * ProjectedNormalLength;
+            TotalWeight += ProjectedNormalLength;  
+        }
+        else
+        {
+            MaxHorizons.xy = acos(clamp(MaxHorizons.xy, -1, 1));
+            MaxHorizons.x = N + max(-MaxHorizons.x - N, -H_PI_HALF);
+            MaxHorizons.y = N + min(+MaxHorizons.y - N, H_PI_HALF);
+            
+            AmbientOcclusion += IntegrateArcCosineWeighted(MaxHorizons, N) * ProjectedNormalLength;
+            TotalWeight += 1;
+        }
+    }
+    
+    AmbientOcclusion = saturate(AmbientOcclusion / TotalWeight);
+    
+    if (TEMPORAL_ACCUMULATION) _Occlusion_Output[H_COORD(pixCoord.xy / _HScaleFactorAO)] = PackOcclusion(AmbientOcclusion);
+    else _Occlusion_Output[H_COORD(pixCoord.xy / _HScaleFactorAO)] = PackSpatialData(AmbientOcclusion, DepthCenter, NormalCenterWS);
+}

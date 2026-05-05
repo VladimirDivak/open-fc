@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 05459a5923e96114c8e40d07d180058c
+ComputeShaderImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Resources/HTraceAO/Computes/HCheckerboarding.compute
+  uploadId: 896260

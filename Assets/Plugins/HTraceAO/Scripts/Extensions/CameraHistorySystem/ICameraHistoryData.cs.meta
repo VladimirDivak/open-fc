@@ -1,0 +1,10 @@
+fileFormatVersion: 2
+guid: ba4296b789be4fb0bac401600a37741b
+timeCreated: 1754733542
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Scripts/Extensions/CameraHistorySystem/ICameraHistoryData.cs
+  uploadId: 896260

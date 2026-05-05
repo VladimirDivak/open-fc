@@ -1,0 +1,62 @@
+#pragma kernel CheckerboardClassification
+#pragma kernel IndirectArguments
+
+#include "Common.hlsl"
+#include "../Headers/HMain.hlsl"
+#include "../Headers/HMath.hlsl"
+#include "../Headers/HSpaceTransforms.hlsl"
+#include "../Headers/HDRP files/RaytracingSampling.hlsl"
+#pragma multi_compile _ _GBUFFER_NORMALS_OCT
+
+H_TEXTURE(_OcclusionReprojected);
+
+RWStructuredBuffer<uint> _RayCounter;
+RWStructuredBuffer<uint> _RayCounter_Output;
+RWStructuredBuffer<uint2> _IndirectCoords_Output;
+RWStructuredBuffer<uint> _IndirectArguments_Output;
+
+uint _RayTracedCounter;
+
+// ------------------------ CHECKERBOARD CLASSIFICATION -------------------------
+[numthreads(8, 8, 1)]
+void CheckerboardClassification(uint3 pixCoord : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID, uint groupIndex : SV_GroupIndex, uint2 groupID : SV_GroupID)
+{
+    
+    uint IndirectCoordOffsetVR = _ScreenSize.x * _ScreenSize.y * pixCoord.z / _HScaleFactorAO;
+    uint RayCounterOffsetVR = 2 * pixCoord.z;
+    
+    uint OcclusionReprojectedDataPacked = asuint(H_LOAD(_OcclusionReprojected, pixCoord.xy).x);
+    float3 OcclusionReprojectedData = UnpackTemporalData(OcclusionReprojectedDataPacked);
+    
+    bool CullCheckerboard = false;
+    if (((pixCoord.x + pixCoord.y) % 2 == 0 && uint(_FrameCount) % 2 == 0) || OcclusionReprojectedData.y <= 1)
+        CullCheckerboard = true;
+    if (((pixCoord.x + pixCoord.y) % 2 != 0 && uint(_FrameCount) % 2 != 0) || OcclusionReprojectedData.y <= 1)
+        CullCheckerboard = true;
+
+    if (CullCheckerboard)
+    {
+        uint Index = 0;
+        InterlockedAdd(_RayCounter_Output[0 + RayCounterOffsetVR], 1, Index);
+        _IndirectCoords_Output[Index + IndirectCoordOffsetVR] = pixCoord.xy; 
+    }
+}
+
+
+// ------------------------ INDIRECT ARGUMENTS GENERATION -------------------------
+[numthreads(1, 1, 1)]
+void IndirectArguments(uint3 pixCoord : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID, uint2 groupID : SV_GroupID)
+{
+    
+    uint IndirectArgumentsOffsetVR = 3 * pixCoord.z;
+    uint RayCounterOffsetVR = 2 * pixCoord.z;
+    
+    uint RayCounterBuffer = _RayCounter[0 + RayCounterOffsetVR];
+
+    _IndirectArguments_Output[0 + IndirectArgumentsOffsetVR] = _RayTracedCounter ? RayCounterBuffer : (RayCounterBuffer + 63) / 64;
+    _IndirectArguments_Output[1 + IndirectArgumentsOffsetVR] = 1;	
+    _IndirectArguments_Output[2 + IndirectArgumentsOffsetVR] = 1;
+    
+    _RayCounter[0 + RayCounterOffsetVR] = 0;
+    _RayCounter[1 + RayCounterOffsetVR] = RayCounterBuffer;
+}

@@ -1,0 +1,10 @@
+fileFormatVersion: 2
+guid: 5600559cdb514a849871864ae301200f
+timeCreated: 1675348234
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Scripts/Editor/HEditorUtils.cs
+  uploadId: 896260

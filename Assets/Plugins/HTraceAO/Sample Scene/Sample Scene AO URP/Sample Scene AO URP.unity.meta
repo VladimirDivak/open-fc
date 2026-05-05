@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 61fc6f57c54f1d3449d7a4d451b34c93
+DefaultImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Sample Scene/Sample Scene AO URP/Sample Scene AO URP.unity
+  uploadId: 896260

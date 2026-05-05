@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: d8cc1118c14afdc43adba635ff2bad47
+ShaderIncludeImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Resources/HTraceAO/Headers/HDRP files/RaytracingSampling.hlsl
+  uploadId: 896260

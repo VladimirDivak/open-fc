@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: b537e6807a5d98743854a8fc61463301
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 112000000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 306556
+  packageName: 'HTrace: Ambient Occlusion URP'
+  packageVersion: 1.4.0
+  assetPath: Assets/HTraceAO/Sample Scene/Sample Scene AO URP/Sample Scene AO URP/LightingData.asset
+  uploadId: 896260

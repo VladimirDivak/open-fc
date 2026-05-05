@@ -1,0 +1,393 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace OpenFarCry.Importer.Cgf
+{
+    public class BuildResult
+    {
+        public Mesh        Mesh;
+        public int         MeshChunkID;
+        public string      SourceNodeName;
+        public bool        HasSkeleton;
+        public string[]    BoneNames;   // null if !HasSkeleton
+        public Matrix4x4[] BindPoses;   // Unity-space inverse bind matrices
+        public int[]       BoneIdToIndex;
+        public int[]       BoneIndexToId;
+    }
+
+    public static class CgfMeshBuilder
+    {
+        public const string MeshCacheVersionName = "CGFMesh_CryLinkBind_v2";
+
+        public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
+        {
+            if (cgf.MeshChunk == null)
+                throw new InvalidOperationException("CGF file has no Mesh chunk.");
+
+            var mesh = cgf.MeshChunk;
+            var nodeTransform = Matrix4x4.identity;
+            string sourceNodeName = null;
+
+            for (int i = 0; i < cgf.NodeChunks.Count; i++)
+            {
+                var node = cgf.NodeChunks[i];
+                if (node.ObjectID == mesh.ChunkID)
+                {
+                    nodeTransform = node.Transform;
+                    sourceNodeName = node.Name;
+                    break;
+                }
+            }
+
+            var result = new BuildResult
+            {
+                MeshChunkID = mesh.ChunkID,
+                SourceNodeName = sourceNodeName,
+            };
+
+            var unityMesh = BuildMesh(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale);
+            result.Mesh   = unityMesh;
+            return result;
+        }
+
+        static Mesh BuildMesh(
+            CgfMeshChunk chunk,
+            Matrix4x4 nodeTransform,
+            CgfBoneNameListChunk boneNames,
+            CgfBoneAnimChunk boneAnim,
+            CgfBoneInitPosChunk  boneInitPos,
+            BuildResult result,
+            bool importSkeleton,
+            float importScale)
+        {
+            bool hasBones = importSkeleton && chunk.HasBoneInfo && boneNames != null && boneNames.Names.Length > 0;
+            int[] boneIdToIndex = null;
+            int[] boneIndexToId = null;
+            string[] orderedBoneNames = null;
+            if (hasBones)
+            {
+                BuildBoneIndexMapsOrIdentity(boneAnim, boneNames.Names.Length, out boneIdToIndex, out boneIndexToId);
+                orderedBoneNames = BuildOrderedBoneNames(boneNames.Names, boneIndexToId);
+            }
+
+            // Cry applies the object Node transform only to geometry that is not
+            // driven by bone links. Skinned geometry is already in skeleton space.
+            var unityNodeTransform = hasBones
+                ? Matrix4x4.identity
+                : CryTransformConversion.MatrixInImporterSpace(nodeTransform, importScale);
+            var bindGlobalsByBoneId = hasBones
+                ? BuildBindPoseGlobalMatricesByBoneId(boneInitPos, boneNames.Names.Length, importScale)
+                : null;
+
+            // --- UV remapping ---
+            var vertCache       = new Dictionary<(int pi, int ti), int>();
+            var positions       = new List<Vector3>();
+            var normals         = new List<Vector3>();
+            var uvs             = new List<Vector2>();
+            var boneWeightsList = hasBones ? new List<CryLink[]>() : null;
+
+            // Group triangle indices by MatID for submeshes
+            var submeshMap = new Dictionary<int, List<int>>();
+
+            var faces    = chunk.Faces;
+            var texFaces = chunk.TexFaces;
+            var verts    = chunk.Vertices;
+            var rawUVs   = chunk.UVs;
+
+            for (int fi = 0; fi < faces.Length; fi++)
+            {
+                int matID = faces[fi].MatID;
+                if (!submeshMap.TryGetValue(matID, out var triList))
+                {
+                    triList = new List<int>();
+                    submeshMap[matID] = triList;
+                }
+
+                int[] pi = { faces[fi].V0,    faces[fi].V1,    faces[fi].V2    };
+                int[] ti = { texFaces[fi].T0, texFaces[fi].T1, texFaces[fi].T2 };
+
+                int[] cornerOrder = { 0, 1, 2 };
+                for (int oi = 0; oi < cornerOrder.Length; oi++)
+                {
+                    int c = cornerOrder[oi];
+                    var key = (pi[c], ti[c]);
+                    if (!vertCache.TryGetValue(key, out int idx))
+                    {
+                        idx = positions.Count;
+                        var v = verts[pi[c]];
+                        var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
+                        var links = chunk.BoneLinks?[pi[c]];
+                        var pos = hasBones && TryBuildBindPositionFromLinks(links, bindGlobalsByBoneId, importScale, out var linkedBindPos)
+                            ? linkedBindPos
+                            : rawPos;
+                        var nrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
+                        positions.Add(unityNodeTransform.MultiplyPoint3x4(pos));
+                        normals.Add(unityNodeTransform.MultiplyVector(nrm).normalized);
+                        var uv = rawUVs[ti[c]];
+                        // Far Cry 1 uses DirectX UV convention (V=0 at top); flip V for Unity
+                        uvs.Add(new Vector2(uv.U, 1f - uv.V));
+                        boneWeightsList?.Add(links);
+                        vertCache[key] = idx;
+                    }
+                    triList.Add(idx);
+                }
+            }
+
+            // --- Build Unity Mesh ---
+            var mesh = new Mesh { name = MeshCacheVersionName };
+
+            if (positions.Count > 65535)
+                mesh.indexFormat = IndexFormat.UInt32;
+
+            mesh.SetVertices(positions);
+            mesh.SetNormals(normals);
+            mesh.SetUVs(0, uvs);
+
+            var sortedMatIDs = submeshMap.Keys.OrderBy(k => k).ToList();
+            mesh.subMeshCount = sortedMatIDs.Count;
+            for (int si = 0; si < sortedMatIDs.Count; si++)
+                mesh.SetTriangles(submeshMap[sortedMatIDs[si]], si);
+
+            // --- Skeleton ---
+            if (hasBones)
+            {
+                mesh.boneWeights = BuildBoneWeights(boneWeightsList, boneNames.Names.Length, boneIdToIndex);
+                result.HasSkeleton = true;
+                result.BoneNames   = orderedBoneNames;
+                result.BoneIdToIndex = boneIdToIndex;
+                result.BoneIndexToId = boneIndexToId;
+                result.BindPoses   = BuildBindPoses(boneInitPos, boneIndexToId, importScale);
+                mesh.bindposes     = result.BindPoses;
+            }
+
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        // ------------------------------------------------------------------ bone weights
+
+        static Matrix4x4[] BuildBindPoseGlobalMatricesByBoneId(CgfBoneInitPosChunk initPos, int boneCount, float scaleFactor)
+        {
+            var globals = new Matrix4x4[boneCount];
+            for (int boneId = 0; boneId < boneCount; boneId++)
+            {
+                var defaultGlobal = initPos != null && boneId >= 0 && boneId < initPos.BindMatrices.Length
+                    ? initPos.BindMatrices[boneId]
+                    : Matrix4x4.identity;
+
+                globals[boneId] = CryTransformConversion.RemoveScale(
+                    CryTransformConversion.MatrixInImporterSpace(defaultGlobal, scaleFactor));
+            }
+
+            return globals;
+        }
+
+        static bool TryBuildBindPositionFromLinks(
+            CryLink[] links,
+            Matrix4x4[] bindGlobalsByBoneId,
+            float importScale,
+            out Vector3 position)
+        {
+            position = Vector3.zero;
+            if (links == null || links.Length == 0 || bindGlobalsByBoneId == null || bindGlobalsByBoneId.Length == 0)
+                return false;
+
+            // CryEngine skins from per-link bone-local offsets:
+            //   vertex = sum(boneGlobal.TransformPointOLD(link.offset) * link.Blending)
+            // Unity stores one bind vertex plus up to four BoneWeight entries, so build
+            // the imported vertex from the same top-four normalized influences we assign.
+            var sorted = links.OrderByDescending(l => l.Blending).ToArray();
+            int used = Mathf.Min(4, sorted.Length);
+
+            float topTotal = 0f;
+            for (int i = 0; i < used; i++)
+            {
+                int boneId = sorted[i].BoneID;
+                if (boneId >= 0 && boneId < bindGlobalsByBoneId.Length)
+                    topTotal += sorted[i].Blending;
+            }
+
+            if (topTotal < float.Epsilon)
+                return false;
+
+            float norm = 1f / topTotal;
+            for (int i = 0; i < used; i++)
+            {
+                var link = sorted[i];
+                int boneId = link.BoneID;
+                if (boneId < 0 || boneId >= bindGlobalsByBoneId.Length)
+                    continue;
+
+                var offset = CryTransformConversion.PositionInImporterSpace(new Vector3(link.OX, link.OY, link.OZ), importScale);
+                position += bindGlobalsByBoneId[boneId].MultiplyPoint3x4(offset) * (link.Blending * norm);
+            }
+
+            return true;
+        }
+
+        static BoneWeight[] BuildBoneWeights(List<CryLink[]> weightsList, int boneCount, int[] boneIdToIndex)
+        {
+            var boneWeights = new BoneWeight[weightsList.Count];
+            for (int vi = 0; vi < weightsList.Count; vi++)
+            {
+                var links = weightsList[vi];
+                if (links == null || links.Length == 0)
+                {
+                    boneWeights[vi] = new BoneWeight { boneIndex0 = 0, weight0 = 1f };
+                    continue;
+                }
+
+                var sorted = links.OrderByDescending(l => l.Blending).ToArray();
+                int used = Mathf.Min(4, sorted.Length);
+
+                float topTotal = 0f;
+                for (int i = 0; i < used; i++)
+                    topTotal += sorted[i].Blending;
+                if (topTotal < float.Epsilon) topTotal = 1f;
+                float norm = 1f / topTotal;
+
+                var bw = new BoneWeight();
+
+                if (used > 0) { bw.boneIndex0 = RemapBone(sorted[0].BoneID, boneCount, boneIdToIndex); bw.weight0 = sorted[0].Blending * norm; }
+                if (used > 1) { bw.boneIndex1 = RemapBone(sorted[1].BoneID, boneCount, boneIdToIndex); bw.weight1 = sorted[1].Blending * norm; }
+                if (used > 2) { bw.boneIndex2 = RemapBone(sorted[2].BoneID, boneCount, boneIdToIndex); bw.weight2 = sorted[2].Blending * norm; }
+                if (used > 3) { bw.boneIndex3 = RemapBone(sorted[3].BoneID, boneCount, boneIdToIndex); bw.weight3 = sorted[3].Blending * norm; }
+
+                boneWeights[vi] = bw;
+            }
+            return boneWeights;
+        }
+
+        static int RemapBone(int boneId, int count, int[] boneIdToIndex)
+        {
+            if (boneIdToIndex != null && boneId >= 0 && boneId < boneIdToIndex.Length && boneIdToIndex[boneId] >= 0)
+                return boneIdToIndex[boneId];
+
+            return Mathf.Clamp(boneId, 0, count - 1);
+        }
+
+        // ------------------------------------------------------------------ bind poses
+
+        static Matrix4x4[] BuildBindPoses(CgfBoneInitPosChunk initPos, int[] boneIndexToId, float scaleFactor)
+        {
+            int boneCount = boneIndexToId?.Length ?? 0;
+            var poses = new Matrix4x4[boneCount];
+
+            for (int boneIndex = 0; boneIndex < boneCount; boneIndex++)
+            {
+                int boneId = boneIndexToId[boneIndex];
+                var defaultGlobal = (initPos != null && boneId >= 0 && boneId < initPos.BindMatrices.Length)
+                    ? initPos.BindMatrices[boneId]
+                    : Matrix4x4.identity;
+
+                defaultGlobal = CryTransformConversion.MatrixInImporterSpace(defaultGlobal, scaleFactor);
+                defaultGlobal = CryTransformConversion.RemoveScale(defaultGlobal);
+                poses[boneIndex] = defaultGlobal.inverse;
+            }
+            return poses;
+        }
+
+        static string[] BuildOrderedBoneNames(string[] namesByBoneId, int[] boneIndexToId)
+        {
+            var ordered = new string[boneIndexToId.Length];
+            for (int boneIndex = 0; boneIndex < ordered.Length; boneIndex++)
+            {
+                int boneId = boneIndexToId[boneIndex];
+                ordered[boneIndex] = boneId >= 0 && boneId < namesByBoneId.Length
+                    ? namesByBoneId[boneId]
+                    : $"bone_{boneIndex}";
+            }
+
+            return ordered;
+        }
+
+        static void BuildBoneIndexMapsOrIdentity(
+            CgfBoneAnimChunk boneAnim,
+            int boneCount,
+            out int[] boneIdToIndex,
+            out int[] boneIndexToId)
+        {
+            if (TryBuildBoneIndexMaps(boneAnim, boneCount, out boneIdToIndex, out boneIndexToId))
+                return;
+
+            boneIdToIndex = new int[boneCount];
+            boneIndexToId = new int[boneCount];
+            for (int i = 0; i < boneCount; i++)
+            {
+                boneIdToIndex[i] = i;
+                boneIndexToId[i] = i;
+            }
+        }
+
+        public static bool TryBuildBoneIndexMaps(
+            CgfBoneAnimChunk boneAnim,
+            int boneCount,
+            out int[] boneIdToIndex,
+            out int[] boneIndexToId)
+        {
+            var idToIndex = new int[boneCount];
+            var indexToId = new int[boneCount];
+            for (int i = 0; i < boneCount; i++)
+            {
+                idToIndex[i] = -1;
+                indexToId[i] = -1;
+            }
+
+            boneIdToIndex = idToIndex;
+            boneIndexToId = indexToId;
+
+            var entities = boneAnim?.Bones;
+            if (entities == null || entities.Length != boneCount || boneCount == 0)
+                return false;
+
+            int cursor = 0;
+            int nextBoneIndex = 0;
+
+            int Allocate(int count)
+            {
+                if (count < 0 || nextBoneIndex + count > boneCount)
+                    return -1;
+
+                int result = nextBoneIndex;
+                nextBoneIndex += count;
+                return result;
+            }
+
+            bool LoadSubtree(int boneIndex)
+            {
+                if (cursor < 0 || cursor >= entities.Length || boneIndex < 0 || boneIndex >= boneCount)
+                    return false;
+
+                var entity = entities[cursor++];
+                int boneId = entity.BoneID;
+                if (boneId < 0 || boneId >= boneCount)
+                    return false;
+
+                idToIndex[boneId] = boneIndex;
+                indexToId[boneIndex] = boneId;
+
+                int children = Mathf.Max(0, entity.ChildrenCount);
+                if (children == 0)
+                    return true;
+
+                int childrenBase = Allocate(children);
+                if (childrenBase < 0)
+                    return false;
+
+                for (int i = 0; i < children; i++)
+                {
+                    if (!LoadSubtree(childrenBase + i))
+                        return false;
+                }
+
+                return true;
+            }
+
+            int rootIndex = Allocate(1);
+            return rootIndex == 0 && LoadSubtree(rootIndex) && cursor == entities.Length;
+        }
+    }
+}
