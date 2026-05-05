@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using OpenFarCry.FileSystem;
 using OpenFarCry.Importer.Cgf;
 using UnityEditor;
@@ -33,6 +34,8 @@ namespace OpenFarCry.Importer.Editor
         bool   _importSkeleton = true;
         bool   _importAnimations = true;
         float  _importScale = 0.01f;
+        CgfRigCachePolicy _rigCachePolicy;
+        string _rigCacheNote;
 
         readonly struct AnimSourceEntry
         {
@@ -50,6 +53,7 @@ namespace OpenFarCry.Importer.Editor
         {
             public string Alias;
             public AnimationClip Clip;
+            public string SharedCacheKey;
         }
 
         // ------------------------------------------------------------------ style cache
@@ -68,7 +72,11 @@ namespace OpenFarCry.Importer.Editor
 
         // ------------------------------------------------------------------ lifecycle
 
-        void OnEnable() => RefreshFileList();
+        void OnEnable()
+        {
+            ReloadRigCachePolicy();
+            RefreshFileList();
+        }
 
         void OnGUI()
         {
@@ -261,6 +269,12 @@ namespace OpenFarCry.Importer.Editor
             _importScale = EditorGUILayout.FloatField("Scale", _importScale);
             if (_importScale <= 0f)
                 _importScale = 0.0001f;
+
+            EditorGUILayout.Space(4f);
+            EditorGUILayout.LabelField("Rig Cache", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Mode:", _rigCachePolicy.Mode.ToString());
+            if (!string.IsNullOrEmpty(_rigCacheNote))
+                EditorGUILayout.HelpBox(_rigCacheNote, MessageType.None);
         }
 
         void DrawActionButtons()
@@ -418,6 +432,9 @@ namespace OpenFarCry.Importer.Editor
 
         void LoadToScene()
         {
+            ReloadRigCachePolicy();
+            _rigCacheNote = null;
+
             if (!_importAnimations && TryInstantiateCachedPrefab(out var cached))
             {
                 Selection.activeGameObject = cached;
@@ -438,13 +455,43 @@ namespace OpenFarCry.Importer.Editor
                 return;
             }
 
+            CgfRigDefinition rigDefinition = null;
+            if (result.HasSkeleton && CgfRigSnapshotBuilder.TryBuild(_parsedFile, result, _parsedPath, out var snapshot))
+            {
+                rigDefinition = CgfRigRegistry.ResolveOrCreate(
+                    snapshot,
+                    _rigCachePolicy,
+                    allowProjectWrite: _saveToProject,
+                    out bool createdNow,
+                    out var matchMode);
+
+                if (rigDefinition != null)
+                {
+                    switch (matchMode)
+                    {
+                        case CgfRigRegistry.ResolveMatchMode.Created:
+                            _rigCacheNote = $"Rig snapshot создан: {snapshot.RigFingerprint}";
+                            break;
+                        case CgfRigRegistry.ResolveMatchMode.AnimationCompatible:
+                            _rigCacheNote =
+                                $"Rig snapshot переиспользован по animation-compatible fingerprint: {rigDefinition.RigFingerprint}";
+                            break;
+                        default:
+                            _rigCacheNote = createdNow
+                                ? $"Rig snapshot создан: {snapshot.RigFingerprint}"
+                                : $"Rig snapshot переиспользован: {snapshot.RigFingerprint}";
+                            break;
+                    }
+                }
+            }
+
             string baseName = Path.GetFileNameWithoutExtension(_parsedPath);
-            var go = BuildGameObject(result, _parsedFile, baseName);
+            var go = BuildGameObject(result, _parsedFile, rigDefinition, baseName);
 
             List<ImportedAnimationClip> importedClips = null;
             if (_importAnimations)
             {
-                importedClips = TryAttachAnimations(go, _parsedFile, _parsedPath, _importScale);
+                importedClips = TryAttachAnimations(go, _parsedFile, rigDefinition, _parsedPath, _importScale);
             }
 
             ApplyPostTransform(go);
@@ -516,14 +563,14 @@ namespace OpenFarCry.Importer.Editor
             return true;
         }
 
-        GameObject BuildGameObject(BuildResult result, CgfFile parsedFile, string name)
+        GameObject BuildGameObject(BuildResult result, CgfFile parsedFile, CgfRigDefinition rigDefinition, string name)
         {
             var go = new GameObject(name);
             Undo.RegisterCreatedObjectUndo(go, "Import CGF");
 
             if (result.HasSkeleton)
             {
-                var boneTransforms = CreateBoneTransforms(parsedFile, result, go.transform);
+                var boneTransforms = CreateBoneTransforms(parsedFile, result, rigDefinition, go.transform);
                 var smr = go.AddComponent<SkinnedMeshRenderer>();
                 smr.sharedMesh      = result.Mesh;
                 smr.bones           = boneTransforms;
@@ -544,17 +591,28 @@ namespace OpenFarCry.Importer.Editor
             return go;
         }
 
-        List<ImportedAnimationClip> TryAttachAnimations(GameObject go, CgfFile parsedFile, string modelVirtualPath, float importScale)
+        List<ImportedAnimationClip> TryAttachAnimations(
+            GameObject go,
+            CgfFile parsedFile,
+            CgfRigDefinition rigDefinition,
+            string modelVirtualPath,
+            float importScale)
         {
             var smr = go.GetComponent<SkinnedMeshRenderer>();
             if (smr == null || smr.bones == null || smr.bones.Length == 0)
                 return null;
-            if (parsedFile?.BoneNames?.Names == null || parsedFile.BoneNames.Names.Length == 0)
-                return null;
-            if (parsedFile.BoneAnim?.Bones == null || parsedFile.BoneAnim.Bones.Length == 0)
+            bool hasRigSnapshotControllers = rigDefinition != null &&
+                rigDefinition.IsValid &&
+                rigDefinition.ControllerIdsByBoneIndex != null &&
+                rigDefinition.ControllerIdsByBoneIndex.Length > 0;
+            bool hasParsedBoneAnim = parsedFile?.BoneNames?.Names != null &&
+                parsedFile.BoneNames.Names.Length > 0 &&
+                parsedFile.BoneAnim?.Bones != null &&
+                parsedFile.BoneAnim.Bones.Length > 0;
+            if (!hasRigSnapshotControllers && !hasParsedBoneAnim)
                 return null;
 
-            var controllerToPath = BuildControllerPathMap(go.transform, smr.bones, parsedFile);
+            var controllerToPath = BuildControllerPathMap(go.transform, smr.bones, parsedFile, rigDefinition);
             if (controllerToPath.Count == 0)
                 return null;
 
@@ -589,7 +647,8 @@ namespace OpenFarCry.Importer.Editor
                     imported.Add(new ImportedAnimationClip
                     {
                         Alias = source.Alias,
-                        Clip = clip
+                        Clip = clip,
+                        SharedCacheKey = BuildSharedAnimationClipContentKey(clip)
                     });
                 }
                 catch (Exception e)
@@ -631,7 +690,104 @@ namespace OpenFarCry.Importer.Editor
             return imported;
         }
 
-        static Dictionary<uint, string> BuildControllerPathMap(Transform root, Transform[] bones, CgfFile parsedFile)
+        static string BuildSharedAnimationClipContentKey(AnimationClip clip)
+        {
+            if (clip == null)
+                return Hash128.Compute("anim-clip-v2|null").ToString();
+
+            var sb = new StringBuilder(4096);
+            sb.Append("anim-clip-v2|");
+            sb.Append(clip.legacy ? "1" : "0").Append('|');
+            sb.Append((int)clip.wrapMode).Append('|');
+
+            var curveBindings = AnimationUtility.GetCurveBindings(clip)
+                .OrderBy(b => b.path, StringComparer.Ordinal)
+                .ThenBy(b => b.type != null ? b.type.FullName : string.Empty, StringComparer.Ordinal)
+                .ThenBy(b => b.propertyName, StringComparer.Ordinal)
+                .ToArray();
+
+            for (int i = 0; i < curveBindings.Length; i++)
+            {
+                var binding = curveBindings[i];
+                sb.Append((binding.path ?? string.Empty).ToLowerInvariant()).Append('|');
+                sb.Append(binding.type != null ? binding.type.FullName : string.Empty).Append('|');
+                sb.Append(binding.propertyName ?? string.Empty).Append('|');
+
+                var curve = AnimationUtility.GetEditorCurve(clip, binding);
+                AppendCurveSignature(sb, curve);
+                sb.Append(';');
+            }
+
+            var objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(clip)
+                .OrderBy(b => b.path, StringComparer.Ordinal)
+                .ThenBy(b => b.type != null ? b.type.FullName : string.Empty, StringComparer.Ordinal)
+                .ThenBy(b => b.propertyName, StringComparer.Ordinal)
+                .ToArray();
+
+            for (int i = 0; i < objectBindings.Length; i++)
+            {
+                var binding = objectBindings[i];
+                sb.Append("obj|");
+                sb.Append((binding.path ?? string.Empty).ToLowerInvariant()).Append('|');
+                sb.Append(binding.type != null ? binding.type.FullName : string.Empty).Append('|');
+                sb.Append(binding.propertyName ?? string.Empty).Append('|');
+
+                var keys = AnimationUtility.GetObjectReferenceCurve(clip, binding);
+                if (keys == null || keys.Length == 0)
+                {
+                    sb.Append("0;");
+                    continue;
+                }
+
+                sb.Append(keys.Length).Append('|');
+                for (int k = 0; k < keys.Length; k++)
+                {
+                    var key = keys[k];
+                    AppendQuantizedFloat(sb, key.time);
+                    sb.Append('=');
+                    sb.Append(key.value != null ? key.value.name : "<null>");
+                    sb.Append(',');
+                }
+                sb.Append(';');
+            }
+
+            return Hash128.Compute(sb.ToString()).ToString();
+        }
+
+        static void AppendCurveSignature(StringBuilder sb, AnimationCurve curve)
+        {
+            if (curve == null || curve.keys == null || curve.keys.Length == 0)
+            {
+                sb.Append("0");
+                return;
+            }
+
+            var keys = curve.keys;
+            sb.Append(keys.Length).Append('|');
+            for (int i = 0; i < keys.Length; i++)
+            {
+                var key = keys[i];
+                AppendQuantizedFloat(sb, key.time);
+                AppendQuantizedFloat(sb, key.value);
+                AppendQuantizedFloat(sb, key.inTangent);
+                AppendQuantizedFloat(sb, key.outTangent);
+                AppendQuantizedFloat(sb, key.inWeight);
+                AppendQuantizedFloat(sb, key.outWeight);
+                sb.Append((int)key.weightedMode).Append(',');
+            }
+        }
+
+        static void AppendQuantizedFloat(StringBuilder sb, float value)
+        {
+            int q = Mathf.RoundToInt(value * 1000000f);
+            sb.Append(q).Append(',');
+        }
+
+        static Dictionary<uint, string> BuildControllerPathMap(
+            Transform root,
+            Transform[] bones,
+            CgfFile parsedFile,
+            CgfRigDefinition rigDefinition)
         {
             var pathByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < bones.Length; i++)
@@ -643,8 +799,31 @@ namespace OpenFarCry.Importer.Editor
             }
 
             var map = new Dictionary<uint, string>();
-            var boneNames = parsedFile.BoneNames?.Names;
-            var entities = parsedFile.BoneAnim?.Bones;
+            if (rigDefinition != null &&
+                rigDefinition.IsValid &&
+                rigDefinition.ControllerIdsByBoneIndex != null &&
+                rigDefinition.BoneNames != null &&
+                rigDefinition.BoneNames.Length == rigDefinition.ControllerIdsByBoneIndex.Length)
+            {
+                for (int i = 0; i < rigDefinition.BoneNames.Length; i++)
+                {
+                    uint controllerId = rigDefinition.ControllerIdsByBoneIndex[i];
+                    if (controllerId == 0)
+                        continue;
+                    string boneName = rigDefinition.BoneNames[i];
+                    if (string.IsNullOrEmpty(boneName))
+                        continue;
+                    if (!pathByName.TryGetValue(boneName, out var path))
+                        continue;
+                    map[controllerId] = path;
+                }
+
+                if (map.Count > 0)
+                    return map;
+            }
+
+            var boneNames = parsedFile?.BoneNames?.Names;
+            var entities = parsedFile?.BoneAnim?.Bones;
             if (boneNames == null || entities == null)
                 return map;
 
@@ -664,6 +843,12 @@ namespace OpenFarCry.Importer.Editor
             }
 
             return map;
+        }
+
+        void ReloadRigCachePolicy()
+        {
+            var settings = CgfRigCacheSettings.LoadOrDefault();
+            _rigCachePolicy = CgfRigCachePolicyResolver.Resolve(settings);
         }
 
         static string GetTransformPath(Transform root, Transform target)
@@ -695,13 +880,12 @@ namespace OpenFarCry.Importer.Editor
             if (caf == null || caf.Tracks == null || caf.Tracks.Count == 0)
                 return null;
 
+            bool shouldLoop = ShouldTreatClipAsLoop(alias, caf, controllerToPath, importScale);
             var clip = new AnimationClip
             {
                 name = alias,
                 legacy = true,
-                wrapMode = alias.IndexOf("loop", StringComparison.OrdinalIgnoreCase) >= 0
-                    ? WrapMode.Loop
-                    : WrapMode.Once
+                wrapMode = shouldLoop ? WrapMode.Loop : WrapMode.Once
             };
 
             int baseTick = caf.GlobalStartTick;
@@ -734,7 +918,164 @@ namespace OpenFarCry.Importer.Editor
                 clipsWithMissingControllers++;
 
             clip.EnsureQuaternionContinuity();
+            ApplyLoopSettings(clip, shouldLoop);
             return clip;
+        }
+
+        static bool ShouldTreatClipAsLoop(
+            string alias,
+            CafFile caf,
+            Dictionary<uint, string> controllerToPath,
+            float importScale)
+        {
+            if (!string.IsNullOrEmpty(alias))
+            {
+                if (alias.IndexOf("loop", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+                if (HasOneShotAliasHint(alias))
+                    return false;
+            }
+
+            if (caf?.Tracks == null || caf.Tracks.Count == 0)
+                return false;
+
+            int considered = 0;
+            int loopLike = 0;
+            for (int i = 0; i < caf.Tracks.Count; i++)
+            {
+                var track = caf.Tracks[i];
+                if (track?.Ticks == null || track.Positions == null || track.Rotations == null)
+                    continue;
+                if (track.Ticks.Length < 2 || track.Positions.Length < 2 || track.Rotations.Length < 2)
+                    continue;
+
+                if (controllerToPath != null && controllerToPath.Count > 0)
+                {
+                    if (!controllerToPath.TryGetValue(track.ControllerID, out var path))
+                        continue;
+                    // Ignore root motion track for loop detection; it often drifts by design.
+                    if (string.IsNullOrEmpty(path) || path.Equals("Bip01", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+
+                considered++;
+                if (IsTrackLoopLike(track, importScale))
+                    loopLike++;
+            }
+
+            if (considered == 0)
+                return HasIdleLikeAliasHint(alias);
+
+            float ratio = (float)loopLike / considered;
+            if (HasIdleLikeAliasHint(alias) && ratio >= 0.4f)
+                return true;
+
+            if (considered < 3)
+                return loopLike == considered;
+
+            return ratio >= 0.72f;
+        }
+
+        static bool IsTrackLoopLike(CafControllerTrack track, float importScale)
+        {
+            int last = Mathf.Min(track.Ticks.Length, track.Positions.Length, track.Rotations.Length) - 1;
+            if (last <= 0)
+                return false;
+
+            Vector3 p0 = track.Positions[0];
+            Vector3 p1 = track.Positions[last];
+            float posDelta = (p1 - p0).magnitude * importScale;
+
+            Vector3 min = p0;
+            Vector3 max = p0;
+            for (int i = 1; i <= last; i++)
+            {
+                Vector3 p = track.Positions[i];
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
+
+            float posRange = (max - min).magnitude * importScale;
+            float posTolerance = posRange < 0.001f
+                ? 0.004f
+                : Mathf.Max(0.008f, posRange * 0.2f);
+            bool posLoopLike = posDelta <= posTolerance;
+
+            Quaternion r0 = track.Rotations[0];
+            Quaternion r1 = track.Rotations[last];
+            if (Quaternion.Dot(r0, r1) < 0f)
+                r1 = new Quaternion(-r1.x, -r1.y, -r1.z, -r1.w);
+            float rotDelta = Quaternion.Angle(r0, r1);
+
+            float rotRange = 0f;
+            for (int i = 1; i <= last; i++)
+                rotRange = Mathf.Max(rotRange, Quaternion.Angle(r0, track.Rotations[i]));
+
+            float rotTolerance = rotRange < 4f
+                ? 4f
+                : Mathf.Max(7f, rotRange * 0.25f);
+            bool rotLoopLike = rotDelta <= rotTolerance;
+
+            return posLoopLike && rotLoopLike;
+        }
+
+        static bool HasIdleLikeAliasHint(string alias)
+        {
+            if (string.IsNullOrEmpty(alias))
+                return false;
+
+            return alias.IndexOf("idle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   alias.IndexOf("walk", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   alias.IndexOf("run", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   alias.IndexOf("sidle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   alias.IndexOf("rotate", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   alias.IndexOf("swim", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        static bool HasOneShotAliasHint(string alias)
+        {
+            if (string.IsNullOrEmpty(alias))
+                return false;
+
+            string lower = alias.ToLowerInvariant();
+            if (lower.Contains("jump") ||
+                lower.Contains("reload") ||
+                lower.Contains("pain") ||
+                lower.Contains("death") ||
+                lower.Contains("grenade") ||
+                lower.Contains("throw"))
+            {
+                return true;
+            }
+
+            var tokens = lower.Split(new[] { '_', '-', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                string t = tokens[i];
+                if (t == "hit" || t == "in" || t == "out" || t == "start" || t == "end")
+                    return true;
+            }
+
+            return false;
+        }
+
+        static void ApplyLoopSettings(AnimationClip clip, bool shouldLoop)
+        {
+            if (clip == null)
+                return;
+
+            clip.wrapMode = shouldLoop ? WrapMode.Loop : WrapMode.Once;
+
+            try
+            {
+                var settings = AnimationUtility.GetAnimationClipSettings(clip);
+                settings.loopTime = shouldLoop;
+                AnimationUtility.SetAnimationClipSettings(clip, settings);
+            }
+            catch
+            {
+                // Keep importer resilient across Unity API variants.
+            }
         }
 
         static string FormatControllerIdSummary(Dictionary<uint, int> ids)
@@ -934,10 +1275,22 @@ namespace OpenFarCry.Importer.Editor
             return ext > 0 ? virtualPath.Substring(0, ext) : virtualPath;
         }
 
-        static Transform[] CreateBoneTransforms(CgfFile parsedFile, BuildResult result, Transform root)
+        static Transform[] CreateBoneTransforms(
+            CgfFile parsedFile,
+            BuildResult result,
+            CgfRigDefinition rigDefinition,
+            Transform root)
         {
             string[] boneNames = result.BoneNames;
             Matrix4x4[] bindPoses = result.BindPoses;
+            bool rigStructCompatible =
+                TryUseRigDefinitionForSkeleton(result, rigDefinition, out var cachedBoneNames, out var cachedBindPoses);
+            if (rigStructCompatible)
+            {
+                boneNames = cachedBoneNames;
+                bindPoses = cachedBindPoses;
+            }
+
             var transforms = new Transform[boneNames.Length];
 
             for (int i = 0; i < boneNames.Length; i++)
@@ -948,7 +1301,11 @@ namespace OpenFarCry.Importer.Editor
                 transforms[i] = boneGo.transform;
             }
 
-            bool hierarchyBuilt = TryBuildHierarchyFromBoneAnim(parsedFile, transforms);
+            bool hierarchyBuilt = false;
+            if (rigStructCompatible && rigDefinition != null && rigDefinition.IsValid)
+                hierarchyBuilt = TryBuildHierarchyFromRigDefinition(rigDefinition, transforms);
+            if (!hierarchyBuilt)
+                hierarchyBuilt = TryBuildHierarchyFromBoneAnim(parsedFile, transforms);
             if (!hierarchyBuilt)
                 TryBuildHierarchyFromNodes(parsedFile, boneNames, transforms);
 
@@ -976,6 +1333,69 @@ namespace OpenFarCry.Importer.Editor
             }
 
             return transforms;
+        }
+
+        static bool TryUseRigDefinitionForSkeleton(
+            BuildResult result,
+            CgfRigDefinition rigDefinition,
+            out string[] boneNames,
+            out Matrix4x4[] bindPoses)
+        {
+            boneNames = result.BoneNames;
+            bindPoses = result.BindPoses;
+
+            if (rigDefinition == null || !rigDefinition.IsValid)
+                return false;
+            if (rigDefinition.BoneNames == null || rigDefinition.BindPoses == null)
+                return false;
+            if (rigDefinition.BoneNames.Length != result.BoneNames.Length)
+                return false;
+            if (rigDefinition.BindPoses.Length != result.BoneNames.Length)
+                return false;
+            if (rigDefinition.BoneIndexToId != null && result.BoneIndexToId != null &&
+                rigDefinition.BoneIndexToId.Length == result.BoneIndexToId.Length)
+            {
+                for (int i = 0; i < result.BoneIndexToId.Length; i++)
+                {
+                    if (rigDefinition.BoneIndexToId[i] != result.BoneIndexToId[i])
+                        return false;
+                }
+            }
+
+            for (int i = 0; i < result.BoneNames.Length; i++)
+            {
+                if (!string.Equals(rigDefinition.BoneNames[i], result.BoneNames[i], StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            boneNames = rigDefinition.BoneNames;
+            bindPoses = rigDefinition.BindPoses;
+            return true;
+        }
+
+        static bool TryBuildHierarchyFromRigDefinition(CgfRigDefinition rigDefinition, Transform[] transforms)
+        {
+            var parentIndices = rigDefinition?.ParentIndices;
+            if (parentIndices == null || parentIndices.Length != transforms.Length)
+                return false;
+
+            bool anyParentAssigned = false;
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                int parentIndex = parentIndices[i];
+                if (parentIndex < 0 || parentIndex >= transforms.Length || parentIndex == i)
+                    continue;
+
+                var child = transforms[i];
+                var parent = transforms[parentIndex];
+                if (child == null || parent == null || child == parent)
+                    continue;
+
+                child.SetParent(parent, worldPositionStays: false);
+                anyParentAssigned = true;
+            }
+
+            return anyParentAssigned;
         }
 
         static bool TryBuildHierarchyFromBoneAnim(CgfFile parsedFile, Transform[] transforms)
@@ -1176,21 +1596,35 @@ namespace OpenFarCry.Importer.Editor
                 if (src?.Clip == null || string.IsNullOrEmpty(src.Alias))
                     continue;
 
-                string clipPath = GetAnimationAssetPath(meshPath, src.Alias);
-                var existingClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
-                if (existingClip != null)
-                    AssetDatabase.DeleteAsset(clipPath);
+                string cacheKey = string.IsNullOrWhiteSpace(src.SharedCacheKey)
+                    ? BuildSharedAnimationClipContentKey(src.Clip)
+                    : src.SharedCacheKey;
+                string sharedClipPath = OpenFarCry.Importer.ImportAssetPaths.GetSharedAnimationClipPath(cacheKey, src.Alias);
+                EnsureDirectory(Path.GetDirectoryName(sharedClipPath));
 
-                AssetDatabase.CreateAsset(src.Clip, clipPath);
-                var savedClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
-                if (savedClip == null)
+                var sharedClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(sharedClipPath);
+                if (sharedClip == null)
+                {
+                    AssetDatabase.CreateAsset(src.Clip, sharedClipPath);
+                    sharedClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(sharedClipPath);
+                }
+                if (sharedClip == null)
                     continue;
 
-                animation.AddClip(savedClip, src.Alias);
+                animation.AddClip(sharedClip, src.Alias);
 
                 if (defaultClip == null ||
                     string.Equals(src.Alias, "default", StringComparison.OrdinalIgnoreCase))
-                    defaultClip = savedClip;
+                    defaultClip = sharedClip;
+
+                // Cleanup old per-character duplicate clip path if it exists.
+                string legacyClipPath = GetAnimationAssetPath(meshPath, src.Alias);
+                if (!string.Equals(legacyClipPath, sharedClipPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    var legacyClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(legacyClipPath);
+                    if (legacyClip != null)
+                        AssetDatabase.DeleteAsset(legacyClipPath);
+                }
             }
 
             if (defaultClip != null)
@@ -1210,14 +1644,7 @@ namespace OpenFarCry.Importer.Editor
 
         static (string meshPath, string prefabPath) GetCachePaths(string virtualPath)
         {
-            string normalized = virtualPath.Replace('\\', '/').TrimStart('/');
-            int ext = normalized.LastIndexOf('.');
-            string noExt = ext > 0 ? normalized.Substring(0, ext) : normalized;
-
-            string basePath = "Assets/FCData/" + noExt;
-            string meshPath = basePath + ".asset";
-            string prefabPath = basePath + ".prefab";
-            return (meshPath, prefabPath);
+            return OpenFarCry.Importer.ImportAssetPaths.GetCgfCachePaths(virtualPath);
         }
 
         static string GetAnimationAssetPath(string meshPath, string alias)

@@ -20,7 +20,7 @@ namespace OpenFarCry.Importer.Cgf
 
     public static class CgfMeshBuilder
     {
-        public const string MeshCacheVersionName = "CGFMesh_CryLinkBind_v2";
+        public const string MeshCacheVersionName = "CGFMesh_CryLinkBind_v3_NoUvFlip";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -127,8 +127,7 @@ namespace OpenFarCry.Importer.Cgf
                         positions.Add(unityNodeTransform.MultiplyPoint3x4(pos));
                         normals.Add(unityNodeTransform.MultiplyVector(nrm).normalized);
                         var uv = rawUVs[ti[c]];
-                        // Far Cry 1 uses DirectX UV convention (V=0 at top); flip V for Unity
-                        uvs.Add(new Vector2(uv.U, 1f - uv.V));
+                        uvs.Add(new Vector2(uv.U, uv.V));
                         boneWeightsList?.Add(links);
                         vertCache[key] = idx;
                     }

@@ -84,15 +84,34 @@ Key files:
 - `Assets/Scripts/Importer/Cgf/CgfData.cs`
 - `Assets/Scripts/Importer/Cgf/CgfParser.cs`
 - `Assets/Scripts/Importer/Cgf/CgfMeshBuilder.cs`
+- `Assets/Scripts/Importer/Cgf/CgfRigDefinition.cs`
+- `Assets/Scripts/Importer/Cgf/CgfRigSnapshotBuilder.cs`
+- `Assets/Scripts/Importer/Cgf/CgfRigCacheSettings.cs`
 - `Assets/Scripts/Importer/Editor/CgfImporterWindow.cs`
+- `Assets/Scripts/Importer/Editor/CgfRigRegistry.cs`
+- `Assets/Scripts/Importer/ImportAssetPaths.cs`
 
-Work status (2026-05-05):
+Work status (2026-05-06):
 
 - Added animation import pipeline for character models:
   - `CAL` parsing (`$AnimDir`/`$AnimationDir` directives, dummy `?` entries, fallback to `<model>_*.caf` when needed).
   - `CAF` parsing for controller/timing chunks (`0x0827`, `0x0826` where available).
   - Legacy Unity `Animation` clip generation (`localPosition`/`localRotation`) and attach to imported prefab.
 - Fixed duplicate/empty clips in Unity `Animation` component by rebuilding clip list before attach/save.
+- Added rig snapshot/reuse pipeline for skinned characters:
+  - `CgfRigDefinition` ScriptableObject stores rig fingerprint, animation fingerprint, bone names, parent indices, remap arrays, controller mapping, bind poses.
+  - `CgfRigSnapshotBuilder` builds strict rig fingerprint and animation-compatible fingerprint.
+  - `CgfRigRegistry` resolves rigs from memory/project cache with exact and animation-compatible matching.
+- Added dev/prod rig cache policy:
+  - `CgfRigCacheSettings` (`Resources/CgfRigCacheSettings`) supports `ProjectOnly`, `MemoryOnly`, `Hybrid`.
+  - Player runtime always resolves to memory-only behavior; editor can combine project + memory.
+- Added shared animation cache:
+  - Imported clips are saved under `Assets/FCData/AnimationCache/...` and reused across characters/LODs.
+  - Cache key is content-based from generated `AnimationClip` curves/bindings (not source filename), so identical clips dedupe to one shared asset.
+  - File naming preserves readable alias prefix (`<alias>_<hash>.anim`).
+- Added automatic loop detection for imported legacy clips:
+  - Uses CAF start/end transform continuity heuristics plus alias hints (`idle/walk/run/...`) and one-shot hints (`jump/reload/death/...`).
+  - Applies both `clip.wrapMode` and editor clip setting `loopTime`.
 - Added `BoneAnim` parsing (`0x0290`) and controllerID-to-bone-path mapping for clip curve binding.
 - Updated skeleton/bind-pose handling:
   - `BoneInitialPos` matrix parsing corrected for translation row in `SBoneInitPosMatrix`.
@@ -117,10 +136,16 @@ Current behavior:
 - `Import Skeleton` toggle exists in the importer window:
   - ON: creates `SkinnedMeshRenderer`, applies mesh bone weights/bindposes, and builds a bone hierarchy from node data + bind-pose-derived local transforms.
   - OFF: imports as plain `MeshFilter` + `MeshRenderer` for geometry debugging.
+- Rig reuse behavior:
+  - Exact reuse path requires strict bone/index compatibility.
+  - Animation-compatible reuse can share controller-to-bone mapping and clip cache even if raw bone order differs across source files.
+  - Hierarchy from cached rig is applied only when structural compatibility checks pass; otherwise hierarchy is rebuilt from current source (`BoneAnim`/`Node`) to avoid pose corruption.
 - Coordinate-system/scale conversion is baked into imported data. Do not reintroduce a negative root scale or final root rotation as a shortcut; it makes prefabs hard to use and can hide bind/animation-space mismatches.
 - Caching/saving is deterministic by source virtual path:
   - mesh: `Assets/FCData/<virtual_path_without_ext>.asset`
   - prefab: `Assets/FCData/<virtual_path_without_ext>.prefab`
+- Shared animation cache path:
+  - clips: `Assets/FCData/AnimationCache/<hash_prefix>/<alias>_<content_hash>.anim`
 - On import with saving enabled, existing cached prefab can be reused instead of rebuilding if compatibility checks pass (currently UV0 presence + submesh/material count).
 - Cache compatibility also checks generated mesh name/version (`CgfMeshBuilder.MeshCacheVersionName`) so older meshes are rebuilt after importer-space or skinning changes.
 
