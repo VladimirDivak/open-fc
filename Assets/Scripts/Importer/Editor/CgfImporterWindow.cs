@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using OpenFarCry.FileSystem;
 using OpenFarCry.Importer.Cgf;
 using UnityEditor;
@@ -29,15 +30,18 @@ namespace OpenFarCry.Importer.Editor
         string  _parseError;
         string  _parseNote;
         int     _selectedMeshListIndex;
+        List<string> _siblingLodPaths = new List<string>();
 
         bool   _saveToProject = false;
         bool   _importSkeleton = true;
         bool   _importAnimations = true;
+        bool   _importPhysicsBoxColliders = true;
+        bool   _importRagdollBodies = false;
         float  _importScale = 0.01f;
         CgfRigCachePolicy _rigCachePolicy;
         string _rigCacheNote;
 
-        readonly struct AnimSourceEntry
+        struct AnimSourceEntry
         {
             public readonly string Alias;
             public readonly string VirtualPath;
@@ -46,6 +50,18 @@ namespace OpenFarCry.Importer.Editor
             {
                 Alias = alias;
                 VirtualPath = virtualPath;
+            }
+        }
+
+        struct CachePaths
+        {
+            public readonly string MeshPath;
+            public readonly string PrefabPath;
+
+            public CachePaths(string meshPath, string prefabPath)
+            {
+                MeshPath = meshPath;
+                PrefabPath = prefabPath;
             }
         }
 
@@ -214,6 +230,8 @@ namespace OpenFarCry.Importer.Editor
             int boneCount = _parsedFile.BoneNames?.Names.Length ?? 0;
             EditorGUILayout.LabelField($"Костей:     {boneCount}");
             EditorGUILayout.LabelField($"Node-узлов: {_parsedFile.NodeChunks.Count}");
+            EditorGUILayout.LabelField($"BoneMesh:   {_parsedFile.BoneMeshChunks.Count}");
+            EditorGUILayout.LabelField($"LOD files:  {_siblingLodPaths.Count}");
 
             if (!string.IsNullOrEmpty(_parseNote))
                 EditorGUILayout.HelpBox(_parseNote, MessageType.Info);
@@ -252,8 +270,8 @@ namespace OpenFarCry.Importer.Editor
             using (new EditorGUI.IndentLevelScope())
             {
                 var paths = GetCachePaths(_parsedPath);
-                EditorGUILayout.LabelField("Mesh:", paths.meshPath);
-                EditorGUILayout.LabelField("Prefab:", paths.prefabPath);
+                EditorGUILayout.LabelField("Mesh:", paths.MeshPath);
+                EditorGUILayout.LabelField("Prefab:", paths.PrefabPath);
             }
         }
 
@@ -266,6 +284,18 @@ namespace OpenFarCry.Importer.Editor
             _importAnimations = EditorGUILayout.ToggleLeft(
                 "Импортировать анимации (CAF/CAL)",
                 _importAnimations);
+            using (new EditorGUI.DisabledScope(!_importSkeleton))
+            {
+                _importPhysicsBoxColliders = EditorGUILayout.ToggleLeft(
+                    "Импортировать Physics Box Colliders",
+                    _importPhysicsBoxColliders);
+            }
+            using (new EditorGUI.DisabledScope(!_importSkeleton || !_importPhysicsBoxColliders))
+            {
+                _importRagdollBodies = EditorGUILayout.ToggleLeft(
+                    "Импортировать Ragdoll Bodies/Joints",
+                    _importRagdollBodies);
+            }
             _importScale = EditorGUILayout.FloatField("Scale", _importScale);
             if (_importScale <= 0f)
                 _importScale = 0.0001f;
@@ -372,12 +402,14 @@ namespace OpenFarCry.Importer.Editor
             _parsedFile = null;
             _parseError = null;
             _parseNote = null;
+            _siblingLodPaths.Clear();
             _parsedPath = path;
 
             try
             {
                 byte[] data = FcFileSystem.ReadAllBytes(_parsedPath);
                 _parsedFile = CgfParser.Parse(data);
+                _siblingLodPaths = FindSiblingLodPaths(_parsedPath);
             }
             catch (Exception e)
             {
@@ -435,7 +467,10 @@ namespace OpenFarCry.Importer.Editor
             ReloadRigCachePolicy();
             _rigCacheNote = null;
 
-            if (!_importAnimations && TryInstantiateCachedPrefab(out var cached))
+            if (!_importAnimations &&
+                !_importPhysicsBoxColliders &&
+                _siblingLodPaths.Count == 0 &&
+                TryInstantiateCachedPrefab(out var cached))
             {
                 Selection.activeGameObject = cached;
                 SceneView.FrameLastActiveSceneView();
@@ -486,7 +521,15 @@ namespace OpenFarCry.Importer.Editor
             }
 
             string baseName = Path.GetFileNameWithoutExtension(_parsedPath);
-            var go = BuildGameObject(result, _parsedFile, rigDefinition, baseName);
+            var go = BuildGameObject(
+                result,
+                _parsedFile,
+                rigDefinition,
+                baseName,
+                _importPhysicsBoxColliders,
+                _importRagdollBodies,
+                _importScale);
+            ConfigureLodGroup(go, result.HasSkeleton, _importScale, _saveToProject);
 
             List<ImportedAnimationClip> importedClips = null;
             if (_importAnimations)
@@ -510,7 +553,7 @@ namespace OpenFarCry.Importer.Editor
                 return false;
 
             var paths = GetCachePaths(_parsedPath);
-            var prefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(paths.prefabPath);
+            var prefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(paths.PrefabPath);
             if (prefabAsset == null)
                 return false;
 
@@ -563,7 +606,14 @@ namespace OpenFarCry.Importer.Editor
             return true;
         }
 
-        GameObject BuildGameObject(BuildResult result, CgfFile parsedFile, CgfRigDefinition rigDefinition, string name)
+        GameObject BuildGameObject(
+            BuildResult result,
+            CgfFile parsedFile,
+            CgfRigDefinition rigDefinition,
+            string name,
+            bool importPhysicsBoxColliders,
+            bool importRagdollBodies,
+            float importScale)
         {
             var go = new GameObject(name);
             Undo.RegisterCreatedObjectUndo(go, "Import CGF");
@@ -580,6 +630,11 @@ namespace OpenFarCry.Importer.Editor
                     smr.rootBone = rootBone != null ? rootBone : boneTransforms[0];
                 }
                 smr.sharedMaterials = new Material[result.Mesh.subMeshCount];
+
+                if (importPhysicsBoxColliders)
+                    AddBonePhysicsBoxColliders(parsedFile, result, boneTransforms, importScale);
+                if (importPhysicsBoxColliders && importRagdollBodies)
+                    AddRagdollBodiesAndJoints(go, boneTransforms, parsedFile, result);
             }
             else
             {
@@ -589,6 +644,1053 @@ namespace OpenFarCry.Importer.Editor
             }
 
             return go;
+        }
+
+        static void AddRagdollBodiesAndJoints(
+            GameObject root,
+            Transform[] boneTransforms,
+            CgfFile parsedFile,
+            BuildResult result)
+        {
+            if (root == null || boneTransforms == null || boneTransforms.Length == 0)
+                return;
+
+            var physicalBones = new List<Transform>(boneTransforms.Length);
+            float totalVolume = 0f;
+            for (int i = 0; i < boneTransforms.Length; i++)
+            {
+                var bone = boneTransforms[i];
+                if (bone == null)
+                    continue;
+
+                var box = bone.GetComponent<BoxCollider>();
+                if (box == null)
+                    continue;
+
+                physicalBones.Add(bone);
+                float volume = Mathf.Max(1e-6f, box.size.x * box.size.y * box.size.z);
+                totalVolume += volume;
+            }
+
+            if (physicalBones.Count == 0)
+                return;
+
+            const float targetMassKg = 80f;
+            var bodyByBone = new Dictionary<Transform, Rigidbody>(physicalBones.Count);
+            for (int i = 0; i < physicalBones.Count; i++)
+            {
+                var bone = physicalBones[i];
+                var box = bone.GetComponent<BoxCollider>();
+                float volume = Mathf.Max(1e-6f, box.size.x * box.size.y * box.size.z);
+                float ratio = totalVolume > 1e-6f ? volume / totalVolume : 1f / physicalBones.Count;
+
+                var rb = bone.GetComponent<Rigidbody>();
+                if (rb == null)
+                    rb = bone.gameObject.AddComponent<Rigidbody>();
+
+                rb.mass = Mathf.Max(0.05f, targetMassKg * ratio);
+                rb.isKinematic = true;
+                rb.useGravity = true;
+                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
+                bodyByBone[bone] = rb;
+            }
+
+            var physByRuntimeIndex = BuildPhysicsByRuntimeIndex(parsedFile, result, boneTransforms.Length);
+            int jointCount = 0;
+            int physicsDrivenJointCount = 0;
+            int fallbackJointCount = 0;
+            var jointDiagLines = new List<string>(32);
+            for (int i = 0; i < physicalBones.Count; i++)
+            {
+                var bone = physicalBones[i];
+                if (!bodyByBone.TryGetValue(bone, out var rb))
+                    continue;
+
+                var parent = FindNearestPhysicalParent(bone, bodyByBone);
+                if (parent == null)
+                    continue;
+                var parentRb = bodyByBone[parent];
+                if (parentRb == null || parentRb == rb)
+                    continue;
+
+                var joint = bone.GetComponent<ConfigurableJoint>();
+                if (joint == null)
+                    joint = bone.gameObject.AddComponent<ConfigurableJoint>();
+
+                joint.connectedBody = parentRb;
+                joint.autoConfigureConnectedAnchor = true;
+                joint.xMotion = ConfigurableJointMotion.Locked;
+                joint.yMotion = ConfigurableJointMotion.Locked;
+                joint.zMotion = ConfigurableJointMotion.Locked;
+                joint.angularXMotion = ConfigurableJointMotion.Limited;
+                joint.angularYMotion = ConfigurableJointMotion.Limited;
+                joint.angularZMotion = ConfigurableJointMotion.Limited;
+
+                int runtimeIndex = Array.IndexOf(boneTransforms, bone);
+                bool usedPhysics = false;
+                Vector3Int axisMapping = new Vector3Int(0, 1, 2);
+                if (runtimeIndex >= 0 &&
+                    physByRuntimeIndex.TryGetValue(runtimeIndex, out var phys) &&
+                    TryApplyCryPhysicsLimitsToJoint(joint, phys, out axisMapping))
+                {
+                    ApplyJointAxesFromCryFrameMatrix(joint, phys, axisMapping);
+                    usedPhysics = true;
+                    physicsDrivenJointCount++;
+                    if (ShouldLogJointForAxisDebug(bone.name))
+                    {
+                        string boneName = (result.BoneNames != null && runtimeIndex >= 0 && runtimeIndex < result.BoneNames.Length)
+                            ? result.BoneNames[runtimeIndex]
+                            : bone.name;
+                        jointDiagLines.Add(BuildJointAxisDebugLine(boneName, joint, phys, axisMapping));
+                    }
+                }
+                else
+                {
+                    ApplyDefaultJointLimits(joint);
+                    fallbackJointCount++;
+                }
+
+                joint.projectionMode = JointProjectionMode.PositionAndRotation;
+                joint.projectionDistance = 0.1f;
+                joint.projectionAngle = 15f;
+                joint.enablePreprocessing = false;
+                if (usedPhysics)
+                {
+                    joint.rotationDriveMode = RotationDriveMode.Slerp;
+                }
+                jointCount++;
+            }
+
+            var controller = root.GetComponent<FcRagdollController>();
+            if (controller == null)
+                controller = root.AddComponent<FcRagdollController>();
+            controller.RebuildCache();
+            controller.SetAnimated();
+
+            LogRagdollImportDiagnostics(root, boneTransforms, result, physByRuntimeIndex);
+            if (jointDiagLines.Count > 0)
+                Debug.Log("[CgfImporter][JointDiag]\n" + string.Join("\n", jointDiagLines));
+
+            Debug.Log(
+                $"[CgfImporter] Added ragdoll setup: {physicalBones.Count} rigidbody bone(s), {jointCount} joint(s), " +
+                $"physics-driven joints={physicsDrivenJointCount}, fallback joints={fallbackJointCount}.");
+        }
+
+        static bool ShouldLogJointForAxisDebug(string boneName)
+        {
+            if (string.IsNullOrEmpty(boneName))
+                return false;
+
+            string n = boneName.ToLowerInvariant();
+            return n.Contains("calf") ||
+                   n.Contains("thigh") ||
+                   n.Contains("shin") ||
+                   n.Contains("knee") ||
+                   n.Contains("forearm") ||
+                   n.Contains("upperarm") ||
+                   n.Contains("clavicle") ||
+                   n.Contains("spine") ||
+                   n.Contains("neck") ||
+                   n.Contains("head");
+        }
+
+        static string BuildJointAxisDebugLine(string boneName, ConfigurableJoint joint, CgfBonePhysics phys, Vector3Int axisMapping)
+        {
+            var ja = joint.axis.normalized;
+            var js = joint.secondaryAxis.normalized;
+            var jf = Vector3.Cross(ja, js).normalized;
+
+            float min0 = NormalizeCryAngleToDegrees(phys.MinAngles.x);
+            float min1 = NormalizeCryAngleToDegrees(phys.MinAngles.y);
+            float min2 = NormalizeCryAngleToDegrees(phys.MinAngles.z);
+            float max0 = NormalizeCryAngleToDegrees(phys.MaxAngles.x);
+            float max1 = NormalizeCryAngleToDegrees(phys.MaxAngles.y);
+            float max2 = NormalizeCryAngleToDegrees(phys.MaxAngles.z);
+
+            int ix = Mathf.Clamp(axisMapping.x, 0, 2);
+            int iy = Mathf.Clamp(axisMapping.y, 0, 2);
+            int iz = Mathf.Clamp(axisMapping.z, 0, 2);
+            float[] mins = { min0, min1, min2 };
+            float[] maxs = { max0, max1, max2 };
+
+            Vector3 fa = Vector3.zero;
+            Vector3 fs = Vector3.zero;
+            Vector3 ft = Vector3.zero;
+            float dotA = -1f;
+            float dotS = -1f;
+            float dotT = -1f;
+            if (TryExtractCryFrameAxes(phys.FrameMatrix, out var b0, out var b1, out var b2))
+            {
+                var basis = new Vector3[3] { b0, b1, b2 };
+                fa = CryTransformConversion.DirectionInImporterSpace(basis[ix]).normalized;
+                fs = CryTransformConversion.DirectionInImporterSpace(basis[iy]).normalized;
+                ft = CryTransformConversion.DirectionInImporterSpace(basis[iz]).normalized;
+                if (IsValidDirection(ja) && IsValidDirection(fa))
+                    dotA = Mathf.Abs(Vector3.Dot(ja, fa));
+                if (IsValidDirection(js) && IsValidDirection(fs))
+                    dotS = Mathf.Abs(Vector3.Dot(js, fs));
+                if (IsValidDirection(jf) && IsValidDirection(ft))
+                    dotT = Mathf.Abs(Vector3.Dot(jf, ft));
+            }
+
+            return
+                $"{boneName}: map=({axisMapping.x},{axisMapping.y},{axisMapping.z}), " +
+                $"rawDeg=[x:{min0:F1}..{max0:F1}, y:{min1:F1}..{max1:F1}, z:{min2:F1}..{max2:F1}], " +
+                $"mappedDeg=[X:{mins[ix]:F1}..{maxs[ix]:F1}, Y:{mins[iy]:F1}..{maxs[iy]:F1}, Z:{mins[iz]:F1}..{maxs[iz]:F1}], " +
+                $"X=[{joint.lowAngularXLimit.limit:F1},{joint.highAngularXLimit.limit:F1}] " +
+                $"Y={joint.angularYLimit.limit:F1} Z={joint.angularZLimit.limit:F1}, " +
+                $"jointA={FormatVector(ja)} jointS={FormatVector(js)} jointT={FormatVector(jf)}, " +
+                $"frameA={FormatVector(fa)} frameS={FormatVector(fs)} frameT={FormatVector(ft)}, " +
+                $"align=({dotA:F3},{dotS:F3},{dotT:F3})";
+        }
+
+        static string FormatVector(Vector3 v)
+        {
+            return $"({v.x:F3},{v.y:F3},{v.z:F3})";
+        }
+
+        static void LogRagdollImportDiagnostics(
+            GameObject root,
+            Transform[] boneTransforms,
+            BuildResult result,
+            Dictionary<int, CgfBonePhysics> physByRuntimeIndex)
+        {
+            if (root == null || boneTransforms == null || boneTransforms.Length == 0 || result == null)
+                return;
+
+            var bindPoses = result.BindPoses;
+            var boneNames = result.BoneNames;
+            var rootTransform = root.transform;
+
+            int bindChecked = 0;
+            int bindBad = 0;
+            float worstBindPosErr = 0f;
+            float worstBindRotErr = 0f;
+            string worstBindBone = null;
+            var bindIssueSamples = new List<string>(4);
+
+            int frameChecked = 0;
+            int frameBad = 0;
+            float worstFrameAlignment = 1f;
+            string worstFrameBone = null;
+            var frameIssueSamples = new List<string>(4);
+
+            for (int i = 0; i < boneTransforms.Length; i++)
+            {
+                var bone = boneTransforms[i];
+                if (bone == null)
+                    continue;
+
+                string boneName = (boneNames != null && i < boneNames.Length && !string.IsNullOrEmpty(boneNames[i]))
+                    ? boneNames[i]
+                    : bone.name;
+
+                if (bindPoses != null && i < bindPoses.Length)
+                {
+                    bindChecked++;
+                    var expectedBind = bindPoses[i];
+                    var actualBind = bone.worldToLocalMatrix * rootTransform.localToWorldMatrix;
+                    float bindMatrixErr = MaxAbsMatrixDiff(expectedBind, actualBind);
+
+                    var expectedRoot = expectedBind.inverse;
+                    var actualRoot = rootTransform.worldToLocalMatrix * bone.localToWorldMatrix;
+                    float posErr = Vector3.Distance(ExtractMatrixTranslation(expectedRoot), ExtractMatrixTranslation(actualRoot));
+                    float rotErr = MatrixRotationAngle(expectedRoot, actualRoot);
+
+                    if (posErr > worstBindPosErr || rotErr > worstBindRotErr)
+                    {
+                        worstBindPosErr = Mathf.Max(worstBindPosErr, posErr);
+                        worstBindRotErr = Mathf.Max(worstBindRotErr, rotErr);
+                        worstBindBone = boneName;
+                    }
+
+                    if (posErr > 0.01f || rotErr > 2f || bindMatrixErr > 0.01f)
+                    {
+                        bindBad++;
+                        if (bindIssueSamples.Count < 4)
+                            bindIssueSamples.Add($"{boneName}(p={posErr:F3},r={rotErr:F1},m={bindMatrixErr:F3})");
+                    }
+                }
+
+                if (physByRuntimeIndex != null &&
+                    physByRuntimeIndex.TryGetValue(i, out var phys) &&
+                    TryExtractCryFrameAxes(phys.FrameMatrix, out var f0, out var f1, out var f2))
+                {
+                    frameChecked++;
+                    var c0 = CryTransformConversion.DirectionInImporterSpace(f0).normalized;
+                    var c1 = CryTransformConversion.DirectionInImporterSpace(f1).normalized;
+                    var c2 = CryTransformConversion.DirectionInImporterSpace(f2).normalized;
+                    if (!IsValidDirection(c0) || !IsValidDirection(c1) || !IsValidDirection(c2))
+                        continue;
+
+                    var bx = (bone.localRotation * Vector3.right).normalized;
+                    var by = (bone.localRotation * Vector3.up).normalized;
+                    var bz = (bone.localRotation * Vector3.forward).normalized;
+
+                    float a0 = BestAxisAlignment(c0, bx, by, bz);
+                    float a1 = BestAxisAlignment(c1, bx, by, bz);
+                    float a2 = BestAxisAlignment(c2, bx, by, bz);
+                    float avgAlignment = (a0 + a1 + a2) / 3f;
+
+                    if (avgAlignment < worstFrameAlignment)
+                    {
+                        worstFrameAlignment = avgAlignment;
+                        worstFrameBone = boneName;
+                    }
+
+                    if (avgAlignment < 0.75f)
+                    {
+                        frameBad++;
+                        if (frameIssueSamples.Count < 4)
+                            frameIssueSamples.Add($"{boneName}(a={avgAlignment:F3})");
+                    }
+                }
+            }
+
+            string worstBindBoneText = worstBindBone ?? "n/a";
+            string worstFrameBoneText = worstFrameBone ?? "n/a";
+            string bindSamplesText = string.Join(", ", bindIssueSamples);
+            string frameSamplesText = string.Join(", ", frameIssueSamples);
+
+            Debug.Log(
+                "[CgfImporter][Diag] bindCheck=" + bindChecked +
+                ", bindIssues=" + bindBad +
+                ", worstBindBone=" + worstBindBoneText +
+                ", worstBindPosErr=" + worstBindPosErr.ToString("F4") + "m" +
+                ", worstBindRotErr=" + worstBindRotErr.ToString("F2") + "deg; " +
+                "frameCheck=" + frameChecked +
+                ", frameIssues=" + frameBad +
+                ", worstFrameBone=" + worstFrameBoneText +
+                ", worstFrameAvgAxisAlignment=" + worstFrameAlignment.ToString("F3") + " (1.0=perfect), " +
+                "bindSample=[" + bindSamplesText + "], frameSample=[" + frameSamplesText + "].");
+        }
+
+        static float BestAxisAlignment(Vector3 axis, Vector3 x, Vector3 y, Vector3 z)
+        {
+            float ax = Mathf.Abs(Vector3.Dot(axis, x));
+            float ay = Mathf.Abs(Vector3.Dot(axis, y));
+            float az = Mathf.Abs(Vector3.Dot(axis, z));
+            return Mathf.Max(ax, Mathf.Max(ay, az));
+        }
+
+        static float MaxAbsMatrixDiff(Matrix4x4 a, Matrix4x4 b)
+        {
+            float max = 0f;
+            for (int r = 0; r < 4; r++)
+            {
+                for (int c = 0; c < 4; c++)
+                {
+                    float d = Mathf.Abs(a[r, c] - b[r, c]);
+                    if (d > max)
+                        max = d;
+                }
+            }
+
+            return max;
+        }
+
+        static Vector3 ExtractMatrixTranslation(Matrix4x4 m)
+        {
+            return new Vector3(m.m03, m.m13, m.m23);
+        }
+
+        static float MatrixRotationAngle(Matrix4x4 a, Matrix4x4 b)
+        {
+            if (!TryExtractRotation(a, out var qa) || !TryExtractRotation(b, out var qb))
+                return 180f;
+
+            return Quaternion.Angle(qa, qb);
+        }
+
+        static bool TryExtractRotation(Matrix4x4 m, out Quaternion q)
+        {
+            var x = new Vector3(m.m00, m.m10, m.m20);
+            var y = new Vector3(m.m01, m.m11, m.m21);
+            var z = new Vector3(m.m02, m.m12, m.m22);
+            if (!IsValidDirection(x) || !IsValidDirection(y) || !IsValidDirection(z))
+            {
+                q = Quaternion.identity;
+                return false;
+            }
+
+            x.Normalize();
+            y = Vector3.ProjectOnPlane(y, x).normalized;
+            if (!IsValidDirection(y))
+            {
+                q = Quaternion.identity;
+                return false;
+            }
+
+            z = Vector3.Cross(x, y).normalized;
+            if (!IsValidDirection(z))
+            {
+                q = Quaternion.identity;
+                return false;
+            }
+
+            q = Quaternion.LookRotation(z, y).normalized;
+            return true;
+        }
+
+        static Transform FindNearestPhysicalParent(Transform bone, Dictionary<Transform, Rigidbody> bodyByBone)
+        {
+            var parent = bone != null ? bone.parent : null;
+            while (parent != null)
+            {
+                if (bodyByBone.ContainsKey(parent))
+                    return parent;
+                parent = parent.parent;
+            }
+
+            return null;
+        }
+
+        static Dictionary<int, CgfBonePhysics> BuildPhysicsByRuntimeIndex(CgfFile parsedFile, BuildResult result, int boneCount)
+        {
+            var map = new Dictionary<int, CgfBonePhysics>();
+            var entities = parsedFile?.BoneAnim?.Bones;
+            if (entities == null || entities.Length == 0)
+                return map;
+
+            int[] boneIdToIndex = result?.BoneIdToIndex;
+            var runtimeBoneByController = BuildRuntimeBoneIndexByControllerId(parsedFile, result);
+
+            for (int i = 0; i < entities.Length; i++)
+            {
+                var entity = entities[i];
+                int runtimeBoneIndex = ResolveRuntimeBoneIndex(
+                    entity,
+                    boneIdToIndex,
+                    runtimeBoneByController,
+                    boneCount);
+                if (runtimeBoneIndex < 0 || runtimeBoneIndex >= boneCount)
+                    continue;
+
+                map[runtimeBoneIndex] = entity.Physics;
+            }
+
+            return map;
+        }
+
+        static void ApplyDefaultJointLimits(ConfigurableJoint joint)
+        {
+            joint.lowAngularXLimit = new SoftJointLimit { limit = -25f };
+            joint.highAngularXLimit = new SoftJointLimit { limit = 25f };
+            joint.angularYLimit = new SoftJointLimit { limit = 20f };
+            joint.angularZLimit = new SoftJointLimit { limit = 20f };
+            joint.angularXLimitSpring = new SoftJointLimitSpring { spring = 0f, damper = 0f };
+            joint.angularYZLimitSpring = new SoftJointLimitSpring { spring = 0f, damper = 0f };
+            joint.slerpDrive = new JointDrive
+            {
+                positionSpring = 0f,
+                positionDamper = 0f,
+                maximumForce = 0f
+            };
+        }
+
+        static bool TryApplyCryPhysicsLimitsToJoint(ConfigurableJoint joint, CgfBonePhysics phys, out Vector3Int axisMapping)
+        {
+            float[] mins = new float[3]
+            {
+                NormalizeCryAngleToDegrees(phys.MinAngles.x),
+                NormalizeCryAngleToDegrees(phys.MinAngles.y),
+                NormalizeCryAngleToDegrees(phys.MinAngles.z)
+            };
+            float[] maxs = new float[3]
+            {
+                NormalizeCryAngleToDegrees(phys.MaxAngles.x),
+                NormalizeCryAngleToDegrees(phys.MaxAngles.y),
+                NormalizeCryAngleToDegrees(phys.MaxAngles.z)
+            };
+
+            bool[] unconstrained = new bool[3];
+            for (int i = 0; i < 3; i++)
+            {
+                unconstrained[i] = IsCryUnconstrainedAngle(mins[i]) || IsCryUnconstrainedAngle(maxs[i]);
+                if (unconstrained[i])
+                {
+                    mins[i] = float.NaN;
+                    maxs[i] = float.NaN;
+                }
+            }
+
+            bool hasAnyFinite =
+                (IsFinite(mins[0]) && IsFinite(maxs[0])) ||
+                (IsFinite(mins[1]) && IsFinite(maxs[1])) ||
+                (IsFinite(mins[2]) && IsFinite(maxs[2]));
+            if (!hasAnyFinite)
+            {
+                axisMapping = new Vector3Int(0, 1, 2);
+                return false;
+            }
+
+            axisMapping = DetermineCryAxisMapping(mins, maxs, unconstrained);
+            int ix = axisMapping.x;
+            int iy = axisMapping.y;
+            int iz = axisMapping.z;
+            float minX = IsFinite(mins[ix]) ? mins[ix] : -10f;
+            float maxX = IsFinite(maxs[ix]) ? maxs[ix] : 10f;
+            float minY = mins[iy];
+            float maxY = maxs[iy];
+            float minZ = mins[iz];
+            float maxZ = maxs[iz];
+
+            // FC data can contain 0/0 for unconstrained or unset joints.
+            float xExtent = Mathf.Max(Mathf.Abs(minX), Mathf.Abs(maxX));
+            float yExtent = Mathf.Max(Mathf.Abs(minY), Mathf.Abs(maxY));
+            float zExtent = Mathf.Max(Mathf.Abs(minZ), Mathf.Abs(maxZ));
+            if (xExtent < 0.01f && yExtent < 0.01f && zExtent < 0.01f)
+            {
+                axisMapping = new Vector3Int(0, 1, 2);
+                return false;
+            }
+
+            if (minX > maxX)
+            {
+                float tmp = minX;
+                minX = maxX;
+                maxX = tmp;
+            }
+
+            minX = Mathf.Clamp(minX, -89f, 0f);
+            maxX = Mathf.Clamp(maxX, 0f, 89f);
+            if (maxX - minX < 1f)
+            {
+                minX = -10f;
+                maxX = 10f;
+            }
+
+            float yLimit = (IsFinite(minY) && IsFinite(maxY))
+                ? Mathf.Clamp(Mathf.Max(Mathf.Abs(minY), Mathf.Abs(maxY)), 1f, 85f)
+                : 2f;
+            float zLimit = (IsFinite(minZ) && IsFinite(maxZ))
+                ? Mathf.Clamp(Mathf.Max(Mathf.Abs(minZ), Mathf.Abs(maxZ)), 1f, 85f)
+                : 2f;
+
+            joint.lowAngularXLimit = new SoftJointLimit { limit = minX };
+            joint.highAngularXLimit = new SoftJointLimit { limit = maxX };
+            joint.angularYLimit = new SoftJointLimit { limit = yLimit };
+            joint.angularZLimit = new SoftJointLimit { limit = zLimit };
+
+            float spring = Mathf.Clamp(
+                Mathf.Abs(phys.SpringTension.x) +
+                Mathf.Abs(phys.SpringTension.y) +
+                Mathf.Abs(phys.SpringTension.z),
+                0f,
+                200f);
+            float damper = Mathf.Clamp(
+                Mathf.Abs(phys.Damping.x) +
+                Mathf.Abs(phys.Damping.y) +
+                Mathf.Abs(phys.Damping.z),
+                0f,
+                100f);
+
+            if (spring > 0.01f || damper > 0.01f)
+            {
+                var xSpring = new SoftJointLimitSpring
+                {
+                    spring = spring,
+                    damper = damper
+                };
+                var yzSpring = new SoftJointLimitSpring
+                {
+                    spring = spring,
+                    damper = damper
+                };
+                joint.angularXLimitSpring = xSpring;
+                joint.angularYZLimitSpring = yzSpring;
+                joint.slerpDrive = new JointDrive
+                {
+                    positionSpring = spring,
+                    positionDamper = damper,
+                    maximumForce = Mathf.Max(10f, spring * 10f)
+                };
+            }
+            else
+            {
+                joint.angularXLimitSpring = new SoftJointLimitSpring { spring = 0f, damper = 0f };
+                joint.angularYZLimitSpring = new SoftJointLimitSpring { spring = 0f, damper = 0f };
+                joint.slerpDrive = new JointDrive
+                {
+                    positionSpring = 0f,
+                    positionDamper = 0f,
+                    maximumForce = 0f
+                };
+            }
+
+            return true;
+        }
+
+        static Vector3Int DetermineCryAxisMapping(float[] mins, float[] maxs, bool[] unconstrained)
+        {
+            // Unity's asymmetrical low/high limits exist only on Angular X.
+            // Put the most asymmetrical Cry axis there, and map the rest by range.
+            float[] extent = new float[3];
+            float[] asymmetry = new float[3];
+            for (int i = 0; i < 3; i++)
+            {
+                if (unconstrained != null && i < unconstrained.Length && unconstrained[i])
+                {
+                    extent[i] = 0f;
+                    asymmetry[i] = 0f;
+                    continue;
+                }
+
+                if (!IsFinite(mins[i]) || !IsFinite(maxs[i]))
+                {
+                    extent[i] = 0f;
+                    asymmetry[i] = 0f;
+                    continue;
+                }
+
+                extent[i] = Mathf.Max(Mathf.Abs(mins[i]), Mathf.Abs(maxs[i]));
+                asymmetry[i] = Mathf.Abs(mins[i] + maxs[i]);
+            }
+
+            int ix = 0;
+            float bestScore = float.NegativeInfinity;
+            for (int i = 0; i < 3; i++)
+            {
+                if (unconstrained != null && i < unconstrained.Length && unconstrained[i])
+                    continue;
+
+                float score = asymmetry[i] * 2f + extent[i] * 0.1f;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    ix = i;
+                }
+            }
+
+            int a = (ix + 1) % 3;
+            int b = (ix + 2) % 3;
+            int iy = extent[a] >= extent[b] ? a : b;
+            int iz = iy == a ? b : a;
+            return new Vector3Int(ix, iy, iz);
+        }
+
+        static bool IsCryUnconstrainedAngle(float value)
+        {
+            return IsFinite(value) && Mathf.Abs(value) > 1000000f;
+        }
+
+        static void ApplyJointAxesFromCryFrameMatrix(ConfigurableJoint joint, CgfBonePhysics phys, Vector3Int axisMapping)
+        {
+            // Cry stores per-joint frame basis in BONE_PHYSICS_COMP.framemtx.
+            // Unity expects joint axes in the joint object's local space.
+            if (!TryExtractCryFrameAxes(phys.FrameMatrix, out var b0, out var b1, out var b2))
+                return;
+
+            var basis = new Vector3[3] { b0, b1, b2 };
+            var axisCry = basis[Mathf.Clamp(axisMapping.x, 0, 2)];
+            var secondaryCry = basis[Mathf.Clamp(axisMapping.y, 0, 2)];
+            var tertiaryCry = basis[Mathf.Clamp(axisMapping.z, 0, 2)];
+
+            var axis = CryTransformConversion.DirectionInImporterSpace(axisCry).normalized;
+            var secondary = CryTransformConversion.DirectionInImporterSpace(secondaryCry).normalized;
+            var tertiary = CryTransformConversion.DirectionInImporterSpace(tertiaryCry).normalized;
+            if (!IsValidDirection(axis) || !IsValidDirection(secondary))
+                return;
+
+            // Keep the basis orthogonal and right-handed for Unity joint axes.
+            secondary = Vector3.ProjectOnPlane(secondary, axis).normalized;
+            if (!IsValidDirection(secondary))
+                return;
+
+            var forward = Vector3.Cross(axis, secondary).normalized;
+            if (!IsValidDirection(forward))
+                return;
+
+            // Keep handedness/sign consistent with framemtx 3rd axis.
+            if (IsValidDirection(tertiary) && Vector3.Dot(forward, tertiary) < 0f)
+                secondary = -secondary;
+
+            joint.axis = axis;
+            joint.secondaryAxis = secondary;
+        }
+
+        static bool TryExtractCryFrameAxes(Matrix4x4 frame, out Vector3 axis, out Vector3 secondary, out Vector3 tertiary)
+        {
+            // In FC data, framemtx rows usually represent the authored local frame.
+            var row0 = new Vector3(frame.m00, frame.m01, frame.m02);
+            var row1 = new Vector3(frame.m10, frame.m11, frame.m12);
+            var row2 = new Vector3(frame.m20, frame.m21, frame.m22);
+            var col0 = new Vector3(frame.m00, frame.m10, frame.m20);
+            var col1 = new Vector3(frame.m01, frame.m11, frame.m21);
+            var col2 = new Vector3(frame.m02, frame.m12, frame.m22);
+
+            if (IsValidDirection(row0) && IsValidDirection(row1) && IsValidDirection(row2))
+            {
+                axis = row0.normalized;
+                secondary = row1.normalized;
+                tertiary = row2.normalized;
+                return true;
+            }
+
+            if (IsValidDirection(col0) && IsValidDirection(col1) && IsValidDirection(col2))
+            {
+                axis = col0.normalized;
+                secondary = col1.normalized;
+                tertiary = col2.normalized;
+                return true;
+            }
+
+            axis = Vector3.right;
+            secondary = Vector3.up;
+            tertiary = Vector3.forward;
+            return false;
+        }
+
+        static float NormalizeCryAngleToDegrees(float value)
+        {
+            if (!IsFinite(value))
+                return 0f;
+
+            float abs = Mathf.Abs(value);
+            if (abs > 0.0001f && abs <= Mathf.PI + 0.1f)
+                return value * Mathf.Rad2Deg;
+
+            return value;
+        }
+
+        static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        static bool IsValidDirection(Vector3 v)
+        {
+            return IsFinite(v.x) && IsFinite(v.y) && IsFinite(v.z) && v.sqrMagnitude > 1e-8f;
+        }
+
+        static void AddBonePhysicsBoxColliders(
+            CgfFile parsedFile,
+            BuildResult result,
+            Transform[] boneTransforms,
+            float importScale)
+        {
+            if (parsedFile == null)
+                return;
+            var entities = parsedFile.BoneAnim?.Bones;
+            if (entities == null || entities.Length == 0)
+                return;
+            if (parsedFile.BoneMeshByChunkID == null || parsedFile.BoneMeshByChunkID.Count == 0)
+                return;
+            if (boneTransforms == null || boneTransforms.Length == 0)
+                return;
+
+            var runtimeBoneByController = BuildRuntimeBoneIndexByControllerId(parsedFile, result);
+            int[] boneIdToIndex = result?.BoneIdToIndex;
+            int colliderCount = 0;
+            int mappedBoneCount = 0;
+            var processedRuntimeBones = new HashSet<int>();
+
+            for (int i = 0; i < entities.Length; i++)
+            {
+                var entity = entities[i];
+                int boneId = entity.BoneID;
+                if (boneId < 0)
+                    continue;
+
+                int runtimeBoneIndex = ResolveRuntimeBoneIndex(
+                    entity,
+                    boneIdToIndex,
+                    runtimeBoneByController,
+                    boneTransforms.Length);
+                if (runtimeBoneIndex < 0 || runtimeBoneIndex >= boneTransforms.Length)
+                    continue;
+                if (processedRuntimeBones.Contains(runtimeBoneIndex))
+                    continue;
+
+                int physGeomChunkId = entity.Physics.PhysGeomChunkID;
+                if (physGeomChunkId < 0)
+                    continue;
+                if (!parsedFile.BoneMeshByChunkID.TryGetValue(physGeomChunkId, out var boneMeshChunk))
+                    continue;
+
+                var mesh = boneMeshChunk?.Mesh;
+                var verts = mesh?.Vertices;
+                if (verts == null || verts.Length == 0)
+                    continue;
+
+                var bone = boneTransforms[runtimeBoneIndex];
+                if (bone == null)
+                    continue;
+
+                mappedBoneCount++;
+
+                Vector3 first = CryTransformConversion.PositionInImporterSpace(
+                    new Vector3(verts[0].PX, verts[0].PY, verts[0].PZ),
+                    importScale);
+                var bounds = new Bounds(first, Vector3.zero);
+                for (int vi = 1; vi < verts.Length; vi++)
+                {
+                    var v = verts[vi];
+                    var p = CryTransformConversion.PositionInImporterSpace(
+                        new Vector3(v.PX, v.PY, v.PZ),
+                        importScale);
+                    bounds.Encapsulate(p);
+                }
+
+                var box = bone.GetComponent<BoxCollider>();
+                if (box == null)
+                    box = bone.gameObject.AddComponent<BoxCollider>();
+
+                box.center = bounds.center;
+                var size = bounds.size;
+                box.size = new Vector3(
+                    Mathf.Max(size.x, 0.0001f),
+                    Mathf.Max(size.y, 0.0001f),
+                    Mathf.Max(size.z, 0.0001f));
+                processedRuntimeBones.Add(runtimeBoneIndex);
+                colliderCount++;
+            }
+
+            if (colliderCount > 0)
+            {
+                Debug.Log($"[CgfImporter] Added {colliderCount} BoxCollider(s) from BoneMesh data.");
+            }
+            else if (parsedFile.BoneMeshChunks.Count > 0)
+            {
+                Debug.LogWarning(
+                    "[CgfImporter] BoneMesh chunks exist, " +
+                    $"but no BoxCollider was created (mapped bones: {mappedBoneCount}).");
+            }
+        }
+
+        void ConfigureLodGroup(GameObject root, bool hasSkeleton, float importScale, bool saveToProject)
+        {
+            if (root == null)
+                return;
+
+            var lodRenderers = new List<Renderer>();
+            if (hasSkeleton)
+            {
+                var smr0 = root.GetComponent<SkinnedMeshRenderer>();
+                if (smr0 == null)
+                    return;
+                lodRenderers.Add(smr0);
+            }
+            else
+            {
+                var mr0 = root.GetComponent<MeshRenderer>();
+                if (mr0 == null)
+                    return;
+                lodRenderers.Add(mr0);
+            }
+
+            for (int i = 0; i < _siblingLodPaths.Count; i++)
+            {
+                string lodPath = _siblingLodPaths[i];
+                try
+                {
+                    byte[] bytes = FcFileSystem.ReadAllBytes(lodPath);
+                    var parsedLod = CgfParser.Parse(bytes);
+                    var buildLod = CgfMeshBuilder.Build(parsedLod, hasSkeleton, importScale);
+                    if (buildLod?.Mesh == null)
+                        continue;
+
+                    Mesh lodMesh = buildLod.Mesh;
+                    if (saveToProject)
+                        lodMesh = PersistMeshAssetForVirtualPath(lodMesh, lodPath);
+                    if (lodMesh == null)
+                        continue;
+
+                    int lodIndex = ExtractLodIndexFromPath(lodPath);
+                    string childName = lodIndex > 0 ? $"LOD{lodIndex}" : $"LOD{lodRenderers.Count}";
+                    var lodGo = new GameObject(childName);
+                    lodGo.transform.SetParent(root.transform, worldPositionStays: false);
+
+                    if (hasSkeleton)
+                    {
+                        var baseSmr = (SkinnedMeshRenderer)lodRenderers[0];
+                        var lodSmr = lodGo.AddComponent<SkinnedMeshRenderer>();
+                        lodSmr.sharedMesh = lodMesh;
+                        lodSmr.bones = baseSmr.bones;
+                        lodSmr.rootBone = baseSmr.rootBone;
+                        lodSmr.sharedMaterials = new Material[lodMesh.subMeshCount];
+                        lodRenderers.Add(lodSmr);
+                    }
+                    else
+                    {
+                        var mf = lodGo.AddComponent<MeshFilter>();
+                        mf.sharedMesh = lodMesh;
+                        var mr = lodGo.AddComponent<MeshRenderer>();
+                        mr.sharedMaterials = new Material[lodMesh.subMeshCount];
+                        lodRenderers.Add(mr);
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[CgfImporter] Failed to build LOD from '{lodPath}': {e.Message}");
+                }
+            }
+
+            var lods = BuildLodSettings(lodRenderers);
+            if (lods.Length == 0)
+                return;
+
+            var lodGroup = root.GetComponent<LODGroup>();
+            if (lodGroup == null)
+                lodGroup = root.AddComponent<LODGroup>();
+
+            lodGroup.animateCrossFading = false;
+            lodGroup.SetLODs(lods);
+            lodGroup.RecalculateBounds();
+
+            Debug.Log($"[CgfImporter] Configured LODGroup with {lods.Length} level(s).");
+        }
+
+        static LOD[] BuildLodSettings(List<Renderer> renderers)
+        {
+            if (renderers == null || renderers.Count == 0)
+                return Array.Empty<LOD>();
+
+            int count = renderers.Count;
+            var lods = new LOD[count];
+            const float maxHeight = 0.7f;
+            const float minHeight = 0.02f;
+
+            if (count == 1)
+            {
+                lods[0] = new LOD(maxHeight, new[] { renderers[0] });
+                return lods;
+            }
+
+            float step = (maxHeight - minHeight) / (count - 1);
+            for (int i = 0; i < count; i++)
+            {
+                float h = Mathf.Clamp(maxHeight - step * i, minHeight, maxHeight);
+                lods[i] = new LOD(h, new[] { renderers[i] });
+            }
+
+            return lods;
+        }
+
+        static int ExtractLodIndexFromPath(string virtualPath)
+        {
+            if (string.IsNullOrEmpty(virtualPath))
+                return -1;
+
+            string noExt = RemoveExtension(virtualPath);
+            string name = Path.GetFileName(noExt);
+            var m = Regex.Match(name, "_lod(\\d+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (m.Success && int.TryParse(m.Groups[1].Value, out int lod))
+                return lod;
+
+            return -1;
+        }
+
+        static List<string> FindSiblingLodPaths(string modelVirtualPath)
+        {
+            var result = new List<(int lod, string path)>();
+            string noExt = RemoveExtension(modelVirtualPath).Replace('\\', '/');
+            string dir = GetDirectoryLabel(noExt);
+            if (dir == "<root>")
+                dir = string.Empty;
+
+            string fileNoExt = Path.GetFileName(noExt);
+            string baseName = StripLodSuffix(fileNoExt);
+            if (string.IsNullOrEmpty(baseName))
+                baseName = fileNoExt;
+
+            string pattern = $"^{Regex.Escape(baseName)}_lod(\\d+)$";
+            var regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+            foreach (var path in FcFileSystem.GetEntries(dir))
+            {
+                if (!(path.EndsWith(".cgf", StringComparison.OrdinalIgnoreCase) ||
+                      path.EndsWith(".cga", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                if (string.Equals(path, modelVirtualPath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string candidateNoExt = RemoveExtension(path);
+                string candidateName = Path.GetFileName(candidateNoExt);
+                var m = regex.Match(candidateName);
+                if (!m.Success)
+                    continue;
+
+                if (!int.TryParse(m.Groups[1].Value, out int lodIndex))
+                    continue;
+                if (lodIndex < 1)
+                    continue;
+
+                result.Add((lodIndex, path));
+            }
+
+            return result
+                .OrderBy(x => x.lod)
+                .ThenBy(x => x.path, StringComparer.OrdinalIgnoreCase)
+                .Select(x => x.path)
+                .ToList();
+        }
+
+        static string StripLodSuffix(string nameWithoutExtension)
+        {
+            if (string.IsNullOrEmpty(nameWithoutExtension))
+                return nameWithoutExtension;
+
+            var m = Regex.Match(
+                nameWithoutExtension,
+                "^(.*)_lod\\d+$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (m.Success && !string.IsNullOrEmpty(m.Groups[1].Value))
+                return m.Groups[1].Value;
+
+            return nameWithoutExtension;
+        }
+
+        static Dictionary<uint, int> BuildRuntimeBoneIndexByControllerId(CgfFile parsedFile, BuildResult result)
+        {
+            var map = new Dictionary<uint, int>();
+            var entities = parsedFile?.BoneAnim?.Bones;
+            var boneIdToIndex = result?.BoneIdToIndex;
+            if (entities == null || entities.Length == 0 || boneIdToIndex == null || boneIdToIndex.Length == 0)
+                return map;
+
+            for (int i = 0; i < entities.Length; i++)
+            {
+                var e = entities[i];
+                if (e.ControllerID == 0)
+                    continue;
+                if (e.BoneID < 0 || e.BoneID >= boneIdToIndex.Length)
+                    continue;
+
+                int runtimeIndex = boneIdToIndex[e.BoneID];
+                if (runtimeIndex < 0)
+                    continue;
+
+                map[e.ControllerID] = runtimeIndex;
+            }
+
+            return map;
+        }
+
+        static int ResolveRuntimeBoneIndex(
+            CgfBoneEntity entity,
+            int[] boneIdToIndex,
+            Dictionary<uint, int> runtimeBoneByController,
+            int boneCount)
+        {
+            if (entity.ControllerID != 0 &&
+                runtimeBoneByController != null &&
+                runtimeBoneByController.TryGetValue(entity.ControllerID, out int byController))
+            {
+                if (byController >= 0 && byController < boneCount)
+                    return byController;
+            }
+
+            int boneId = entity.BoneID;
+            if (boneIdToIndex != null && boneId >= 0 && boneId < boneIdToIndex.Length)
+            {
+                int byBoneIdMap = boneIdToIndex[boneId];
+                if (byBoneIdMap >= 0 && byBoneIdMap < boneCount)
+                    return byBoneIdMap;
+            }
+
+            return boneId >= 0 && boneId < boneCount ? boneId : -1;
         }
 
         List<ImportedAnimationClip> TryAttachAnimations(
@@ -1283,13 +2385,6 @@ namespace OpenFarCry.Importer.Editor
         {
             string[] boneNames = result.BoneNames;
             Matrix4x4[] bindPoses = result.BindPoses;
-            bool rigStructCompatible =
-                TryUseRigDefinitionForSkeleton(result, rigDefinition, out var cachedBoneNames, out var cachedBindPoses);
-            if (rigStructCompatible)
-            {
-                boneNames = cachedBoneNames;
-                bindPoses = cachedBindPoses;
-            }
 
             var transforms = new Transform[boneNames.Length];
 
@@ -1302,10 +2397,9 @@ namespace OpenFarCry.Importer.Editor
             }
 
             bool hierarchyBuilt = false;
-            if (rigStructCompatible && rigDefinition != null && rigDefinition.IsValid)
+            hierarchyBuilt = TryBuildHierarchyFromBoneAnim(parsedFile, result, transforms);
+            if (!hierarchyBuilt && rigDefinition != null && rigDefinition.IsValid)
                 hierarchyBuilt = TryBuildHierarchyFromRigDefinition(rigDefinition, transforms);
-            if (!hierarchyBuilt)
-                hierarchyBuilt = TryBuildHierarchyFromBoneAnim(parsedFile, transforms);
             if (!hierarchyBuilt)
                 TryBuildHierarchyFromNodes(parsedFile, boneNames, transforms);
 
@@ -1398,66 +2492,58 @@ namespace OpenFarCry.Importer.Editor
             return anyParentAssigned;
         }
 
-        static bool TryBuildHierarchyFromBoneAnim(CgfFile parsedFile, Transform[] transforms)
+        static bool TryBuildHierarchyFromBoneAnim(CgfFile parsedFile, BuildResult result, Transform[] transforms)
         {
             var bones = parsedFile?.BoneAnim?.Bones;
             if (bones == null || bones.Length == 0)
                 return false;
 
-            int cursor = 0;
-            int nextBoneIndex = 0;
+            int boneCount = transforms.Length;
+            int[] boneIdToIndex = result?.BoneIdToIndex;
+            var runtimeBoneByController = BuildRuntimeBoneIndexByControllerId(parsedFile, result);
+
+            var runtimeByBoneId = new Dictionary<int, int>();
+            var entityByRuntime = new Dictionary<int, CgfBoneEntity>();
+            for (int i = 0; i < bones.Length; i++)
+            {
+                var entity = bones[i];
+                int runtimeIndex = ResolveRuntimeBoneIndex(entity, boneIdToIndex, runtimeBoneByController, boneCount);
+                if (runtimeIndex < 0 || runtimeIndex >= boneCount)
+                    continue;
+
+                if (!entityByRuntime.ContainsKey(runtimeIndex))
+                    entityByRuntime[runtimeIndex] = entity;
+                runtimeByBoneId[entity.BoneID] = runtimeIndex;
+            }
+
             bool anyParentAssigned = false;
-
-            int Allocate(int count)
+            foreach (var kv in entityByRuntime)
             {
-                if (count < 0 || nextBoneIndex + count > transforms.Length)
-                    return -1;
+                int childIndex = kv.Key;
+                var entity = kv.Value;
+                int parentIndex = -1;
 
-                int result = nextBoneIndex;
-                nextBoneIndex += count;
-                return result;
-            }
-
-            // Cry runtime reconstructs hierarchy from the linearized BONE_ENTITY
-            // stream, allocating sibling ranges before descending into children.
-            bool BuildSubtree(int parentIndex, int boneIndex)
-            {
-                if (cursor < 0 || cursor >= bones.Length || boneIndex < 0 || boneIndex >= transforms.Length)
-                    return false;
-
-                var entity = bones[cursor++];
-                if (parentIndex >= 0 && parentIndex < transforms.Length)
+                if (runtimeByBoneId.TryGetValue(entity.ParentID, out int byParentBoneId))
                 {
-                    var child = transforms[boneIndex];
-                    var parent = transforms[parentIndex];
-                    if (child != null && parent != null && child != parent)
-                    {
-                        child.SetParent(parent, worldPositionStays: false);
-                        anyParentAssigned = true;
-                    }
+                    parentIndex = byParentBoneId;
+                }
+                else if (boneIdToIndex != null &&
+                         entity.ParentID >= 0 &&
+                         entity.ParentID < boneIdToIndex.Length)
+                {
+                    parentIndex = boneIdToIndex[entity.ParentID];
                 }
 
-                int children = Mathf.Max(0, entity.ChildrenCount);
-                int childrenBase = children > 0 ? Allocate(children) : -1;
-                if (children > 0 && childrenBase < 0)
-                    return false;
+                if (parentIndex < 0 || parentIndex >= boneCount || parentIndex == childIndex)
+                    continue;
 
-                for (int i = 0; i < children; i++)
-                {
-                    if (!BuildSubtree(boneIndex, childrenBase + i))
-                        return false;
-                }
+                var child = transforms[childIndex];
+                var parent = transforms[parentIndex];
+                if (child == null || parent == null || child == parent)
+                    continue;
 
-                return true;
-            }
-
-            int rootIndex = Allocate(1);
-            if (rootIndex != 0 || !BuildSubtree(-1, rootIndex))
-                return false;
-
-            if (cursor != bones.Length)
-            {
-                Debug.LogWarning($"[CgfImporter] BoneAnim hierarchy parse consumed {cursor}/{bones.Length} entities.");
+                child.SetParent(parent, worldPositionStays: false);
+                anyParentAssigned = true;
             }
 
             return anyParentAssigned;
@@ -1548,28 +2634,47 @@ namespace OpenFarCry.Importer.Editor
             try
             {
                 var paths = GetCachePaths(_parsedPath);
-                bool dirCreated = EnsureDirectory(Path.GetDirectoryName(paths.meshPath)) |
-                                  EnsureDirectory(Path.GetDirectoryName(paths.prefabPath));
+                bool dirCreated = EnsureDirectory(Path.GetDirectoryName(paths.MeshPath)) |
+                                  EnsureDirectory(Path.GetDirectoryName(paths.PrefabPath));
                 if (dirCreated)
                     AssetDatabase.Refresh(); // let Unity discover new folders before creating assets
 
-                var existingMesh = AssetDatabase.LoadAssetAtPath<Mesh>(paths.meshPath);
+                var existingMesh = AssetDatabase.LoadAssetAtPath<Mesh>(paths.MeshPath);
                 if (existingMesh != null)
-                    AssetDatabase.DeleteAsset(paths.meshPath);
-                AssetDatabase.CreateAsset(mesh, paths.meshPath);
+                    AssetDatabase.DeleteAsset(paths.MeshPath);
+                AssetDatabase.CreateAsset(mesh, paths.MeshPath);
 
-                SaveAnimationClips(paths.meshPath, go, clips);
-                PrefabUtility.SaveAsPrefabAsset(go, paths.prefabPath);
+                SaveAnimationClips(paths.MeshPath, go, clips);
+                PrefabUtility.SaveAsPrefabAsset(go, paths.PrefabPath);
 
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
 
-                Debug.Log($"[CgfImporter] Saved mesh -> {paths.meshPath}, prefab -> {paths.prefabPath}");
+                Debug.Log($"[CgfImporter] Saved mesh -> {paths.MeshPath}, prefab -> {paths.PrefabPath}");
             }
             catch (Exception e)
             {
                 Debug.LogError($"[CgfImporter] Save failed: {e}");
             }
+        }
+
+        static Mesh PersistMeshAssetForVirtualPath(Mesh mesh, string virtualPath)
+        {
+            if (mesh == null || string.IsNullOrEmpty(virtualPath))
+                return mesh;
+
+            var paths = GetCachePaths(virtualPath);
+            bool dirCreated = EnsureDirectory(Path.GetDirectoryName(paths.MeshPath));
+            if (dirCreated)
+                AssetDatabase.Refresh();
+
+            var existing = AssetDatabase.LoadAssetAtPath<Mesh>(paths.MeshPath);
+            if (existing != null)
+                AssetDatabase.DeleteAsset(paths.MeshPath);
+
+            AssetDatabase.CreateAsset(mesh, paths.MeshPath);
+            var persisted = AssetDatabase.LoadAssetAtPath<Mesh>(paths.MeshPath);
+            return persisted != null ? persisted : mesh;
         }
 
         static void SaveAnimationClips(string meshPath, GameObject go, IReadOnlyList<ImportedAnimationClip> clips)
@@ -1642,9 +2747,10 @@ namespace OpenFarCry.Importer.Editor
             return true;
         }
 
-        static (string meshPath, string prefabPath) GetCachePaths(string virtualPath)
+        static CachePaths GetCachePaths(string virtualPath)
         {
-            return OpenFarCry.Importer.ImportAssetPaths.GetCgfCachePaths(virtualPath);
+            var paths = OpenFarCry.Importer.ImportAssetPaths.GetCgfCachePaths(virtualPath);
+            return new CachePaths(paths.meshPath, paths.prefabPath);
         }
 
         static string GetAnimationAssetPath(string meshPath, string alias)

@@ -92,6 +92,12 @@ namespace OpenFarCry.Importer.Cgf
                             break;
                         }
                         case CgfConstants.ChunkBoneMesh:
+                        {
+                            var boneMesh = ReadBoneMesh(data, h);
+                            file.BoneMeshChunks.Add(boneMesh);
+                            file.BoneMeshByChunkID[boneMesh.ChunkID] = boneMesh;
+                            break;
+                        }
                         case CgfConstants.ChunkBoneLightBinding:
                         case CgfConstants.ChunkMeshMorphTarget:
                             RecordUnsupportedChunk(unsupportedChunks, h);
@@ -225,13 +231,20 @@ namespace OpenFarCry.Importer.Cgf
             for (int i = 0; i < nTVerts; i++)
                 mesh.UVs[i] = new CryUV { U = r.ReadSingle(), V = r.ReadSingle() };
 
-            mesh.TexFaces = new CryTexFace[nFaces];
-            for (int i = 0; i < nFaces; i++)
+            if (nTVerts > 0)
             {
-                mesh.TexFaces[i] = new CryTexFace
+                mesh.TexFaces = new CryTexFace[nFaces];
+                for (int i = 0; i < nFaces; i++)
                 {
-                    T0 = r.ReadInt32(), T1 = r.ReadInt32(), T2 = r.ReadInt32()
-                };
+                    mesh.TexFaces[i] = new CryTexFace
+                    {
+                        T0 = r.ReadInt32(), T1 = r.ReadInt32(), T2 = r.ReadInt32()
+                    };
+                }
+            }
+            else
+            {
+                mesh.TexFaces = Array.Empty<CryTexFace>();
             }
 
             if (mesh.HasBoneInfo)
@@ -347,16 +360,26 @@ namespace OpenFarCry.Importer.Cgf
 
             for (int i = 0; i < boneCount; i++)
             {
-                bones[i] = new CgfBoneEntity
+                var entity = new CgfBoneEntity
                 {
                     BoneID = r.ReadInt32(),
                     ParentID = r.ReadInt32(),
                     ChildrenCount = r.ReadInt32(),
-                    ControllerID = r.ReadUInt32()
+                    ControllerID = r.ReadUInt32(),
+                    Physics = new CgfBonePhysics
+                    {
+                        PhysGeomChunkID = -1,
+                        FrameMatrix = Matrix4x4.identity
+                    }
                 };
 
                 if (boneEntityTailBytes > 0)
-                    ReadBytesExact(r, boneEntityTailBytes);
+                {
+                    var tail = ReadBytesExact(r, boneEntityTailBytes);
+                    ParseBoneEntityTail(tail, ref entity);
+                }
+
+                bones[i] = entity;
             }
 
             return new CgfBoneAnimChunk
@@ -364,6 +387,61 @@ namespace OpenFarCry.Importer.Cgf
                 ChunkID = h.ChunkID,
                 Bones = bones
             };
+        }
+
+        static CgfBoneMeshChunk ReadBoneMesh(byte[] data, ChunkHeader h)
+        {
+            // BoneMesh has the same chunk layout as Mesh (MESH_CHUNK_DESC_0744),
+            // but it is used for limb/collision geometry.
+            var mesh = ReadMesh(data, h);
+            return new CgfBoneMeshChunk
+            {
+                ChunkID = h.ChunkID,
+                Mesh = mesh
+            };
+        }
+
+        static void ParseBoneEntityTail(byte[] tailBytes, ref CgfBoneEntity entity)
+        {
+            if (tailBytes == null || tailBytes.Length == 0)
+                return;
+
+            using var ms = new MemoryStream(tailBytes, writable: false);
+            using var r = new BinaryReader(ms, Encoding.ASCII, leaveOpen: false);
+
+            // BONE_ENTITY tail in FC 1:
+            // prop[32], BONE_PHYSICS_COMP { int nPhysGeom, int flags, ... }.
+            if (ms.Length >= 32)
+            {
+                entity.Properties = ReadFixedString(r, 32);
+            }
+            else
+            {
+                entity.Properties = string.Empty;
+                return;
+            }
+
+            if (ms.Length - ms.Position < 8)
+                return;
+
+            var phys = new CgfBonePhysics
+            {
+                PhysGeomChunkID = r.ReadInt32(),
+                Flags = r.ReadInt32(),
+                FrameMatrix = Matrix4x4.identity
+            };
+
+            if (ms.Length - ms.Position >= 96)
+            {
+                phys.MinAngles = ReadVector3(r);
+                phys.MaxAngles = ReadVector3(r);
+                phys.SpringAngle = ReadVector3(r);
+                phys.SpringTension = ReadVector3(r);
+                phys.Damping = ReadVector3(r);
+                phys.FrameMatrix = ReadMatrix33(r);
+            }
+
+            entity.Physics = phys;
         }
 
         static CgfBoneNameListChunk ReadBoneNameList(byte[] data, ChunkHeader h)
@@ -497,8 +575,6 @@ namespace OpenFarCry.Importer.Cgf
         {
             switch (chunkType)
             {
-                case CgfConstants.ChunkBoneMesh:
-                    return "BoneMesh";
                 case CgfConstants.ChunkBoneLightBinding:
                     return "BoneLightBinding";
                 case CgfConstants.ChunkMeshMorphTarget:
@@ -512,8 +588,6 @@ namespace OpenFarCry.Importer.Cgf
         {
             switch (chunkType)
             {
-                case CgfConstants.ChunkBoneMesh:
-                    return "bone collision/physics geometry is ignored.";
                 case CgfConstants.ChunkBoneLightBinding:
                     return "bone-attached lights are ignored.";
                 case CgfConstants.ChunkMeshMorphTarget:
@@ -647,6 +721,25 @@ namespace OpenFarCry.Importer.Cgf
                 new Vector4(m[0, 1], m[1, 1], m[2, 1], 0f),
                 new Vector4(m[0, 2], m[1, 2], m[2, 2], 0f),
                 new Vector4(m[3, 0], m[3, 1], m[3, 2], 1f)
+            );
+        }
+
+        static Vector3 ReadVector3(BinaryReader r)
+        {
+            return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+        }
+
+        static Matrix4x4 ReadMatrix33(BinaryReader r)
+        {
+            float m00 = r.ReadSingle(); float m01 = r.ReadSingle(); float m02 = r.ReadSingle();
+            float m10 = r.ReadSingle(); float m11 = r.ReadSingle(); float m12 = r.ReadSingle();
+            float m20 = r.ReadSingle(); float m21 = r.ReadSingle(); float m22 = r.ReadSingle();
+
+            return new Matrix4x4(
+                new Vector4(m00, m10, m20, 0f),
+                new Vector4(m01, m11, m21, 0f),
+                new Vector4(m02, m12, m22, 0f),
+                new Vector4(0f, 0f, 0f, 1f)
             );
         }
     }

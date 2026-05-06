@@ -96,6 +96,8 @@ namespace OpenFarCry.Importer.Cgf
             var texFaces = chunk.TexFaces;
             var verts    = chunk.Vertices;
             var rawUVs   = chunk.UVs;
+            bool hasTexFaces = texFaces != null && texFaces.Length == faces.Length;
+            bool hasUvs = rawUVs != null && rawUVs.Length > 0 && hasTexFaces;
 
             for (int fi = 0; fi < faces.Length; fi++)
             {
@@ -106,28 +108,41 @@ namespace OpenFarCry.Importer.Cgf
                     submeshMap[matID] = triList;
                 }
 
-                int[] pi = { faces[fi].V0,    faces[fi].V1,    faces[fi].V2    };
-                int[] ti = { texFaces[fi].T0, texFaces[fi].T1, texFaces[fi].T2 };
+                int p0 = faces[fi].V0;
+                int p1 = faces[fi].V1;
+                int p2 = faces[fi].V2;
+                int t0 = hasTexFaces ? texFaces[fi].T0 : 0;
+                int t1 = hasTexFaces ? texFaces[fi].T1 : 0;
+                int t2 = hasTexFaces ? texFaces[fi].T2 : 0;
 
                 int[] cornerOrder = { 0, 1, 2 };
                 for (int oi = 0; oi < cornerOrder.Length; oi++)
                 {
                     int c = cornerOrder[oi];
-                    var key = (pi[c], ti[c]);
+                    int pi = c == 0 ? p0 : (c == 1 ? p1 : p2);
+                    int ti = c == 0 ? t0 : (c == 1 ? t1 : t2);
+                    var key = (pi, ti);
                     if (!vertCache.TryGetValue(key, out int idx))
                     {
                         idx = positions.Count;
-                        var v = verts[pi[c]];
+                        var v = verts[pi];
                         var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
-                        var links = chunk.BoneLinks?[pi[c]];
+                        var links = chunk.BoneLinks?[pi];
                         var pos = hasBones && TryBuildBindPositionFromLinks(links, bindGlobalsByBoneId, importScale, out var linkedBindPos)
                             ? linkedBindPos
                             : rawPos;
                         var nrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
                         positions.Add(unityNodeTransform.MultiplyPoint3x4(pos));
                         normals.Add(unityNodeTransform.MultiplyVector(nrm).normalized);
-                        var uv = rawUVs[ti[c]];
-                        uvs.Add(new Vector2(uv.U, uv.V));
+                        if (hasUvs && ti >= 0 && ti < rawUVs.Length)
+                        {
+                            var uv = rawUVs[ti];
+                            uvs.Add(new Vector2(uv.U, uv.V));
+                        }
+                        else
+                        {
+                            uvs.Add(Vector2.zero);
+                        }
                         boneWeightsList?.Add(links);
                         vertCache[key] = idx;
                     }

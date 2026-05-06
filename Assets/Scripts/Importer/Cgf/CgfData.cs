@@ -192,18 +192,40 @@ namespace OpenFarCry.Importer.Cgf
         public string[] Names;
     }
 
+    public struct CgfBonePhysics
+    {
+        // Chunk id of ChunkBoneMesh in source CGF. -1 when unavailable.
+        public int PhysGeomChunkID;
+        public int Flags;
+        public Vector3 MinAngles;
+        public Vector3 MaxAngles;
+        public Vector3 SpringAngle;
+        public Vector3 SpringTension;
+        public Vector3 Damping;
+        // Joint frame matrix from BONE_PHYSICS_COMP.framemtx.
+        public Matrix4x4 FrameMatrix;
+    }
+
     public struct CgfBoneEntity
     {
         public int BoneID;
         public int ParentID;
         public int ChildrenCount;
         public uint ControllerID;
+        public string Properties;
+        public CgfBonePhysics Physics;
     }
 
     public class CgfBoneAnimChunk
     {
         public int ChunkID;
         public CgfBoneEntity[] Bones;
+    }
+
+    public class CgfBoneMeshChunk
+    {
+        public int ChunkID;
+        public CgfMeshChunk Mesh;
     }
 
     // Each matrix converts from mesh-space to bone-space in bind pose (CryEngine RH Z-up)
@@ -226,6 +248,8 @@ namespace OpenFarCry.Importer.Cgf
         // Full parsed chunk collections keyed by ChunkID links.
         public List<CgfMeshChunk>                MeshChunks = new List<CgfMeshChunk>();
         public Dictionary<int, CgfMeshChunk>     MeshByChunkID = new Dictionary<int, CgfMeshChunk>();
+        public List<CgfBoneMeshChunk>            BoneMeshChunks = new List<CgfBoneMeshChunk>();
+        public Dictionary<int, CgfBoneMeshChunk> BoneMeshByChunkID = new Dictionary<int, CgfBoneMeshChunk>();
         public List<CgfNodeChunk>    NodeChunks  = new List<CgfNodeChunk>();
         public Dictionary<int, CgfNodeChunk>     NodeByChunkID = new Dictionary<int, CgfNodeChunk>();
         public Dictionary<int, CgfBoneInitPosChunk> BoneInitPosByMeshChunkID = new Dictionary<int, CgfBoneInitPosChunk>();

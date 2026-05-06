@@ -84,6 +84,7 @@ Key files:
 - `Assets/Scripts/Importer/Cgf/CgfData.cs`
 - `Assets/Scripts/Importer/Cgf/CgfParser.cs`
 - `Assets/Scripts/Importer/Cgf/CgfMeshBuilder.cs`
+- `Assets/Scripts/Importer/Cgf/FcRagdollController.cs`
 - `Assets/Scripts/Importer/Cgf/CgfRigDefinition.cs`
 - `Assets/Scripts/Importer/Cgf/CgfRigSnapshotBuilder.cs`
 - `Assets/Scripts/Importer/Cgf/CgfRigCacheSettings.cs`
@@ -113,6 +114,20 @@ Work status (2026-05-06):
   - Uses CAF start/end transform continuity heuristics plus alias hints (`idle/walk/run/...`) and one-shot hints (`jump/reload/death/...`).
   - Applies both `clip.wrapMode` and editor clip setting `loopTime`.
 - Added `BoneAnim` parsing (`0x0290`) and controllerID-to-bone-path mapping for clip curve binding.
+- Added ragdoll import path from CGF `BONE_PHYSICS_COMP`:
+  - `BoneMesh` chunks are parsed and can generate per-bone `BoxCollider`s.
+  - Optional ragdoll creation adds `Rigidbody` + `ConfigurableJoint` on physics bones.
+  - `FcRagdollController` toggles animated/physics states at runtime (`SetAnimated`/`SetRagdoll`).
+- Added LOD discovery/configuration in importer:
+  - Sibling `*_lodX` files are discovered and imported as LOD children.
+  - `LODGroup` is configured automatically from available levels.
+- Fixed ragdoll bone hierarchy correctness:
+  - Skeleton hierarchy creation now prefers current-file `BoneAnim` parent links.
+  - Bind-pose diagnostics (`[CgfImporter][Diag]`) are available and showed zero bind errors after fix.
+- Fixed CGF physics-angle sentinel handling:
+  - Extreme values (e.g. `±1e10`) are treated as unconstrained axes, not real limits.
+  - Axis mapping now prefers constrained axes for `AngularX`, improving hinge-like joints (knees/elbows).
+  - Added joint diagnostics (`[CgfImporter][JointDiag]`) for axis/limit verification.
 - Updated skeleton/bind-pose handling:
   - `BoneInitialPos` matrix parsing corrected for translation row in `SBoneInitPosMatrix`.
   - Bindposes now built as inverse of default global pose, with scale removal (`NoScale`-style).
@@ -132,10 +147,14 @@ Current behavior:
 - Parser handles alignment/padding-sensitive layouts for mesh/node chunks (bool fields before ints/matrices).
 - Parsed data keeps `ChunkID` links and multiple mesh chunks (`MeshChunks`, `MeshByChunkID`, `NodeByChunkID`), not only a single mesh.
 - Importer selects a primary mesh via `Node.ObjectID -> MeshChunkID` (fallback: first mesh chunk).
+- Importer can discover and build sibling LODs via `_lodX` filename suffix and apply a Unity `LODGroup`.
 - Mesh build keeps UV V-flip (`1 - v`) and groups faces into Unity submeshes by `MatID` (material count is tied to resulting submesh count).
 - `Import Skeleton` toggle exists in the importer window:
   - ON: creates `SkinnedMeshRenderer`, applies mesh bone weights/bindposes, and builds a bone hierarchy from node data + bind-pose-derived local transforms.
   - OFF: imports as plain `MeshFilter` + `MeshRenderer` for geometry debugging.
+- Additional importer toggles:
+  - `Import Physics Box Colliders` (from `BoneMesh`/bone physics data)
+  - `Import Ragdoll Bodies/Joints` (requires physics collider import)
 - Rig reuse behavior:
   - Exact reuse path requires strict bone/index compatibility.
   - Animation-compatible reuse can share controller-to-bone mapping and clip cache even if raw bone order differs across source files.
