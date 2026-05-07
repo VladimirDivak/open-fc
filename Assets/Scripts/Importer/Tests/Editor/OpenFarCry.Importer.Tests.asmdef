@@ -1,0 +1,22 @@
+{
+    "name": "OpenFarCry.Importer.Tests",
+    "rootNamespace": "OpenFarCry.Importer.Tests",
+    "references": [
+        "OpenFarCry.Importer",
+        "OpenFarCry.FileSystem"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false,
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}

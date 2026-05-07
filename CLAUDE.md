@@ -75,6 +75,8 @@ Current behavior:
 
 When adding file-system features, preserve thread-safety around mount/index state and do not block the Unity main thread for heavy decompression or parsing.
 
+Resource-loading services must support both project-side cached assets under `Assets/FCData/` and original files read on demand from mounted PAK archives through `FcFileSystem`. Prefer cached project assets when they exist and the active file-system/import settings allow project cache usage; fall back to the original PAK-backed virtual path when running in builds or when settings explicitly request live PAK loading. Do not make importer or runtime resource code depend on editor-only cache assets as the only source of truth.
+
 ### CGF Importer
 
 Assembly: `OpenFarCry.Importer`
@@ -91,6 +93,35 @@ Key files:
 - `Assets/Scripts/Importer/Editor/CgfImporterWindow.cs`
 - `Assets/Scripts/Importer/Editor/CgfRigRegistry.cs`
 - `Assets/Scripts/Importer/ImportAssetPaths.cs`
+
+Current refactor snapshot (2026-05-07):
+
+- Runtime-first service split is in place:
+  - `CgfResourceImportService` for virtual-path source loading.
+  - `CgfRuntimeImportRequest` / `CgfRuntimeImportResult` runtime contracts.
+  - `CgfRuntimeImportService` + `CgfRuntimeImporter` as runtime import entry/facade.
+  - `CgfRuntimeAssetCache` with parsed/model entries, ref-counting, scope release, and trim.
+- Runtime-safe builders/services extracted from editor window:
+  - `CgfGameObjectBuilder`, `CgfSkeletonBuilder`, `CgfLodImportService`,
+    `CgfAnimationRuntimeImportService`, `CgfRagdollBuilder`, `CgfRagdollDiagnostics`.
+- Editor-only orchestration split is in place:
+  - `CgfImportEditorService`, `CgfImportRequest`, `CgfImportResult`.
+  - `CgfAssetCacheService` for mesh/prefab persistence.
+  - `CgfAnimationImportEditorService` + `CgfAnimationCacheService` for shared `.anim` cache.
+- Source browsing/parsing UI support is extracted to `CgfSourceBrowser`.
+- `CgfImporterWindow` is now a thin UI/controller (~531 lines), not the core importer implementation.
+- EditMode tests were added for:
+  - `CgfSourceBrowser` filtering/selection behavior.
+  - `CgfRuntimeAssetCache` retain/release/scope/trim behavior.
+- Runtime smoke test script exists:
+  - `Assets/Scripts/Importer/Cgf/CgfRuntimeLoadSmokeTest.cs`
+  - It can run scene-level import timing, optional animation/LOD/physics setup, and cache scope release/trim checks.
+
+Known runtime performance issue (current state):
+
+- Character animation stage still dominates load time in runtime smoke runs (`CgfAnimationRuntimeImportService`).
+- Model cache hits are working; cross-model clip reuse is still not confirmed for all character variants even with current CAF/clip cache logic.
+- Keep this as an active optimization/debug area before treating runtime animation performance as closed.
 
 Work status (2026-05-06):
 

@@ -85,7 +85,7 @@ namespace OpenFarCry.Importer.Editor
                         "Target asset already exists.");
                 }
 
-                byte[] bytes = TextureImportService.ReadSourceBytes(normalizedVirtualPath);
+                byte[] bytes = TextureImportService.ResourceService.LoadProjectAssetSourceBytes(normalizedVirtualPath);
                 File.WriteAllBytes(fullPath, bytes);
 
                 AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
