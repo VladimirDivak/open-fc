@@ -39,7 +39,7 @@ unity -batchmode -projectPath "/home/vladimir/Unity Projects/open-farcry" \
 
 ## Repository Notes
 
-This checkout currently has a `.git` directory entry that does not behave as a normal Git worktree. Do not rely on `git status` for safety checks unless Git is repaired or initialized.
+This checkout currently behaves as a normal Git worktree. Use `git status`/`git diff` before edits and before commits because Unity can still introduce unrelated asset churn.
 
 Avoid editing generated Unity folders unless explicitly needed:
 
@@ -94,7 +94,7 @@ Key files:
 - `Assets/Scripts/Importer/Editor/CgfRigRegistry.cs`
 - `Assets/Scripts/Importer/ImportAssetPaths.cs`
 
-Current refactor snapshot (2026-05-07):
+Current refactor snapshot (2026-05-08):
 
 - Runtime-first service split is in place:
   - `CgfResourceImportService` for virtual-path source loading.
@@ -104,6 +104,10 @@ Current refactor snapshot (2026-05-07):
 - Runtime-safe builders/services extracted from editor window:
   - `CgfGameObjectBuilder`, `CgfSkeletonBuilder`, `CgfLodImportService`,
     `CgfAnimationRuntimeImportService`, `CgfRagdollBuilder`, `CgfRagdollDiagnostics`.
+- Runtime material path is partially split out:
+  - `CgfMaterialBuilder`, `CgfMaterialImportService`, `CgfMaterialRuntimeCache`.
+  - `CgfParser` now preserves material data needed for runtime material/color/texture-name resolution.
+  - Multi-material resolution is keyed by material IDs, not only Unity submesh order.
 - Editor-only orchestration split is in place:
   - `CgfImportEditorService`, `CgfImportRequest`, `CgfImportResult`.
   - `CgfAssetCacheService` for mesh/prefab persistence.
@@ -116,11 +120,19 @@ Current refactor snapshot (2026-05-07):
 - Runtime smoke test script exists:
   - `Assets/Scripts/Importer/Cgf/CgfRuntimeLoadSmokeTest.cs`
   - It can run scene-level import timing, optional animation/LOD/physics setup, and cache scope release/trim checks.
+- Brush/runtime collider handling now prefers proxy/no-draw geometry:
+  - `FcBrushInstance` can derive collider faces from no-draw/proxy material slots first.
+  - Proxy/no-draw submeshes are stripped from the visual mesh so collider geometry is not rendered.
+- Level-loading runtime code lives under `Assets/Scripts/Level/`, but the orchestration is still transitional:
+  - entity components still contain self-loading behavior in places;
+  - the current level runtime path is still mostly synchronous and main-thread-heavy;
+  - the planned refactor is documented in `LEVEL_LOADING_REFACTOR_PLAN.md`.
 
 Known runtime performance issue (current state):
 
 - Character animation stage still dominates load time in runtime smoke runs (`CgfAnimationRuntimeImportService`).
 - Model cache hits are working; cross-model clip reuse is still not confirmed for all character variants even with current CAF/clip cache logic.
+- Do not assume raw CAF file bytes are a stable semantic cache key across equivalent clips; treat animation cache identity/compatibility as an active design problem.
 - Keep this as an active optimization/debug area before treating runtime animation performance as closed.
 
 Work status (2026-05-06):
@@ -180,6 +192,7 @@ Current behavior:
 - Importer selects a primary mesh via `Node.ObjectID -> MeshChunkID` (fallback: first mesh chunk).
 - Importer can discover and build sibling LODs via `_lodX` filename suffix and apply a Unity `LODGroup`.
 - Mesh build keeps UV V-flip (`1 - v`) and groups faces into Unity submeshes by `MatID` (material count is tied to resulting submesh count).
+- Runtime material assignment is now resolved through parsed material chunks and submesh `MatID` mapping, not only by submesh index.
 - `Import Skeleton` toggle exists in the importer window:
   - ON: creates `SkinnedMeshRenderer`, applies mesh bone weights/bindposes, and builds a bone hierarchy from node data + bind-pose-derived local transforms.
   - OFF: imports as plain `MeshFilter` + `MeshRenderer` for geometry debugging.
@@ -191,6 +204,7 @@ Current behavior:
   - Animation-compatible reuse can share controller-to-bone mapping and clip cache even if raw bone order differs across source files.
   - Hierarchy from cached rig is applied only when structural compatibility checks pass; otherwise hierarchy is rebuilt from current source (`BoneAnim`/`Node`) to avoid pose corruption.
 - Coordinate-system/scale conversion is baked into imported data. Do not reintroduce a negative root scale or final root rotation as a shortcut; it makes prefabs hard to use and can hide bind/animation-space mismatches.
+- Current coordinate conversion remains sensitive. If changing matrix/transform conversion, validate mesh placement, brush placement, yaw rotation, bind poses, and animation together rather than patching only one stage.
 - Caching/saving is deterministic by source virtual path:
   - mesh: `Assets/FCData/<virtual_path_without_ext>.asset`
   - prefab: `Assets/FCData/<virtual_path_without_ext>.prefab`
@@ -202,6 +216,33 @@ Current behavior:
 Treat the CGF importer as incremental and format-sensitive. When changing binary parsing, cross-check against CryEngine source in `~/Documents/farcry-sources/`, especially ResourceCompiler and CryChunkedFile code.
 
 Detailed importer notes are in `~/Documents/farcry-sources/docs/OpenFarCry_Unity_CGF_CAF_Importer.md`. Read that before changing CGF/CAF transform, bind pose, bone mapping, or animation code.
+
+### Level Loading
+
+Assembly: `OpenFarCry.Level`
+
+Key files:
+
+- `Assets/Scripts/Level/Data/FcLevelLoader.cs`
+- `Assets/Scripts/Level/Editor/FcLevelSceneBuilder.cs`
+- `Assets/Scripts/Level/Services/FcLevelResourceService.cs`
+- `Assets/Scripts/Level/Entities/FcMeshEntity.cs`
+- `Assets/Scripts/Level/Entities/FcCharacterEntity.cs`
+- `Assets/Scripts/Level/Entities/FcBrushInstance.cs`
+- `LEVEL_LOADING_REFACTOR_PLAN.md`
+
+Current behavior:
+
+- Mission/entity/brush parsing exists and can assemble a basic scene from Far Cry level data.
+- Terrain, vegetation, and more complex environment systems are still outside the implemented level path.
+- `brush.lst` parsing and brush scene assembly are in place, including material-table parsing needed for proxy/no-draw handling.
+- Level runtime loading is not fully service-driven yet:
+  - some entity types still trigger resource loading from their own lifecycle methods;
+  - the main runtime path is still mostly synchronous;
+  - timing/instrumentation for real level loads is still incomplete.
+- `FcFileSystem.ReadAllBytesAsync(...)` exists and should be preferred for future level-load refactors, but the current level pipeline does not yet use async systematically.
+
+When changing level loading, prefer moving logic toward centralized services and explicit load requests rather than expanding self-loading MonoBehaviour code.
 
 Known limitations (current state):
 

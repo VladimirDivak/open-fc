@@ -1,0 +1,369 @@
+using System.IO;
+using System.Collections.Generic;
+using OpenFarCry.Importer.Cgf;
+using OpenFarCry.Level.Services;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace OpenFarCry.Level.Entities
+{
+    // Static world brush. Position/rotation/scale are baked by FcLevelSceneBuilder.
+    // CGF mesh is loaded from PAK at Play Mode start via FcLevelResourceService.
+    [DisallowMultipleComponent]
+    public sealed class FcBrushInstance : MonoBehaviour
+    {
+        [SerializeField] string _virtualPath;
+        [SerializeField] bool _noPhysics;
+
+        readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
+        readonly CgfLodImportService _lodService = new CgfLodImportService();
+        CgfRuntimeImportResult _importResult;
+        Mesh _physicsColliderMesh;
+        Mesh _visualFilteredMesh;
+
+        void Start()
+        {
+            if (string.IsNullOrEmpty(_virtualPath)) return;
+
+            var svc = FcLevelResourceService.Current;
+            if (svc == null)
+            {
+                Debug.LogWarning("[FcBrushInstance] FcLevelResourceService not found.", this);
+                return;
+            }
+
+            var result = svc.ImportCgf(new CgfRuntimeImportRequest(
+                virtualPath: _virtualPath,
+                importSkeleton: false,
+                importAnimations: false,
+                importScale: 0.01f,
+                useRuntimeMemoryCache: true));
+
+            if (!result.Success)
+            {
+                Debug.LogWarning($"[FcBrush] '{_virtualPath}': {result.ErrorMessage}", this);
+                return;
+            }
+
+            _importResult = result;
+
+            string meshName = Path.GetFileNameWithoutExtension(_virtualPath);
+            var output = _goBuilder.Build(new CgfGameObjectBuilder.BuildRequest(
+                result: result.BuildResult,
+                parsedFile: result.ParsedFile,
+                rigDefinition: null,
+                name: meshName,
+                materialService: CgfRuntimeImporter.MaterialService));
+
+            StripProxySubmeshesFromVisual(output.Root, result);
+            output.Root.transform.SetParent(transform, worldPositionStays: false);
+
+            if (!_noPhysics && result.Mesh != null)
+            {
+                var col = output.Root.AddComponent<MeshCollider>();
+                if (TryBuildPhysicsColliderMesh(result.ParsedFile, 0.01f, out var physicsMesh))
+                {
+                    _physicsColliderMesh = physicsMesh;
+                    col.sharedMesh = physicsMesh;
+                }
+                else
+                {
+                    col.sharedMesh = result.Mesh;
+                }
+            }
+
+            var lods = _lodService.FindSiblingLodPaths(result.VirtualPath);
+            if (lods.Count > 0)
+                _lodService.ConfigureLodGroup(output.Root, hasSkeleton: false, importScale: 0.01f, siblingLodPaths: lods,
+                    materialService: CgfRuntimeImporter.MaterialService);
+        }
+
+        void OnDestroy()
+        {
+            if (_importResult != null)
+                FcLevelResourceService.Current?.ReleaseImportResult(_importResult);
+
+            if (_physicsColliderMesh != null)
+            {
+                Destroy(_physicsColliderMesh);
+                _physicsColliderMesh = null;
+            }
+
+            if (_visualFilteredMesh != null)
+            {
+                Destroy(_visualFilteredMesh);
+                _visualFilteredMesh = null;
+            }
+        }
+
+        void StripProxySubmeshesFromVisual(GameObject visualRoot, CgfRuntimeImportResult result)
+        {
+            if (visualRoot == null || result?.BuildResult?.SubmeshMaterialIds == null)
+                return;
+
+            if (!TryResolveRootMaterial(result.ParsedFile, out var rootMat) || rootMat == null)
+                return;
+
+            var proxyMatIds = BuildProxyMaterialIds(result.ParsedFile, rootMat);
+            if (proxyMatIds == null || proxyMatIds.Count == 0)
+                return;
+
+            var mf = visualRoot.GetComponent<MeshFilter>();
+            var mr = visualRoot.GetComponent<MeshRenderer>();
+            var sourceMesh = mf != null ? mf.sharedMesh : null;
+            if (mf == null || mr == null || sourceMesh == null)
+                return;
+
+            int subCount = sourceMesh.subMeshCount;
+            if (subCount <= 0)
+                return;
+
+            int[] matIds = result.BuildResult.SubmeshMaterialIds;
+            if (matIds.Length != subCount)
+                return;
+
+            int directMatches = 0;
+            int minusOneMatches = 0;
+            int plusOneMatches = 0;
+            for (int i = 0; i < matIds.Length; i++)
+            {
+                int id = matIds[i];
+                if (proxyMatIds.Contains(id)) directMatches++;
+                if (proxyMatIds.Contains(id - 1)) minusOneMatches++;
+                if (proxyMatIds.Contains(id + 1)) plusOneMatches++;
+            }
+
+            int mode = 0; // 0=direct, -1=(id-1), +1=(id+1)
+            int best = directMatches;
+            if (minusOneMatches > best) { best = minusOneMatches; mode = -1; }
+            if (plusOneMatches > best) { best = plusOneMatches; mode = 1; }
+
+            bool IsProxySubmesh(int matId)
+            {
+                return mode switch
+                {
+                    -1 => proxyMatIds.Contains(matId - 1),
+                    1 => proxyMatIds.Contains(matId + 1),
+                    _ => proxyMatIds.Contains(matId),
+                };
+            }
+
+            var keep = new List<int>(subCount);
+            for (int i = 0; i < subCount; i++)
+            {
+                if (!IsProxySubmesh(matIds[i]))
+                    keep.Add(i);
+            }
+
+            if (keep.Count == subCount)
+                return;
+
+            if (keep.Count == 0)
+            {
+                mr.enabled = false;
+                return;
+            }
+
+            var filtered = Object.Instantiate(sourceMesh);
+            filtered.name = $"{sourceMesh.name}_NoProxyVisual";
+            filtered.subMeshCount = keep.Count;
+            for (int i = 0; i < keep.Count; i++)
+            {
+                int src = keep[i];
+                filtered.SetTriangles(sourceMesh.GetTriangles(src), i, true);
+            }
+            filtered.RecalculateBounds();
+
+            var oldFiltered = _visualFilteredMesh;
+            _visualFilteredMesh = filtered;
+            if (oldFiltered != null)
+                Destroy(oldFiltered);
+
+            mf.sharedMesh = filtered;
+
+            var mats = mr.sharedMaterials;
+            var newMats = new Material[keep.Count];
+            for (int i = 0; i < keep.Count; i++)
+            {
+                int src = keep[i];
+                newMats[i] = src >= 0 && src < mats.Length ? mats[src] : null;
+            }
+            mr.sharedMaterials = newMats;
+        }
+
+        static bool TryBuildPhysicsColliderMesh(CgfFile parsedFile, float importScale, out Mesh mesh)
+        {
+            if (TryBuildFromNoDrawFaces(parsedFile, importScale, out mesh))
+                return true;
+
+            if (TryBuildFromBoneMesh(parsedFile, importScale, out mesh))
+                return true;
+
+            mesh = null;
+            return false;
+        }
+
+        static bool TryBuildFromNoDrawFaces(CgfFile parsedFile, float importScale, out Mesh mesh)
+        {
+            mesh = null;
+            var meshChunk = parsedFile?.MeshChunk;
+            if (meshChunk?.Vertices == null || meshChunk.Faces == null || meshChunk.Faces.Length == 0)
+                return false;
+
+            if (!TryResolveRootMaterial(parsedFile, out var rootMat) || rootMat == null)
+                return false;
+
+            var proxyMatIds = BuildProxyMaterialIds(parsedFile, rootMat);
+            if (proxyMatIds == null)
+            {
+                // Single proxy-only material: use all faces.
+                return BuildColliderMeshFromFaces(meshChunk, importScale, allowedMatIds: null, "BrushNoDrawCollider", out mesh);
+            }
+
+            if (proxyMatIds.Count == 0)
+                return false;
+
+            if (BuildColliderMeshFromFaces(meshChunk, importScale, proxyMatIds, "BrushNoDrawCollider", out mesh))
+                return true;
+
+            // Some exporters write face MatID as 1-based sub-material index.
+            var shifted = new HashSet<int>();
+            foreach (int id in proxyMatIds)
+                shifted.Add(id + 1);
+            return BuildColliderMeshFromFaces(meshChunk, importScale, shifted, "BrushNoDrawCollider", out mesh);
+        }
+
+        static bool TryBuildFromBoneMesh(CgfFile parsedFile, float importScale, out Mesh mesh)
+        {
+            mesh = null;
+            var chunks = parsedFile?.BoneMeshChunks;
+            if (chunks == null || chunks.Count == 0)
+                return false;
+
+            CgfMeshChunk phys = null;
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var candidate = chunks[i]?.Mesh;
+                if (candidate?.Vertices != null &&
+                    candidate.Vertices.Length > 0 &&
+                    candidate.Faces != null &&
+                    candidate.Faces.Length > 0)
+                {
+                    phys = candidate;
+                    break;
+                }
+            }
+
+            if (phys == null)
+                return false;
+
+            return BuildColliderMeshFromFaces(phys, importScale, allowedMatIds: null, "BrushPhysicsCollider", out mesh);
+        }
+
+        static bool BuildColliderMeshFromFaces(
+            CgfMeshChunk source,
+            float importScale,
+            HashSet<int> allowedMatIds,
+            string meshName,
+            out Mesh mesh)
+        {
+            mesh = null;
+            if (source?.Vertices == null || source.Faces == null || source.Faces.Length == 0)
+                return false;
+
+            var vertices = new List<Vector3>(source.Vertices.Length);
+            for (int i = 0; i < source.Vertices.Length; i++)
+            {
+                var v = source.Vertices[i];
+                vertices.Add(CryTransformConversion.PositionInImporterSpace(
+                    new Vector3(v.PX, v.PY, v.PZ),
+                    importScale));
+            }
+
+            var triangles = new List<int>(source.Faces.Length * 3);
+            for (int i = 0; i < source.Faces.Length; i++)
+            {
+                var f = source.Faces[i];
+                if (allowedMatIds != null && !allowedMatIds.Contains(f.MatID))
+                    continue;
+                if (f.V0 < 0 || f.V1 < 0 || f.V2 < 0 ||
+                    f.V0 >= vertices.Count || f.V1 >= vertices.Count || f.V2 >= vertices.Count)
+                    continue;
+                triangles.Add(f.V0);
+                triangles.Add(f.V1);
+                triangles.Add(f.V2);
+            }
+
+            if (triangles.Count < 3)
+                return false;
+
+            mesh = new Mesh { name = meshName };
+            if (vertices.Count > 65535)
+                mesh.indexFormat = IndexFormat.UInt32;
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(triangles, 0, true);
+            mesh.RecalculateBounds();
+            return true;
+        }
+
+        static bool TryResolveRootMaterial(CgfFile parsedFile, out CgfMaterialChunk rootMat)
+        {
+            rootMat = null;
+            if (parsedFile == null)
+                return false;
+
+            CgfNodeChunk primaryNode = null;
+            var nodes = parsedFile.NodeChunks;
+            if (nodes != null)
+            {
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    var node = nodes[i];
+                    if (node.ObjectID == parsedFile.SelectedMeshChunkID)
+                    {
+                        primaryNode = node;
+                        break;
+                    }
+                }
+            }
+
+            int matChunkId = primaryNode?.MatID ?? -1;
+            return matChunkId >= 0 && parsedFile.MaterialByChunkID.TryGetValue(matChunkId, out rootMat);
+        }
+
+        static HashSet<int> BuildProxyMaterialIds(CgfFile parsedFile, CgfMaterialChunk rootMat)
+        {
+            if (rootMat == null)
+                return new HashSet<int>();
+
+            if (rootMat.MtlType != CgfMtlType.Multi)
+                return IsNoDrawProxyMaterial(rootMat.Name) ? null : new HashSet<int>();
+
+            var ids = new HashSet<int>();
+            if (!parsedFile.MaterialChildrenByParentChunkID.TryGetValue(rootMat.ChunkID, out var children) || children == null)
+                return ids;
+
+            for (int i = 0; i < children.Count; i++)
+            {
+                if (IsNoDrawProxyMaterial(children[i]?.Name))
+                    ids.Add(i);
+            }
+
+            return ids;
+        }
+
+        static bool IsNoDrawProxyMaterial(string materialName)
+        {
+            if (string.IsNullOrWhiteSpace(materialName))
+                return false;
+
+            string n = materialName.ToLowerInvariant();
+            return n.Contains("nodraw") ||
+                   n.Contains("no_draw") ||
+                   n.Contains("physics_proxy") ||
+                   n.Contains("phys_proxy") ||
+                   n.Contains("$physics_proxy") ||
+                   n.Contains("proxy");
+        }
+    }
+}

@@ -18,6 +18,7 @@ namespace OpenFarCry.Importer.Cgf
         public const uint ChunkBoneMesh     = 0xCCCC000Fu;
         public const uint ChunkBoneLightBinding = 0xCCCC0010u;
         public const uint ChunkMeshMorphTarget  = 0xCCCC0011u;
+        public const uint ChunkMtl          = 0xCCCC000Cu;
         public const uint ChunkBoneInitPos  = 0xCCCC0012u;
 
         public const int ChunkHeaderSize = 16; // ChunkType(4) + ChunkVersion(4) + FileOffset(4) + ChunkID(4)
@@ -228,6 +229,31 @@ namespace OpenFarCry.Importer.Cgf
         public CgfMeshChunk Mesh;
     }
 
+    // From CryHeaders.h MtlTypes enum.
+    public enum CgfMtlType { Unknown = 0, Standard = 1, Multi = 2, TwoSided = 3 }
+
+    // From CryHeaders.h MTL_CHUNK_FLAGS enum (subset used in import).
+    [System.Flags]
+    public enum CgfMtlFlags { None = 0, TwoSided = 0x002, Additive = 0x010 }
+
+    // Parsed data from MTL_CHUNK_DESC_0744 / 0745 / 0746 (ChunkType_Mtl = 0xCCCC000C).
+    // Texture name fields are populated when version >= 0x0744; opacity/alphaTest only in 0x0745+/0x0746.
+    public class CgfMaterialChunk
+    {
+        public int        ChunkID;
+        public int        ChunkVersion;     // 0x0744, 0x0745, or 0x0746
+        public int        TableIndex;       // index in material chunk-table order
+        public string     Name;
+        public CgfMtlType MtlType;
+        public int        ChildCount;       // MTL_MULTI only: number of sub-materials
+        public Color32    DiffuseColor;
+        public float      Opacity;          // 0x0745+; 0-1, default 1 (fully opaque)
+        public float      AlphaTest;        // 0x0746+; > 0 means alpha-test is active
+        public CgfMtlFlags Flags;           // 0x0745+
+        public string     DiffuseTextureName;  // tex_d.name, normalised to lowercase
+        public string     OpacityTextureName;  // tex_o.name, normalised to lowercase
+    }
+
     // Each matrix converts from mesh-space to bone-space in bind pose (CryEngine RH Z-up)
     public class CgfBoneInitPosChunk
     {
@@ -239,6 +265,7 @@ namespace OpenFarCry.Importer.Cgf
     {
         public int FileType;
         public int Version;
+        public string SourceVirtualPath;
 
         // Backward-compatible "selected" chunks used by existing builder/editor flow.
         public int SelectedMeshChunkID = -1;
@@ -255,5 +282,12 @@ namespace OpenFarCry.Importer.Cgf
         public Dictionary<int, CgfBoneInitPosChunk> BoneInitPosByMeshChunkID = new Dictionary<int, CgfBoneInitPosChunk>();
         public CgfBoneNameListChunk  BoneNames;
         public CgfBoneAnimChunk      BoneAnim;
+
+        // Material chunks keyed by ChunkID; LeafMaterials lists non-multi chunks in table order.
+        public List<CgfMaterialChunk>            MaterialChunks      = new List<CgfMaterialChunk>();
+        public Dictionary<int, CgfMaterialChunk> MaterialByChunkID   = new Dictionary<int, CgfMaterialChunk>();
+        public List<CgfMaterialChunk>            LeafMaterials       = new List<CgfMaterialChunk>();
+        public Dictionary<int, List<CgfMaterialChunk>> MaterialChildrenByParentChunkID =
+            new Dictionary<int, List<CgfMaterialChunk>>();
     }
 }

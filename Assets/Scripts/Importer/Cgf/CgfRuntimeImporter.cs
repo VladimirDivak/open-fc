@@ -7,7 +7,17 @@ namespace OpenFarCry.Importer.Cgf
             resourceService: CgfResourceImportService.Instance,
             runtimeCache: SharedCache);
 
+        static readonly CgfMaterialRuntimeCache SharedMaterialCache = new CgfMaterialRuntimeCache();
+        static readonly CgfMaterialImportService SharedMaterialService =
+            new CgfMaterialImportService(SharedMaterialCache);
+
         public static CgfRuntimeImportService Service => SharedService;
+
+        // Use when creating a BuildRequest to get per-submesh materials from parsed chunks.
+        public static CgfMaterialImportService MaterialService => SharedMaterialService;
+
+        public static void ClearMaterialCache() => SharedMaterialService.ClearCache();
+        public static int MaterialCacheCount => SharedMaterialService.CachedCount;
 
         public static CgfRuntimeImportResult Import(CgfRuntimeImportRequest request, string levelScopeId = null)
         {
@@ -42,6 +52,7 @@ namespace OpenFarCry.Importer.Cgf
         public static void ClearRuntimeCache()
         {
             SharedService.ClearRuntimeCache();
+            SharedMaterialService.ClearCache();
         }
 
         public static CgfRuntimeAssetCache.Stats GetCacheStats()

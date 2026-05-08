@@ -56,7 +56,8 @@ namespace OpenFarCry.Importer.Cgf
             bool hasSkeleton,
             float importScale,
             IReadOnlyList<string> siblingLodPaths,
-            Func<Mesh, string, Mesh> persistMesh = null)
+            Func<Mesh, string, Mesh> persistMesh = null,
+            CgfMaterialImportService materialService = null)
         {
             if (root == null)
                 return;
@@ -86,6 +87,7 @@ namespace OpenFarCry.Importer.Cgf
                     {
                         byte[] bytes = CgfResourceImportService.Instance.LoadRuntimeResourceBytes(lodPath);
                         var parsedLod = CgfParser.Parse(bytes);
+                        parsedLod.SourceVirtualPath = lodPath;
                         var buildLod = CgfMeshBuilder.Build(parsedLod, hasSkeleton, importScale);
                         if (buildLod?.Mesh == null)
                             continue;
@@ -108,7 +110,9 @@ namespace OpenFarCry.Importer.Cgf
                             lodSmr.sharedMesh = lodMesh;
                             lodSmr.bones = baseSmr.bones;
                             lodSmr.rootBone = baseSmr.rootBone;
-                            lodSmr.sharedMaterials = new Material[lodMesh.subMeshCount];
+                            lodSmr.sharedMaterials = materialService != null
+                                ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds)
+                                : new Material[lodMesh.subMeshCount];
                             lodRenderers.Add(lodSmr);
                         }
                         else
@@ -116,7 +120,9 @@ namespace OpenFarCry.Importer.Cgf
                             var mf = lodGo.AddComponent<MeshFilter>();
                             mf.sharedMesh = lodMesh;
                             var mr = lodGo.AddComponent<MeshRenderer>();
-                            mr.sharedMaterials = new Material[lodMesh.subMeshCount];
+                            mr.sharedMaterials = materialService != null
+                                ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds)
+                                : new Material[lodMesh.subMeshCount];
                             lodRenderers.Add(mr);
                         }
                     }

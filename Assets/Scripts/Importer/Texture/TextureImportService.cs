@@ -4,6 +4,9 @@ namespace OpenFarCry.Importer.Texture
     {
         public static readonly string[] SupportedExtensions = { ".dds", ".bmp", ".tga" };
 
+        // Shared Texture2D cache; populated by a DDS parser once one is implemented.
+        public static readonly TextureRuntimeCache RuntimeCache = new TextureRuntimeCache();
+
         public static TextureResourceImportService ResourceService => TextureResourceImportService.Instance;
 
         public static bool IsSupportedVirtualPath(string virtualPath)

@@ -11,6 +11,7 @@ namespace OpenFarCry.Importer.Cgf
         public Mesh        Mesh;
         public int         MeshChunkID;
         public string      SourceNodeName;
+        public int[]       SubmeshMaterialIds; // submesh index -> original Cry face MatID
         public bool        HasSkeleton;
         public string[]    BoneNames;   // null if !HasSkeleton
         public Matrix4x4[] BindPoses;   // Unity-space inverse bind matrices
@@ -164,6 +165,7 @@ namespace OpenFarCry.Importer.Cgf
             mesh.subMeshCount = sortedMatIDs.Count;
             for (int si = 0; si < sortedMatIDs.Count; si++)
                 mesh.SetTriangles(submeshMap[sortedMatIDs[si]], si);
+            result.SubmeshMaterialIds = sortedMatIDs.ToArray();
 
             // --- Skeleton ---
             if (hasBones)

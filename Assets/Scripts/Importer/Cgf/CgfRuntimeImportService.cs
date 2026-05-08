@@ -62,10 +62,14 @@ namespace OpenFarCry.Importer.Cgf
                 {
                     byte[] sourceBytes = _resourceService.LoadRuntimeResourceBytes(normalizedVirtualPath);
                     parsedBase = CgfParser.Parse(sourceBytes);
+                    parsedBase.SourceVirtualPath = normalizedVirtualPath;
 
                     if (request.UseRuntimeMemoryCache)
                         _runtimeCache.StoreParsed(parsedCacheKey, parsedBase, levelScopeId);
                 }
+
+                if (string.IsNullOrEmpty(parsedBase.SourceVirtualPath))
+                    parsedBase.SourceVirtualPath = normalizedVirtualPath;
 
                 var parsedForBuild = CreateSelectedMeshView(parsedBase, request.SelectedMeshChunkId);
                 var buildResult = CgfMeshBuilder.Build(
@@ -166,6 +170,7 @@ namespace OpenFarCry.Importer.Cgf
             {
                 FileType = source.FileType,
                 Version = source.Version,
+                SourceVirtualPath = source.SourceVirtualPath,
                 SelectedMeshChunkID = meshId,
                 MeshChunks = source.MeshChunks,
                 MeshByChunkID = source.MeshByChunkID,
@@ -175,7 +180,11 @@ namespace OpenFarCry.Importer.Cgf
                 NodeByChunkID = source.NodeByChunkID,
                 BoneInitPosByMeshChunkID = source.BoneInitPosByMeshChunkID,
                 BoneNames = source.BoneNames,
-                BoneAnim = source.BoneAnim
+                BoneAnim = source.BoneAnim,
+                MaterialChunks    = source.MaterialChunks,
+                MaterialByChunkID = source.MaterialByChunkID,
+                LeafMaterials     = source.LeafMaterials,
+                MaterialChildrenByParentChunkID = source.MaterialChildrenByParentChunkID,
             };
 
             if (meshId != -1 && source.MeshByChunkID.TryGetValue(meshId, out var selectedMesh))

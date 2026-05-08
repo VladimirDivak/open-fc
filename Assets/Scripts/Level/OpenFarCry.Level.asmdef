@@ -1,0 +1,15 @@
+{
+    "name": "OpenFarCry.Level",
+    "rootNamespace": "OpenFarCry.Level",
+    "references": [
+        "OpenFarCry.FileSystem",
+        "OpenFarCry.Importer",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "noEngineReferences": false
+}

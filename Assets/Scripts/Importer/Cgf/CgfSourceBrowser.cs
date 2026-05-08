@@ -132,6 +132,7 @@ namespace OpenFarCry.Importer.Cgf
             {
                 byte[] data = _resourceImportService.LoadProjectAssetSourceBytes(path);
                 var parsedFile = CgfParser.Parse(data);
+                parsedFile.SourceVirtualPath = path;
                 var siblingLods = _lodImportService.FindSiblingLodPaths(path);
                 string parseNote = BuildParseNote(path, parsedFile);
                 int selectedMeshIndex = ResolveSelectedMeshListIndex(parsedFile);

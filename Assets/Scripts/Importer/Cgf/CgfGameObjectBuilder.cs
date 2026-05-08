@@ -11,17 +11,20 @@ namespace OpenFarCry.Importer.Cgf
             public readonly CgfFile ParsedFile;
             public readonly CgfRigDefinition RigDefinition;
             public readonly string Name;
+            public readonly CgfMaterialImportService MaterialService; // optional; null = leave slots empty
 
             public BuildRequest(
                 BuildResult result,
                 CgfFile parsedFile,
                 CgfRigDefinition rigDefinition,
-                string name)
+                string name,
+                CgfMaterialImportService materialService = null)
             {
                 Result = result;
                 ParsedFile = parsedFile;
                 RigDefinition = rigDefinition;
                 Name = name;
+                MaterialService = materialService;
             }
         }
 
@@ -66,14 +69,24 @@ namespace OpenFarCry.Importer.Cgf
                     var rootBone = boneTransforms.FirstOrDefault(t => t != null && t.parent == go.transform);
                     smr.rootBone = rootBone != null ? rootBone : boneTransforms[0];
                 }
-                smr.sharedMaterials = new Material[result.Mesh.subMeshCount];
+                smr.sharedMaterials = request.MaterialService != null
+                    ? request.MaterialService.ResolveSubmeshMaterials(
+                        request.ParsedFile,
+                        result.Mesh,
+                        result.SubmeshMaterialIds)
+                    : new Material[result.Mesh.subMeshCount];
 
                 return new BuildOutput(go, boneTransforms, smr, null);
             }
 
             go.AddComponent<MeshFilter>().sharedMesh = result.Mesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.sharedMaterials = new Material[result.Mesh.subMeshCount];
+            mr.sharedMaterials = request.MaterialService != null
+                ? request.MaterialService.ResolveSubmeshMaterials(
+                    request.ParsedFile,
+                    result.Mesh,
+                    result.SubmeshMaterialIds)
+                : new Material[result.Mesh.subMeshCount];
             return new BuildOutput(go, null, null, mr);
         }
     }

@@ -419,7 +419,8 @@ namespace OpenFarCry.Importer.Editor
                 result,
                 parsedFile,
                 rigDefinition,
-                name));
+                name,
+                materialService: CgfRuntimeImporter.MaterialService));
             var go = built.Root;
 
             Undo.RegisterCreatedObjectUndo(go, "Import CGF");

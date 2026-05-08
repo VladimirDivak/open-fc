@@ -39,6 +39,7 @@ namespace OpenFarCry.Importer.Cgf
         sealed class CachedCafEntry
         {
             public CafFile Caf;
+            public string SourceBytesHash;
             public string ContentHash;
             public long LastAccessTick;
         }
@@ -83,6 +84,9 @@ namespace OpenFarCry.Importer.Cgf
             lock (CacheSync)
             {
                 CafByVirtualPath.Clear();
+                foreach (var entry in ClipByCacheKey.Values)
+                    if (entry?.Clip != null)
+                        DestroyUnityObject(entry.Clip);
                 ClipByCacheKey.Clear();
                 s_cacheTick = 0;
                 s_cafHitCount = 0;
@@ -154,32 +158,15 @@ namespace OpenFarCry.Importer.Cgf
                     if (!FcFileSystem.Exists(source.VirtualPath))
                         continue;
 
+                    var caf = GetOrParseCaf(source.VirtualPath, out var cafContentHash);
                     string clipCacheKey = BuildClipCacheKey(
-                        source.VirtualPath,
+                        cafContentHash,
                         source.Alias,
                         importScale,
                         controllerMapKey);
 
                     if (!TryGetCachedClip(clipCacheKey, out var clip))
                     {
-                        var caf = GetOrParseCaf(source.VirtualPath, out var cafContentHash);
-                        clipCacheKey = BuildClipCacheKey(
-                            cafContentHash,
-                            source.Alias,
-                            importScale,
-                            controllerMapKey);
-
-                        if (TryGetCachedClip(clipCacheKey, out clip))
-                        {
-                            imported.Add(new CgfRuntimeAnimationClip
-                            {
-                                Alias = source.Alias,
-                                SourceVirtualPath = source.VirtualPath,
-                                Clip = clip
-                            });
-                            continue;
-                        }
-
                         clip = BuildAnimationClip(
                             source.Alias,
                             caf,
@@ -751,9 +738,13 @@ namespace OpenFarCry.Importer.Cgf
 
         static CafFile GetOrParseCaf(string virtualPath, out string contentHash)
         {
+            byte[] bytes = FcFileSystem.ReadAllBytes(virtualPath);
+            string sourceBytesHash = ComputeBytesHash(bytes);
+
             lock (CacheSync)
             {
-                if (CafByVirtualPath.TryGetValue(virtualPath, out var cached))
+                if (CafByVirtualPath.TryGetValue(virtualPath, out var cached) &&
+                    string.Equals(cached.SourceBytesHash, sourceBytesHash, StringComparison.Ordinal))
                 {
                     s_cafHitCount++;
                     cached.LastAccessTick = ++s_cacheTick;
@@ -763,7 +754,6 @@ namespace OpenFarCry.Importer.Cgf
                 s_cafMissCount++;
             }
 
-            byte[] bytes = FcFileSystem.ReadAllBytes(virtualPath);
             var parsed = CafParser.Parse(bytes);
             contentHash = ComputeCafSemanticHash(parsed);
 
@@ -772,6 +762,7 @@ namespace OpenFarCry.Importer.Cgf
                 CafByVirtualPath[virtualPath] = new CachedCafEntry
                 {
                     Caf = parsed,
+                    SourceBytesHash = sourceBytesHash,
                     ContentHash = contentHash,
                     LastAccessTick = ++s_cacheTick
                 };
@@ -855,6 +846,8 @@ namespace OpenFarCry.Importer.Cgf
                 if (oldestKey == null)
                     break;
 
+                if (ClipByCacheKey.TryGetValue(oldestKey, out var entry) && entry?.Clip != null)
+                    DestroyUnityObject(entry.Clip);
                 ClipByCacheKey.Remove(oldestKey);
             }
         }
@@ -933,6 +926,36 @@ namespace OpenFarCry.Importer.Cgf
                     }
                 }
             }
+        }
+
+        static string ComputeBytesHash(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0)
+                return "0";
+
+            unchecked
+            {
+                const ulong fnvOffset = 14695981039346656037UL;
+                const ulong fnvPrime = 1099511628211UL;
+                ulong hash = fnvOffset;
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    hash ^= bytes[i];
+                    hash *= fnvPrime;
+                }
+                return hash.ToString("X16");
+            }
+        }
+
+        static void DestroyUnityObject(UnityEngine.Object obj)
+        {
+            if (obj == null)
+                return;
+
+            if (Application.isPlaying)
+                UnityEngine.Object.Destroy(obj);
+            else
+                UnityEngine.Object.DestroyImmediate(obj);
         }
     }
 }

@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 48ed2ef321a5274eb8d168edff715b39, type: 3}
+  m_Name: FcEntityPrefabRegistry
+  m_EditorClassIdentifier: OpenFarCry.Level::OpenFarCry.Level.Registry.FcEntityPrefabRegistry
+  _meshEntityPrefab: {fileID: 3745805148831746751, guid: 6ff7021663b791bf0ac445c56d75d278, type: 3}
+  _rigidBodyEntityPrefab: {fileID: 2752791016387833856, guid: 0630d0aa318c628caa9a88e10731b677, type: 3}
+  _characterEntityPrefab: {fileID: 2905113781116913545, guid: 36971d27b4864c0099fdc48cf6060c4d, type: 3}
+  _lightEntityPrefab: {fileID: 4890529325579807977, guid: 64ef6ce0eecf2992595f311c4faaeb88, type: 3}
+  _soundEntityPrefab: {fileID: 2742023521520602430, guid: c816a47957e7083918bbf091eba8298e, type: 3}
+  _triggerEntityPrefab: {fileID: 465575128985311190, guid: 6e608970c795b5dc48a01366d571b571, type: 3}
+  _spawnPointPrefab: {fileID: 5826444064657785458, guid: df25792476fabb9729d30e907e125a80, type: 3}
+  _tagPointPrefab: {fileID: 187494557732045798, guid: 6156a91a80b7f267389cae40540d5c86, type: 3}
+  _classMappings: []

@@ -121,7 +121,8 @@ namespace OpenFarCry.Importer.Cgf
                     result.BuildResult,
                     result.ParsedFile,
                     rigDefinition: null,
-                    name: name));
+                    name: name,
+                    materialService: CgfRuntimeImporter.MaterialService));
                 double buildMs = stageTimer.Elapsed.TotalMilliseconds;
 
                 var root = built.Root;
@@ -169,7 +170,8 @@ namespace OpenFarCry.Importer.Cgf
                         root,
                         hasSkeleton: result.BuildResult.HasSkeleton,
                         importScale: _importScale,
-                        siblingLodPaths: siblingLods);
+                        siblingLodPaths: siblingLods,
+                        materialService: CgfRuntimeImporter.MaterialService);
                 }
                 double lodMs = stageTimer.Elapsed.TotalMilliseconds;
 
