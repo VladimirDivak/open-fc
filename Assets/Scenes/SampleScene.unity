@@ -702,6 +702,9 @@ MonoBehaviour:
   _useRuntimeMemoryCache: 1
   _clearAnimationRuntimeCacheBeforeRun: 1
   _logPerAssetTiming: 1
+  _clearAnimationAttachDiagnosticsBeforeRun: 1
+  _logAnimationCompatibilityDiagnostics: 1
+  _maxAnimationDiagnosticsInReport: 64
 --- !u!4 &1309652054
 Transform:
   m_ObjectHideFlags: 0

@@ -94,7 +94,7 @@ Key files:
 - `Assets/Scripts/Importer/Editor/CgfRigRegistry.cs`
 - `Assets/Scripts/Importer/ImportAssetPaths.cs`
 
-Current refactor snapshot (2026-05-08):
+Current refactor snapshot (2026-05-09):
 
 - Runtime-first service split is in place:
   - `CgfResourceImportService` for virtual-path source loading.
@@ -119,7 +119,7 @@ Current refactor snapshot (2026-05-08):
   - `CgfRuntimeAssetCache` retain/release/scope/trim behavior.
 - Runtime smoke test script exists:
   - `Assets/Scripts/Importer/Cgf/CgfRuntimeLoadSmokeTest.cs`
-  - It can run scene-level import timing, optional animation/LOD/physics setup, and cache scope release/trim checks.
+  - It can run scene-level import timing, optional animation/LOD/physics setup, cache scope release/trim checks, and animation cache compatibility diagnostics (`[CgfAnimDiag]`).
 - Brush/runtime collider handling now prefers proxy/no-draw geometry:
   - `FcBrushInstance` can derive collider faces from no-draw/proxy material slots first.
   - Proxy/no-draw submeshes are stripped from the visual mesh so collider geometry is not rendered.
@@ -128,14 +128,24 @@ Current refactor snapshot (2026-05-08):
   - the current level runtime path is still mostly synchronous and main-thread-heavy;
   - the planned refactor is documented in `LEVEL_LOADING_REFACTOR_PLAN.md`.
 
-Known runtime performance issue (current state):
+Animation runtime cache status (2026-05-09):
 
-- Character animation stage still dominates load time in runtime smoke runs (`CgfAnimationRuntimeImportService`).
-- Model cache hits are working; cross-model clip reuse is still not confirmed for all character variants even with current CAF/clip cache logic.
-- Do not assume raw CAF file bytes are a stable semantic cache key across equivalent clips; treat animation cache identity/compatibility as an active design problem.
-- Keep this as an active optimization/debug area before treating runtime animation performance as closed.
+- `CgfAnimationRuntimeImportService` now uses a layered runtime cache:
+  - path cache (`virtualPath -> source/content hash`) + semantic CAF cache (`contentHash -> CafFile`);
+  - semantic clip cache (`semanticClipKey -> normalized track data`);
+  - bound Unity clip cache (`clipKey -> AnimationClip`);
+  - animation-set cache (`animFp + layout + setHash + scale + version -> alias->clip map`) with model-layout link reuse.
+- Clip keys are versioned (`ClipBuildVersion`, `LoopPolicyVersion`) and include animation-compatibility + layout identity to avoid unsafe reuse.
+- Runtime diagnostics are first-class:
+  - cache counters include `cafPath`, `cafSemantic`, `clip`, `set`, `semClip` hit/miss;
+  - per-model diagnostics include `animFp`, `layout`, `set`, `clipBuild(semHit/semMiss)`, and `missingTracks`.
+- Expected current behavior on mercenary variants:
+  - identical model/layout should get animation-set reuse;
+  - animation-compatible but different layout should reuse semantic CAF/semantic clip data, then rebuild bound clips.
+- Remaining known limitation:
+  - large `missingTracks` warnings are still present for some mercenary assets (unmapped controller IDs); this needs separate skeleton/controller mapping cleanup, not cache-key tuning.
 
-Work status (2026-05-06):
+Work status (2026-05-09):
 
 - Added animation import pipeline for character models:
   - `CAL` parsing (`$AnimDir`/`$AnimationDir` directives, dummy `?` entries, fallback to `<model>_*.caf` when needed).
@@ -153,6 +163,11 @@ Work status (2026-05-06):
   - Imported clips are saved under `Assets/FCData/AnimationCache/...` and reused across characters/LODs.
   - Cache key is content-based from generated `AnimationClip` curves/bindings (not source filename), so identical clips dedupe to one shared asset.
   - File naming preserves readable alias prefix (`<alias>_<hash>.anim`).
+- Added runtime animation cache reuse pipeline for mercenary-heavy loads:
+  - compatibility diagnostics (`animationFingerprint`, `pathLayoutHash`, `animationSetHash`) and summary report (`[CgfAnimDiag]`);
+  - semantic CAF dedup across paths (`cafPathHit/miss`, `cafSemanticHit/miss`);
+  - semantic clip cache + bound clip cache split;
+  - animation-set cache and model-layout linking for fast repeated attach on identical rigs/layouts.
 - Added automatic loop detection for imported legacy clips:
   - Uses CAF start/end transform continuity heuristics plus alias hints (`idle/walk/run/...`) and one-shot hints (`jump/reload/death/...`).
   - Applies both `clip.wrapMode` and editor clip setting `loopTime`.

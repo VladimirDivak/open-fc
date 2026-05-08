@@ -6,7 +6,14 @@
 
 **Editor layer** — парсит XML уровней из PAK-архивов, создаёт Unity-сцену с placeholder-объектами. Сцена сохраняется в репозитории и не содержит данных из оригинальной игры (ни байта из PAK).
 
-**Runtime layer** — при старте сцены каждый placeholder начинает async-загрузку своего ресурса из PAK. Уровень-скоупные сервисы кэша управляют жизненным циклом загруженных ресурсов.
+**Runtime layer** — слой сервисов и entity-компонентов, который инстанцирует runtime-контент по virtual paths из сцены.
+
+## Актуальный статус (2026-05-09)
+
+- Реализован текущий runtime-путь через `FcLevelResourceService` + `FcLevelCacheService` + `FcEntity`-наследники.
+- Загрузка CGF сейчас в основном синхронная (`CgfRuntimeImporter.Import` на main thread), очередь/приоритизация пока не внедрены.
+- `FcCharacterEntity` использует `CgfAnimationRuntimeImportService`; для анимаций уже работает многоуровневый runtime cache (CAF/semantic clip/bound clip/animation set).
+- Этот документ описывает целевую архитектуру; часть пунктов ниже помечена как target, а не как уже реализованное состояние.
 
 ---
 
@@ -27,7 +34,7 @@ Placeholder — Unity `MonoBehaviour`, сохранённый в сцене. Х�
 | `FcRigidBodyEntity` | `RigidBody`, `SwingingObject`, `fan` | virtual path, mass, density | CGF mesh + `Rigidbody` |
 | `FcCharacterEntity` | `Grunt`, `MercCover`, NPC-типы | virtual path к `.cgf`, Properties (здоровье, AI параметры) | CGF mesh + анимации |
 | `FcLightEntity` | `DynamicLight` | radius, color, intensity, type, direction | Unity `Light` component (данные уже есть, создаётся немедленно) |
-| `FcSoundEntity` | `SoundSpot`, `EAXArea`, `RandomAmbientSound` | virtual path к звуку, volume, min/maxDist, loop | `AudioClip` из PAK (когда будет аудио-имопортер) |
+| `FcSoundEntity` | `SoundSpot`, `EAXArea`, `RandomAmbientSound` | virtual path к звуку, volume, min/maxDist, loop | `AudioClip` из PAK (когда будет аудио-импортер) |
 | `FcTriggerEntity` | `ProximityTrigger`, `AreaTrigger`, `Shape`, `AreaBox` | dimensions / points, flags | `BoxCollider`/`MeshCollider` trigger (создаётся немедленно) |
 | `FcSpawnPoint` | `Object Type=Respawn` | name, angles | ничего (маркер) |
 | `FcTagPoint` | `Object Type=TagPoint`, `AIAnchor` | name | ничего (маркер) |
@@ -49,35 +56,42 @@ FcLevelCacheService
   └── OnDestroy()           — ReleaseLevelScope + TrimUnused
 ```
 
-Выступает entry-point для placeholders: они не обращаются к `CgfRuntimeImporter` напрямую, а запрашивают через сервис.
+Управляет lifecycle level scope (`ReleaseLevelScope`/`TrimUnused`) при выгрузке уровня. Entry-point для импорта ресурсов находится в `FcLevelResourceService`.
 
 ### FcLevelResourceService
 
-`MonoBehaviour` на том же корневом объекте. Управляет очередью и приоритетом загрузки.
+`MonoBehaviour` на том же корневом объекте.
+
+Текущее состояние:
+
+- даёт единый вход в `CgfRuntimeImporter.Import(...)` и `Release(...)`;
+- передаёт `levelScopeId` из `FcLevelCacheService`;
+- сам пока не реализует async-очередь.
+
+Target-состояние:
+
+- очередь загрузки и лимит конкурентных задач;
+- приоритизация (дистанция до камеры/видимость);
+- неблокирующая обработка тяжёлых импортов.
 
 ```
 FcLevelResourceService
-  ├── _loadQueue       — Priority Queue<FcLoadRequest> (приоритет = dist к камере)
-  ├── _maxConcurrent   — int (напр. 4 одновременных загрузки)
-  ├── RequestLoad(placeholder, priority) → UniTask<>
-  └── Update()         — продвигает очередь
+  ├── ImportCgf(request)         — current synchronous path
+  ├── ReleaseImportResult(result)
+  └── (target) load queue + priority + async workers
 ```
-
-Placeholders регистрируют запрос при `Start()`, получают результат через `await`.
 
 ### Поток загрузки одного placeholder'а
 
 ```
 FcMeshEntity.Start()
-  → FcLevelResourceService.RequestLoad(this)
-  → (ожидание в очереди)
+  → FcLevelResourceService.ImportCgf(request)
   → CgfRuntimeImporter.Import(virtualPath, ...)    ← из PAK
   → _gameObjectBuilder.Build(result)
   → Instantiate как дочерний объект placeholder'а
-  → ClearLoadingVisual()
 ```
 
-### Loading visual
+### Loading visual (target)
 
 Пока идёт загрузка, placeholder показывает простой индикатор (маленький wireframe-куб или billboard с именем класса). Убирается после успешной загрузки.
 
@@ -85,7 +99,7 @@ FcMeshEntity.Start()
 
 ## Editor workflow
 
-### FcLevelImporterWindow (`OpenFarCry/Level Importer`)
+### FcLevelBuilderWindow (`OpenFarCry/Level Builder`)
 
 1. Список уровней из `<installPath>/Levels/` — папки с `level.pak`
 2. Dropdown миссий из `leveldata.xml`
@@ -130,9 +144,9 @@ Assets/Scripts/Level/
 │
 ├── Services/
 │   ├── FcLevelCacheService.cs           — MonoBehaviour, CgfRuntimeAssetCache scope
-│   └── FcLevelResourceService.cs        — MonoBehaviour, load queue
+│   └── FcLevelResourceService.cs        — MonoBehaviour, import/release entry-point (queue target)
 │
-├── Placeholders/
+├── Entities/
 │   ├── FcEntity.cs                      — base: EntityId, EntityClass, Load()
 │   ├── FcMeshEntity.cs
 │   ├── FcRigidBodyEntity.cs
@@ -140,13 +154,17 @@ Assets/Scripts/Level/
 │   ├── FcLightEntity.cs
 │   ├── FcSoundEntity.cs
 │   ├── FcTriggerEntity.cs
+│   ├── FcBrushInstance.cs
 │   ├── FcSpawnPoint.cs
 │   └── FcTagPoint.cs
 │
+├── Registry/
+│   └── FcEntityPrefabRegistry.cs
+│
 └── Editor/
     ├── OpenFarCry.Level.Editor.asmdef   (refs: Level, Importer.Editor)
-    ├── FcLevelImporterWindow.cs
-    └── FcEntityPlaceholderDrawers.cs    — кастомные Inspector GUI для placeholders
+    ├── FcLevelBuilderWindow.cs
+    └── FcLevelSceneBuilder.cs
 ```
 
 ---
@@ -166,9 +184,9 @@ Assets/Scripts/Level/
 ## Ограничения первой итерации
 
 - Terrain (heightmap) — отдельная задача
-- Static brush geometry (`brush.lst`) — отдельная задача
+- Static brush geometry (`brush.lst`) — базовый импорт уже есть, но система ещё не финализирована
 - Vegetation / particles — отдельная задача
-- Аудио (`FcSoundEntity`) — загружает только когда будет аудио-имопортер; пока placeholder без clip
+- Аудио (`FcSoundEntity`) — загружает только когда будет аудио-импортер; пока placeholder без clip
 - AI поведение, Lua-скрипты — `FcCharacterEntity` только CGF visual
 - EventTargets wiring — парсить, хранить, не выполнять
 
