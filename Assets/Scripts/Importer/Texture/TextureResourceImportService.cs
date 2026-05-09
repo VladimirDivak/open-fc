@@ -9,7 +9,7 @@ namespace OpenFarCry.Importer.Texture
     {
         public static readonly TextureResourceImportService Instance = new TextureResourceImportService();
 
-        static readonly string[] Extensions = { ".dds", ".bmp", ".tga" };
+        static readonly string[] Extensions = { ".dds", ".bmp", ".tga", ".jpg", ".jpeg" };
 
         public string ResourceKind => "Texture";
         public IReadOnlyList<string> SupportedExtensions => Extensions;

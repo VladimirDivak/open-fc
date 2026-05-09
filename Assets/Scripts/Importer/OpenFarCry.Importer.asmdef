@@ -2,7 +2,8 @@
     "name": "OpenFarCry.Importer",
     "rootNamespace": "OpenFarCry.Importer",
     "references": [
-        "OpenFarCry.FileSystem"
+        "OpenFarCry.FileSystem",
+        "UniTask"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
