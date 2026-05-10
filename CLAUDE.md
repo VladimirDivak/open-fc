@@ -230,7 +230,7 @@ Current behavior:
 
 Treat the CGF importer as incremental and format-sensitive. When changing binary parsing, cross-check against CryEngine source in `~/Documents/farcry-sources/`, especially ResourceCompiler and CryChunkedFile code.
 
-Detailed importer notes are in `~/Documents/farcry-sources/docs/OpenFarCry_Unity_CGF_CAF_Importer.md`. Read that before changing CGF/CAF transform, bind pose, bone mapping, or animation code.
+Detailed importer notes are in `~/Documents/farcry-sources/docs/asset-formats.md`. Read that before changing CGF/CAF transform, bind pose, bone mapping, or animation code.
 
 ### Level Loading
 
@@ -305,3 +305,15 @@ Far Cry install reference path:
 - `~/Documents/farcry-game/FCData/*.pak`
 - `~/Documents/farcry-game/Levels/*/level.pak`
 - `~/Documents/farcry-game/Levels/*/*.cry`
+
+Source documentation (`~/Documents/farcry-sources/docs/`):
+
+- `docs/README.md` - map of all docs and where to look for specific topics
+- `docs/asset-formats.md` - CGF/CGA/CAL/CAF binary formats + Unity import rules (OLD matrices, BoneID remap, skinned vertex reconstruction, CAF controller chunks); read before any parsing/skinning/animation change
+- `docs/unity-architecture.md` - C# vs Lua split strategy: what goes into C# (engine/runtime), what stays in Lua (AI behaviors, weapon params, game rules, balance)
+- `docs/unity-ai.md` - AI porting strategy: CryEngine Goal Pipes approach vs GOAP, Unity improvements (NavMesh, UniTask coroutines, Burst boids)
+- `docs/AI.md` - CryEngine AI internals: CAIHandler, GoalPipe execution, AIMind perception loop, CXPuppetProxy, Boids/flocks, Lua AI API
+- `docs/CryGame.md` - CryGame.dll map: 15 subsystems (player, vehicles, weapons, network, UI, script objects, entities)
+- `docs/Scripts.md` - Scripts.pak map: ~770 Lua files (AI behaviors, entity scripts, game rules, HUD, menus, sound presets, physics materials)
+- `docs/modules.md` - all 20 CryEngine module overviews (Cry3DEngine, CryAnimation, CryPhysics, ResourceCompiler, etc.)
+- `docs/third-party.md` - third-party libraries: STLPORT, BinkSDK, PunkBuster, curl
