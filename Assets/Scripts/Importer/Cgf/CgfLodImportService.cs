@@ -9,6 +9,26 @@ namespace OpenFarCry.Importer.Cgf
 {
     public sealed class CgfLodImportService
     {
+        static readonly Regex s_extractLodIndex = new Regex(
+            "_lod(\\d+)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+        static readonly Regex s_stripLodSuffix = new Regex(
+            "^(.*)_lod\\d+$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+        static readonly Dictionary<string, Regex> s_siblingRegexCache =
+            new Dictionary<string, Regex>(StringComparer.OrdinalIgnoreCase);
+
+        static Regex GetSiblingLodRegex(string baseName)
+        {
+            if (!s_siblingRegexCache.TryGetValue(baseName, out var rx))
+                s_siblingRegexCache[baseName] = rx = new Regex(
+                    $"^{Regex.Escape(baseName)}_lod(\\d+)$",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+            return rx;
+        }
+
         public List<string> FindSiblingLodPaths(string modelVirtualPath)
         {
             var result = new List<(int lod, string path)>();
@@ -20,8 +40,7 @@ namespace OpenFarCry.Importer.Cgf
             if (string.IsNullOrEmpty(baseName))
                 baseName = fileNoExt;
 
-            string pattern = $"^{Regex.Escape(baseName)}_lod(\\d+)$";
-            var regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            var regex = GetSiblingLodRegex(baseName);
 
             foreach (var path in OpenFarCry.FileSystem.FcFileSystem.GetEntries(dir))
             {
@@ -57,7 +76,8 @@ namespace OpenFarCry.Importer.Cgf
             float importScale,
             IReadOnlyList<string> siblingLodPaths,
             Func<Mesh, string, Mesh> persistMesh = null,
-            CgfMaterialImportService materialService = null)
+            CgfMaterialImportService materialService = null,
+            string textureScopeId = null)
         {
             if (root == null)
                 return;
@@ -111,7 +131,7 @@ namespace OpenFarCry.Importer.Cgf
                             lodSmr.bones = baseSmr.bones;
                             lodSmr.rootBone = baseSmr.rootBone;
                             lodSmr.sharedMaterials = materialService != null
-                                ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds)
+                                ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds, textureScopeId)
                                 : new Material[lodMesh.subMeshCount];
                             lodRenderers.Add(lodSmr);
                         }
@@ -121,7 +141,7 @@ namespace OpenFarCry.Importer.Cgf
                             mf.sharedMesh = lodMesh;
                             var mr = lodGo.AddComponent<MeshRenderer>();
                             mr.sharedMaterials = materialService != null
-                                ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds)
+                                ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds, textureScopeId)
                                 : new Material[lodMesh.subMeshCount];
                             lodRenderers.Add(mr);
                         }
@@ -181,7 +201,7 @@ namespace OpenFarCry.Importer.Cgf
 
             string noExt = RemoveExtension(virtualPath);
             string name = Path.GetFileName(noExt);
-            var m = Regex.Match(name, "_lod(\\d+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            var m = s_extractLodIndex.Match(name);
             if (m.Success && int.TryParse(m.Groups[1].Value, out int lod))
                 return lod;
 
@@ -204,10 +224,7 @@ namespace OpenFarCry.Importer.Cgf
             if (string.IsNullOrEmpty(nameWithoutExtension))
                 return nameWithoutExtension;
 
-            var m = Regex.Match(
-                nameWithoutExtension,
-                "^(.*)_lod\\d+$",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            var m = s_stripLodSuffix.Match(nameWithoutExtension);
             if (m.Success && !string.IsNullOrEmpty(m.Groups[1].Value))
                 return m.Groups[1].Value;
 
