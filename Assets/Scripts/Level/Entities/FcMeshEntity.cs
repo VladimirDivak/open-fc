@@ -1,4 +1,5 @@
 using System.IO;
+using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Level.Data;
 using UnityEngine;
@@ -19,9 +20,10 @@ namespace OpenFarCry.Level.Entities
         protected CgfRuntimeImportResult _importResult;
         protected CgfGameObjectBuilder.BuildOutput _lastBuildOutput;
 
-        protected virtual void Start()
+        protected virtual async void Start()
         {
             if (string.IsNullOrEmpty(_virtualPath)) return;
+            var destroyToken = this.GetCancellationTokenOnDestroy();
 
             var service = ResourceService;
             if (service == null)
@@ -45,6 +47,13 @@ namespace OpenFarCry.Level.Entities
             }
 
             _importResult = result;
+            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
+                result.ParsedFile,
+                result.Mesh,
+                result.BuildResult?.SubmeshMaterialIds,
+                service.LevelScopeId,
+                destroyToken);
+            await UniTask.SwitchToMainThread(destroyToken);
             ApplyResult(result);
         }
 
@@ -58,7 +67,8 @@ namespace OpenFarCry.Level.Entities
                 parsedFile: result.ParsedFile,
                 rigDefinition: null,
                 name: meshName,
-                materialService: CgfRuntimeImporter.MaterialService));
+                materialService: CgfRuntimeImporter.MaterialService,
+                textureScopeId: ResourceService != null ? ResourceService.LevelScopeId : null));
 
             _lastBuildOutput.Root.transform.SetParent(transform, worldPositionStays: false);
 
@@ -71,7 +81,8 @@ namespace OpenFarCry.Level.Entities
             var lodPaths = _lodService.FindSiblingLodPaths(result.VirtualPath);
             if (lodPaths.Count > 0)
                 _lodService.ConfigureLodGroup(_lastBuildOutput.Root, result.BuildResult.HasSkeleton, _importScale, lodPaths,
-                    materialService: CgfRuntimeImporter.MaterialService);
+                    materialService: CgfRuntimeImporter.MaterialService,
+                    textureScopeId: ResourceService != null ? ResourceService.LevelScopeId : null);
         }
 
         public override void SetData(FcEntityDesc desc)

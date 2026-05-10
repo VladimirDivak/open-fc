@@ -1,5 +1,6 @@
 using System.IO;
 using System.Collections.Generic;
+using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Level.Services;
 using UnityEngine;
@@ -21,9 +22,10 @@ namespace OpenFarCry.Level.Entities
         Mesh _physicsColliderMesh;
         Mesh _visualFilteredMesh;
 
-        void Start()
+        async void Start()
         {
             if (string.IsNullOrEmpty(_virtualPath)) return;
+            var destroyToken = this.GetCancellationTokenOnDestroy();
 
             var svc = FcLevelResourceService.Current;
             if (svc == null)
@@ -46,6 +48,13 @@ namespace OpenFarCry.Level.Entities
             }
 
             _importResult = result;
+            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
+                result.ParsedFile,
+                result.Mesh,
+                result.BuildResult?.SubmeshMaterialIds,
+                svc.LevelScopeId,
+                destroyToken);
+            await UniTask.SwitchToMainThread(destroyToken);
 
             string meshName = Path.GetFileNameWithoutExtension(_virtualPath);
             var output = _goBuilder.Build(new CgfGameObjectBuilder.BuildRequest(
@@ -53,7 +62,8 @@ namespace OpenFarCry.Level.Entities
                 parsedFile: result.ParsedFile,
                 rigDefinition: null,
                 name: meshName,
-                materialService: CgfRuntimeImporter.MaterialService));
+                materialService: CgfRuntimeImporter.MaterialService,
+                textureScopeId: svc.LevelScopeId));
 
             StripProxySubmeshesFromVisual(output.Root, result);
             output.Root.transform.SetParent(transform, worldPositionStays: false);
@@ -75,7 +85,8 @@ namespace OpenFarCry.Level.Entities
             var lods = _lodService.FindSiblingLodPaths(result.VirtualPath);
             if (lods.Count > 0)
                 _lodService.ConfigureLodGroup(output.Root, hasSkeleton: false, importScale: 0.01f, siblingLodPaths: lods,
-                    materialService: CgfRuntimeImporter.MaterialService);
+                    materialService: CgfRuntimeImporter.MaterialService,
+                    textureScopeId: svc.LevelScopeId);
         }
 
         void OnDestroy()
