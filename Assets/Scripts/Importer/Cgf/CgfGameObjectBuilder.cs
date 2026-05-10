@@ -12,19 +12,22 @@ namespace OpenFarCry.Importer.Cgf
             public readonly CgfRigDefinition RigDefinition;
             public readonly string Name;
             public readonly CgfMaterialImportService MaterialService; // optional; null = leave slots empty
+            public readonly string TextureScopeId;
 
             public BuildRequest(
                 BuildResult result,
                 CgfFile parsedFile,
                 CgfRigDefinition rigDefinition,
                 string name,
-                CgfMaterialImportService materialService = null)
+                CgfMaterialImportService materialService = null,
+                string textureScopeId = null)
             {
                 Result = result;
                 ParsedFile = parsedFile;
                 RigDefinition = rigDefinition;
                 Name = name;
                 MaterialService = materialService;
+                TextureScopeId = textureScopeId;
             }
         }
 
@@ -73,7 +76,8 @@ namespace OpenFarCry.Importer.Cgf
                     ? request.MaterialService.ResolveSubmeshMaterials(
                         request.ParsedFile,
                         result.Mesh,
-                        result.SubmeshMaterialIds)
+                        result.SubmeshMaterialIds,
+                        request.TextureScopeId)
                     : new Material[result.Mesh.subMeshCount];
 
                 return new BuildOutput(go, boneTransforms, smr, null);
@@ -85,7 +89,8 @@ namespace OpenFarCry.Importer.Cgf
                 ? request.MaterialService.ResolveSubmeshMaterials(
                     request.ParsedFile,
                     result.Mesh,
-                    result.SubmeshMaterialIds)
+                    result.SubmeshMaterialIds,
+                    request.TextureScopeId)
                 : new Material[result.Mesh.subMeshCount];
             return new BuildOutput(go, null, null, mr);
         }

@@ -21,7 +21,7 @@ namespace OpenFarCry.Importer.Cgf
 
     public static class CgfMeshBuilder
     {
-        public const string MeshCacheVersionName = "CGFMesh_CryLinkBind_v3_NoUvFlip";
+        public const string MeshCacheVersionName = "CGFMesh_CryLinkBind_v4_UvFlipV";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -116,12 +116,12 @@ namespace OpenFarCry.Importer.Cgf
                 int t1 = hasTexFaces ? texFaces[fi].T1 : 0;
                 int t2 = hasTexFaces ? texFaces[fi].T2 : 0;
 
-                int[] cornerOrder = { 0, 1, 2 };
-                for (int oi = 0; oi < cornerOrder.Length; oi++)
+                ProcessCorner(p0, t0, triList);
+                ProcessCorner(p1, t1, triList);
+                ProcessCorner(p2, t2, triList);
+
+                void ProcessCorner(int pi, int ti, List<int> triangles)
                 {
-                    int c = cornerOrder[oi];
-                    int pi = c == 0 ? p0 : (c == 1 ? p1 : p2);
-                    int ti = c == 0 ? t0 : (c == 1 ? t1 : t2);
                     var key = (pi, ti);
                     if (!vertCache.TryGetValue(key, out int idx))
                     {
@@ -129,7 +129,8 @@ namespace OpenFarCry.Importer.Cgf
                         var v = verts[pi];
                         var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
                         var links = chunk.BoneLinks?[pi];
-                        var pos = hasBones && TryBuildBindPositionFromLinks(links, bindGlobalsByBoneId, importScale, out var linkedBindPos)
+                        var sortedLinks = SortLinksByDescendingWeight(links);
+                        var pos = hasBones && TryBuildBindPositionFromLinks(sortedLinks, bindGlobalsByBoneId, importScale, out var linkedBindPos)
                             ? linkedBindPos
                             : rawPos;
                         var nrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
@@ -138,16 +139,16 @@ namespace OpenFarCry.Importer.Cgf
                         if (hasUvs && ti >= 0 && ti < rawUVs.Length)
                         {
                             var uv = rawUVs[ti];
-                            uvs.Add(new Vector2(uv.U, uv.V));
+                            uvs.Add(new Vector2(uv.U, 1f - uv.V));
                         }
                         else
                         {
                             uvs.Add(Vector2.zero);
                         }
-                        boneWeightsList?.Add(links);
+                        boneWeightsList?.Add(sortedLinks);
                         vertCache[key] = idx;
                     }
-                    triList.Add(idx);
+                    triangles.Add(idx);
                 }
             }
 
@@ -215,15 +216,14 @@ namespace OpenFarCry.Importer.Cgf
             //   vertex = sum(boneGlobal.TransformPointOLD(link.offset) * link.Blending)
             // Unity stores one bind vertex plus up to four BoneWeight entries, so build
             // the imported vertex from the same top-four normalized influences we assign.
-            var sorted = links.OrderByDescending(l => l.Blending).ToArray();
-            int used = Mathf.Min(4, sorted.Length);
+            int used = Mathf.Min(4, links.Length);
 
             float topTotal = 0f;
             for (int i = 0; i < used; i++)
             {
-                int boneId = sorted[i].BoneID;
+                int boneId = links[i].BoneID;
                 if (boneId >= 0 && boneId < bindGlobalsByBoneId.Length)
-                    topTotal += sorted[i].Blending;
+                    topTotal += links[i].Blending;
             }
 
             if (topTotal < float.Epsilon)
@@ -232,7 +232,7 @@ namespace OpenFarCry.Importer.Cgf
             float norm = 1f / topTotal;
             for (int i = 0; i < used; i++)
             {
-                var link = sorted[i];
+                var link = links[i];
                 int boneId = link.BoneID;
                 if (boneId < 0 || boneId >= bindGlobalsByBoneId.Length)
                     continue;
@@ -256,25 +256,40 @@ namespace OpenFarCry.Importer.Cgf
                     continue;
                 }
 
-                var sorted = links.OrderByDescending(l => l.Blending).ToArray();
-                int used = Mathf.Min(4, sorted.Length);
+                int used = Mathf.Min(4, links.Length);
 
                 float topTotal = 0f;
                 for (int i = 0; i < used; i++)
-                    topTotal += sorted[i].Blending;
+                    topTotal += links[i].Blending;
                 if (topTotal < float.Epsilon) topTotal = 1f;
                 float norm = 1f / topTotal;
 
                 var bw = new BoneWeight();
 
-                if (used > 0) { bw.boneIndex0 = RemapBone(sorted[0].BoneID, boneCount, boneIdToIndex); bw.weight0 = sorted[0].Blending * norm; }
-                if (used > 1) { bw.boneIndex1 = RemapBone(sorted[1].BoneID, boneCount, boneIdToIndex); bw.weight1 = sorted[1].Blending * norm; }
-                if (used > 2) { bw.boneIndex2 = RemapBone(sorted[2].BoneID, boneCount, boneIdToIndex); bw.weight2 = sorted[2].Blending * norm; }
-                if (used > 3) { bw.boneIndex3 = RemapBone(sorted[3].BoneID, boneCount, boneIdToIndex); bw.weight3 = sorted[3].Blending * norm; }
+                if (used > 0) { bw.boneIndex0 = RemapBone(links[0].BoneID, boneCount, boneIdToIndex); bw.weight0 = links[0].Blending * norm; }
+                if (used > 1) { bw.boneIndex1 = RemapBone(links[1].BoneID, boneCount, boneIdToIndex); bw.weight1 = links[1].Blending * norm; }
+                if (used > 2) { bw.boneIndex2 = RemapBone(links[2].BoneID, boneCount, boneIdToIndex); bw.weight2 = links[2].Blending * norm; }
+                if (used > 3) { bw.boneIndex3 = RemapBone(links[3].BoneID, boneCount, boneIdToIndex); bw.weight3 = links[3].Blending * norm; }
 
                 boneWeights[vi] = bw;
             }
             return boneWeights;
+        }
+
+        static CryLink[] SortLinksByDescendingWeight(CryLink[] links)
+        {
+            if (links == null || links.Length <= 1)
+                return links;
+
+            var sorted = new CryLink[links.Length];
+            Array.Copy(links, sorted, links.Length);
+            Array.Sort(sorted, CompareLinkWeightDescending);
+            return sorted;
+        }
+
+        static int CompareLinkWeightDescending(CryLink x, CryLink y)
+        {
+            return y.Blending.CompareTo(x.Blending);
         }
 
         static int RemapBone(int boneId, int count, int[] boneIdToIndex)

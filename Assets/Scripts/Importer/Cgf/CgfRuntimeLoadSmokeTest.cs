@@ -31,6 +31,7 @@ namespace OpenFarCry.Importer.Cgf
 
         [Header("Timing")]
         [SerializeField] bool _logPerAssetTiming = true;
+        [SerializeField] bool _logTextureRuntimeReport = true;
 
         [Header("Animation Diagnostics")]
         [SerializeField] bool _clearAnimationAttachDiagnosticsBeforeRun = true;
@@ -75,10 +76,10 @@ namespace OpenFarCry.Importer.Cgf
             if (_clearAnimationRuntimeCacheBeforeRun)
                 CgfAnimationRuntimeImportService.ClearRuntimeCache();
             else if (_clearAnimationAttachDiagnosticsBeforeRun)
-                CgfAnimationRuntimeImportService.ClearRuntimeAttachDiagnostics();
+                CgfAnimationDiagnostics.Clear();
 
-            bool prevCompatibilityLogging = CgfAnimationRuntimeImportService.EnableCompatibilityDiagnosticsLogging;
-            CgfAnimationRuntimeImportService.EnableCompatibilityDiagnosticsLogging = _logAnimationCompatibilityDiagnostics;
+            bool prevCompatibilityLogging = CgfAnimationDiagnostics.EnableCompatibilityDiagnosticsLogging;
+            CgfAnimationDiagnostics.EnableCompatibilityDiagnosticsLogging = _logAnimationCompatibilityDiagnostics;
 
             try
             {
@@ -94,6 +95,8 @@ namespace OpenFarCry.Importer.Cgf
                     $"clipHit/miss={animationCacheBefore.ClipHitCount}/{animationCacheBefore.ClipMissCount}, " +
                     $"setEntries={animationCacheBefore.AnimationSetEntryCount}, setHit/miss={animationCacheBefore.AnimationSetHitCount}/{animationCacheBefore.AnimationSetMissCount}, " +
                     $"semClipEntries={animationCacheBefore.SemanticClipEntryCount}, semClipHit/miss={animationCacheBefore.SemanticClipHitCount}/{animationCacheBefore.SemanticClipMissCount}.");
+                if (_logTextureRuntimeReport)
+                    Debug.Log("[CgfRuntimeSmoke][Texture] " + CgfRuntimeImporter.GetTextureRuntimeDebugReport());
 
                 int pathCount = _virtualPaths != null ? _virtualPaths.Length : 0;
                 for (int i = 0; i < pathCount; i++)
@@ -138,7 +141,8 @@ namespace OpenFarCry.Importer.Cgf
                         result.ParsedFile,
                         rigDefinition: null,
                         name: name,
-                        materialService: CgfRuntimeImporter.MaterialService));
+                        materialService: CgfRuntimeImporter.MaterialService,
+                        textureScopeId: _levelScopeId));
                     double buildMs = stageTimer.Elapsed.TotalMilliseconds;
 
                     var root = built.Root;
@@ -187,7 +191,8 @@ namespace OpenFarCry.Importer.Cgf
                             hasSkeleton: result.BuildResult.HasSkeleton,
                             importScale: _importScale,
                             siblingLodPaths: siblingLods,
-                            materialService: CgfRuntimeImporter.MaterialService);
+                            materialService: CgfRuntimeImporter.MaterialService,
+                            textureScopeId: _levelScopeId);
                     }
                     double lodMs = stageTimer.Elapsed.TotalMilliseconds;
 
@@ -235,17 +240,19 @@ namespace OpenFarCry.Importer.Cgf
                     $"semClipEntries={animationCacheAfter.SemanticClipEntryCount}, semClipHit/miss={animationCacheAfter.SemanticClipHitCount}/{animationCacheAfter.SemanticClipMissCount}. " +
                     $"Cache after: parsed={after.ParsedEntryCount}, models={after.ModelEntryCount}, " +
                     $"parsedRefs={after.ParsedTotalRefCount}, modelRefs={after.ModelTotalRefCount}.");
+                if (_logTextureRuntimeReport)
+                    Debug.Log("[CgfRuntimeSmoke][Texture] " + CgfRuntimeImporter.GetTextureRuntimeDebugReport());
 
                 if (_logAnimationCompatibilityDiagnostics)
                 {
                     Debug.Log(
-                        CgfAnimationRuntimeImportService.BuildRuntimeAttachDiagnosticsReport(
+                        CgfAnimationDiagnostics.BuildReport(
                             maxEntries: Mathf.Max(1, _maxAnimationDiagnosticsInReport)));
                 }
             }
             finally
             {
-                CgfAnimationRuntimeImportService.EnableCompatibilityDiagnosticsLogging = prevCompatibilityLogging;
+                CgfAnimationDiagnostics.EnableCompatibilityDiagnosticsLogging = prevCompatibilityLogging;
             }
         }
 

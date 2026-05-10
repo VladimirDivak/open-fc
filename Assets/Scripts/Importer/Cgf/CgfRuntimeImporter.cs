@@ -1,3 +1,7 @@
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using OpenFarCry.Importer.Texture;
+
 namespace OpenFarCry.Importer.Cgf
 {
     public static class CgfRuntimeImporter
@@ -9,9 +13,12 @@ namespace OpenFarCry.Importer.Cgf
 
         static readonly CgfMaterialRuntimeCache SharedMaterialCache = new CgfMaterialRuntimeCache();
         static readonly CgfMaterialImportService SharedMaterialService =
-            new CgfMaterialImportService(SharedMaterialCache);
+            new CgfMaterialImportService(
+                cache: SharedMaterialCache,
+                textureRuntimeService: TextureImportService.RuntimeService);
 
         public static CgfRuntimeImportService Service => SharedService;
+        public static TextureRuntimeImportService TextureService => TextureImportService.RuntimeService;
 
         // Use when creating a BuildRequest to get per-submesh materials from parsed chunks.
         public static CgfMaterialImportService MaterialService => SharedMaterialService;
@@ -22,6 +29,14 @@ namespace OpenFarCry.Importer.Cgf
         public static CgfRuntimeImportResult Import(CgfRuntimeImportRequest request, string levelScopeId = null)
         {
             return SharedService.Import(request, levelScopeId);
+        }
+
+        public static UniTask<CgfRuntimeImportResult> ImportAsync(
+            CgfRuntimeImportRequest request,
+            string levelScopeId = null,
+            CancellationToken ct = default)
+        {
+            return SharedService.ImportAsync(request, levelScopeId, ct);
         }
 
         public static void Release(string parsedCacheKey)
@@ -42,17 +57,33 @@ namespace OpenFarCry.Importer.Cgf
         public static void ReleaseLevelScope(string levelScopeId)
         {
             SharedService.ReleaseLevelScope(levelScopeId);
+            TextureImportService.ReleaseLevelScope(levelScopeId);
+            SharedMaterialCache.ReleaseLevelScope(levelScopeId);
         }
 
         public static int TrimUnused()
         {
-            return SharedService.TrimUnused();
+            int removed = SharedService.TrimUnused();
+            removed += TextureImportService.TrimUnusedRuntimeCache();
+            removed += SharedMaterialCache.TrimUnused();
+            return removed;
+        }
+
+        public static TextureRuntimeImportService.RuntimeDiagnostics GetTextureRuntimeDiagnostics()
+        {
+            return TextureImportService.RuntimeService.GetRuntimeDiagnostics();
+        }
+
+        public static string GetTextureRuntimeDebugReport()
+        {
+            return TextureImportService.RuntimeService.BuildRuntimeDebugReport();
         }
 
         public static void ClearRuntimeCache()
         {
             SharedService.ClearRuntimeCache();
             SharedMaterialService.ClearCache();
+            TextureImportService.RuntimeService.ClearRuntimeCache();
         }
 
         public static CgfRuntimeAssetCache.Stats GetCacheStats()

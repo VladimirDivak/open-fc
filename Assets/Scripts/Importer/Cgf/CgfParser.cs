@@ -527,7 +527,10 @@ namespace OpenFarCry.Importer.Cgf
 
         // Parses MTL_CHUNK_DESC_0744 / 0745 / 0746 (packed structs, no alignment padding).
         // TextureMap sizes: 0x0744 = 92 bytes (name[32]+60), 0x0745 = 108 bytes (name[32]+76),
-        // 0x0746 = 235 bytes (name[128]+107). Texture order in 0x0745/0746: a, d, s, o, b, g, c/fl, rl, subsurf, det.
+        // 0x0746 = 236 bytes (name[128]+108). TextureMap3 has 1 byte of compiler padding between
+        // its 4 bool fields (ending at struct offset 167) and int nthFrame (4-byte aligned → offset 168).
+        // With #pragma pack(push, 4) from CryHeaders.h, this padding is present.
+        // Texture order in 0x0745/0746: a, d, s, o, b, g, c/fl, rl, subsurf, det.
         static CgfMaterialChunk ReadMaterialChunk(byte[] data, ChunkHeader h)
         {
             using var r = OpenChunkReader(data, h);
@@ -542,79 +545,121 @@ namespace OpenFarCry.Importer.Cgf
 
             if (h.ChunkVersion == 0x0746)
             {
-                chunk.Name = ReadFixedString(r, 64);
+                chunk.Name       = ReadFixedString(r, 64);
+                chunk.ShaderName = ExtractShaderName(chunk.Name);
                 r.ReadBytes(60);                          // Reserved[60]
-                chunk.AlphaTest = r.ReadSingle();
-                chunk.MtlType   = (CgfMtlType)r.ReadInt32();
+                chunk.AlphaTest  = r.ReadSingle();
+                chunk.MtlType    = (CgfMtlType)r.ReadInt32();
                 if (chunk.MtlType == CgfMtlType.Multi)
                 {
                     chunk.ChildCount = r.ReadInt32();
                     return chunk;
                 }
-                chunk.DiffuseColor = ReadCryIRGB(r);
-                r.ReadBytes(6);                           // col_s[3] + col_a[3]
-                r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); // specLevel, specShininess, selfIllum
+                chunk.DiffuseColor  = ReadCryIRGB(r);
+                chunk.SpecularColor = ReadCryIRGB(r);     // col_s[3]
+                r.ReadBytes(3);                            // col_a[3]
+                r.ReadBytes(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
+                chunk.SpecLevel     = r.ReadSingle();
+                chunk.SpecShininess = r.ReadSingle();
+                r.ReadSingle();                            // selfIllum
                 chunk.Opacity = r.ReadSingle();
-                // TextureMap3 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), then 6 more
-                r.ReadBytes(235);                         // skip tex_a
-                chunk.DiffuseTextureName = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(107);                         // skip rest of tex_d TextureMap3
-                r.ReadBytes(235);                         // skip tex_s
-                chunk.OpacityTextureName = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(107);                         // skip rest of tex_o TextureMap3
-                r.ReadBytes(6 * 235);                     // skip remaining 6 TextureMap3s
+                // TextureMap3 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), tex_b(4), tex_g(5), ...
+                r.ReadBytes(236);                          // skip tex_a (full 236 bytes)
+                chunk.DiffuseTextureName  = NormalizeTextureName(ReadFixedString(r, 128));
+                r.ReadBytes(108);                          // skip rest of tex_d TextureMap3
+                chunk.SpecularTextureName = NormalizeTextureName(ReadFixedString(r, 128));
+                r.ReadBytes(108);                          // skip rest of tex_s TextureMap3
+                chunk.OpacityTextureName  = NormalizeTextureName(ReadFixedString(r, 128));
+                r.ReadBytes(108);                          // skip rest of tex_o TextureMap3
+                chunk.NormalTextureName   = NormalizeTextureName(ReadFixedString(r, 128));
+                r.ReadBytes(108);                          // skip rest of tex_b TextureMap3
+                chunk.GlossTextureName    = NormalizeTextureName(ReadFixedString(r, 128));
+                r.ReadBytes(108);                          // skip rest of tex_g TextureMap3
+                r.ReadBytes(4 * 236);                      // skip tex_fl, tex_rl, tex_subsurf, tex_det
                 chunk.Flags = (CgfMtlFlags)r.ReadInt32();
             }
             else if (h.ChunkVersion == 0x0745)
             {
-                chunk.Name    = ReadFixedString(r, 64);
-                chunk.MtlType = (CgfMtlType)r.ReadInt32();
+                chunk.Name       = ReadFixedString(r, 64);
+                chunk.ShaderName = ExtractShaderName(chunk.Name);
+                chunk.MtlType    = (CgfMtlType)r.ReadInt32();
                 if (chunk.MtlType == CgfMtlType.Multi)
                 {
                     chunk.ChildCount = r.ReadInt32();
                     return chunk;
                 }
-                chunk.DiffuseColor = ReadCryIRGB(r);
-                r.ReadBytes(6);                           // col_s[3] + col_a[3]
-                r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); // specLevel, specShininess, selfIllum
+                chunk.DiffuseColor  = ReadCryIRGB(r);
+                chunk.SpecularColor = ReadCryIRGB(r);     // col_s[3]
+                r.ReadBytes(3);                            // col_a[3]
+                r.ReadBytes(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
+                chunk.SpecLevel     = r.ReadSingle();
+                chunk.SpecShininess = r.ReadSingle();
+                r.ReadSingle();                            // selfIllum
                 chunk.Opacity = r.ReadSingle();
-                // TextureMap2 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), then 6 more
-                r.ReadBytes(108);                         // skip tex_a
-                chunk.DiffuseTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                          // skip rest of tex_d TextureMap2
-                r.ReadBytes(108);                         // skip tex_s
-                chunk.OpacityTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                          // skip rest of tex_o TextureMap2
-                r.ReadBytes(6 * 108);                     // skip remaining 6 TextureMap2s
+                // TextureMap2 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), tex_b(4), tex_g(5), ...
+                r.ReadBytes(108);                          // skip tex_a
+                chunk.DiffuseTextureName  = NormalizeTextureName(ReadFixedString(r, 32));
+                r.ReadBytes(76);                           // skip rest of tex_d TextureMap2
+                chunk.SpecularTextureName = NormalizeTextureName(ReadFixedString(r, 32));
+                r.ReadBytes(76);                           // skip rest of tex_s TextureMap2
+                chunk.OpacityTextureName  = NormalizeTextureName(ReadFixedString(r, 32));
+                r.ReadBytes(76);                           // skip rest of tex_o TextureMap2
+                chunk.NormalTextureName   = NormalizeTextureName(ReadFixedString(r, 32));
+                r.ReadBytes(76);                           // skip rest of tex_b TextureMap2
+                chunk.GlossTextureName    = NormalizeTextureName(ReadFixedString(r, 32));
+                r.ReadBytes(76);                           // skip rest of tex_g TextureMap2
+                r.ReadBytes(4 * 108);                      // skip tex_fl, tex_rl, tex_subsurf, tex_det
                 chunk.Flags = (CgfMtlFlags)r.ReadInt32();
             }
             else if (h.ChunkVersion == 0x0744)
             {
-                chunk.Name    = ReadFixedString(r, 64);
-                chunk.MtlType = (CgfMtlType)r.ReadInt32();
+                chunk.Name       = ReadFixedString(r, 64);
+                chunk.ShaderName = ExtractShaderName(chunk.Name);
+                chunk.MtlType    = (CgfMtlType)r.ReadInt32();
                 if (chunk.MtlType == CgfMtlType.Multi)
                 {
                     chunk.ChildCount = r.ReadInt32();
                     return chunk;
                 }
-                chunk.DiffuseColor = ReadCryIRGB(r);
-                r.ReadBytes(6);                           // col_s[3] + col_a[3]
-                // TextureMap order: tex_d(0), tex_o(1), tex_b(2); each 92 bytes
+                chunk.DiffuseColor  = ReadCryIRGB(r);
+                chunk.SpecularColor = ReadCryIRGB(r);     // col_s[3]
+                r.ReadBytes(3);                            // col_a[3]
+                // TextureMap order: tex_d(0), tex_o(1), tex_b(2); each 92 bytes (name[32]+60)
                 chunk.DiffuseTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(60);                          // skip rest of tex_d TextureMap
+                r.ReadBytes(60);                           // skip rest of tex_d TextureMap
                 chunk.OpacityTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(60);                          // skip rest of tex_o TextureMap
-                r.ReadBytes(92);                          // skip tex_b TextureMap
+                r.ReadBytes(60);                           // skip rest of tex_o TextureMap
+                chunk.NormalTextureName  = NormalizeTextureName(ReadFixedString(r, 32));
+                r.ReadBytes(60);                           // skip rest of tex_b TextureMap
             }
             else
             {
                 // Unknown version — try to read at least the name.
                 if (h.SizeBytes > CgfConstants.ChunkHeaderSize + 64)
-                    chunk.Name = ReadFixedString(r, 64);
+                {
+                    chunk.Name       = ReadFixedString(r, 64);
+                    chunk.ShaderName = ExtractShaderName(chunk.Name);
+                }
                 Debug.LogWarning($"[CgfImporter] MTL chunk {h.ChunkID}: unknown version 0x{h.ChunkVersion:X}, material name only.");
             }
 
             return chunk;
+        }
+
+        // Extracts the shader id from a material name like "cncrwall(TemplBumpDiffuse)/mat_concrete".
+        // Returns lowercase shader name, e.g. "templbumpdiffuse". Falls back to the full
+        // name-before-slash when no parentheses are present (handles bare names like "nodraw").
+        static string ExtractShaderName(string mtlName)
+        {
+            if (string.IsNullOrEmpty(mtlName))
+                return string.Empty;
+            int open  = mtlName.IndexOf('(');
+            int close = mtlName.IndexOf(')');
+            if (open >= 0 && close > open)
+                return mtlName.Substring(open + 1, close - open - 1).Trim().ToLowerInvariant();
+            int slash = mtlName.IndexOf('/');
+            string raw = slash > 0 ? mtlName.Substring(0, slash) : mtlName;
+            return raw.Trim().ToLowerInvariant();
         }
 
         static Color32 ReadCryIRGB(BinaryReader r)
@@ -629,7 +674,49 @@ namespace OpenFarCry.Importer.Cgf
         {
             if (string.IsNullOrEmpty(raw))
                 return string.Empty;
-            return raw.Replace('\\', '/').ToLowerInvariant();
+
+            string normalized = raw.Replace('\\', '/').Replace("\0", string.Empty).Trim().ToLowerInvariant();
+            if (normalized.Length == 0)
+                return string.Empty;
+
+            int rootedIndex = FindKnownTextureRootIndex(normalized);
+            if (rootedIndex > 0)
+                normalized = normalized.Substring(rootedIndex);
+
+            while (normalized.Length > 0)
+            {
+                char c = normalized[0];
+                if (char.IsLetterOrDigit(c) || c == '_' || c == '/' || c == '.')
+                    break;
+                normalized = normalized.Substring(1);
+            }
+
+            if (normalized.StartsWith("./"))
+                normalized = normalized.Substring(2);
+            while (normalized.StartsWith("/"))
+                normalized = normalized.Substring(1);
+
+            return normalized;
+        }
+
+        static int FindKnownTextureRootIndex(string value)
+        {
+            int best = -1;
+            best = MinPositive(best, value.IndexOf("objects/", StringComparison.Ordinal));
+            best = MinPositive(best, value.IndexOf("textures/", StringComparison.Ordinal));
+            best = MinPositive(best, value.IndexOf("levels/", StringComparison.Ordinal));
+            best = MinPositive(best, value.IndexOf("terrain/", StringComparison.Ordinal));
+            best = MinPositive(best, value.IndexOf("characters/", StringComparison.Ordinal));
+            return best;
+        }
+
+        static int MinPositive(int current, int candidate)
+        {
+            if (candidate < 0)
+                return current;
+            if (current < 0)
+                return candidate;
+            return candidate < current ? candidate : current;
         }
 
         static void BuildMaterialHierarchy(CgfFile file)

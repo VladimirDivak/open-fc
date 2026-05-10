@@ -232,26 +232,43 @@ namespace OpenFarCry.Importer.Cgf
     // From CryHeaders.h MtlTypes enum.
     public enum CgfMtlType { Unknown = 0, Standard = 1, Multi = 2, TwoSided = 3 }
 
-    // From CryHeaders.h MTL_CHUNK_FLAGS enum (subset used in import).
+    // From CryHeaders.h MTL_CHUNK_FLAGS enum.
     [System.Flags]
-    public enum CgfMtlFlags { None = 0, TwoSided = 0x002, Additive = 0x010 }
+    public enum CgfMtlFlags
+    {
+        None         = 0,
+        TwoSided     = 0x002,  // double-sided render
+        Subtractive  = 0x020,  // subtractive blending
+        Additive     = 0x010,  // additive blending
+        CryShader    = 0x040,  // material uses CryEngine shader system — NOT alpha-test (~68% of all chunks have this)
+        Physicalize  = 0x080,  // has physics collision geometry
+        AdditiveDecal = 0x100, // additive decal variant
+    }
 
     // Parsed data from MTL_CHUNK_DESC_0744 / 0745 / 0746 (ChunkType_Mtl = 0xCCCC000C).
-    // Texture name fields are populated when version >= 0x0744; opacity/alphaTest only in 0x0745+/0x0746.
+    // Texture names and specular data populated when version >= 0x0744;
+    // specLevel/specShininess/gloss only in 0x0745+; alphaTest float only in 0x0746.
     public class CgfMaterialChunk
     {
         public int        ChunkID;
         public int        ChunkVersion;     // 0x0744, 0x0745, or 0x0746
         public int        TableIndex;       // index in material chunk-table order
         public string     Name;
+        public string     ShaderName;       // extracted from Name: "3dsMax(ShaderName)/physics" → lowercase shader id
         public CgfMtlType MtlType;
         public int        ChildCount;       // MTL_MULTI only: number of sub-materials
-        public Color32    DiffuseColor;
+        public Color32    DiffuseColor;     // col_d
+        public Color32    SpecularColor;    // col_s (0x0744+)
+        public float      SpecLevel;        // specular intensity multiplier [0..1] (0x0745+)
+        public float      SpecShininess;    // Phong shininess [0.01..1.0] → Unity Smoothness via sqrt (0x0745+)
         public float      Opacity;          // 0x0745+; 0-1, default 1 (fully opaque)
         public float      AlphaTest;        // 0x0746+; > 0 means alpha-test is active
         public CgfMtlFlags Flags;           // 0x0745+
-        public string     DiffuseTextureName;  // tex_d.name, normalised to lowercase
-        public string     OpacityTextureName;  // tex_o.name, normalised to lowercase
+        public string     DiffuseTextureName;  // tex_d
+        public string     NormalTextureName;   // tex_b
+        public string     SpecularTextureName; // tex_s
+        public string     OpacityTextureName;  // tex_o
+        public string     GlossTextureName;    // tex_g (0x0745+)
     }
 
     // Each matrix converts from mesh-space to bone-space in bind pose (CryEngine RH Z-up)
