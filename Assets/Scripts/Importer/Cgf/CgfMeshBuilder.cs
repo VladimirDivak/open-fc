@@ -22,7 +22,7 @@ namespace OpenFarCry.Importer.Cgf
 
     public static class CgfMeshBuilder
     {
-        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v6";
+        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v7";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -38,7 +38,7 @@ namespace OpenFarCry.Importer.Cgf
                 var node = cgf.NodeChunks[i];
                 if (node.ObjectID == mesh.ChunkID)
                 {
-                    nodeTransform = node.Transform;
+                    nodeTransform = BuildAccumulatedNodeTransform(cgf, node);
                     sourceNodeName = node.Name;
                     break;
                 }
@@ -77,12 +77,11 @@ namespace OpenFarCry.Importer.Cgf
 
             // Cry applies the object Node transform only to geometry that is not
             // driven by bone links. Skinned geometry is already in skeleton space.
-            // CGF Node.Transform is an OLD row-vector Matrix44 (translation in row 3, rows = local axes).
-            // MatrixInImporterSpace transposes the 3x3 to convert row-vector to column-vector
-            // before applying the Z-up → Y-up basis change.
+            // Static Cry geometry is baked by NODE_CHUNK_DESC.tm using OLD Matrix44
+            // semantics: row-vector 3x3 plus translation in row 3.
             var unityNodeTransform = hasBones
                 ? Matrix4x4.identity
-                : CryTransformConversion.MatrixInImporterSpace(nodeTransform, importScale);
+                : CryTransformConversion.NodeMatrixInImporterSpace(nodeTransform, importScale);
 
             var bindGlobalsByBoneId = hasBones
                 ? BuildBindPoseGlobalMatricesByBoneId(boneInitPos, boneNames.Names.Length, importScale)
@@ -187,6 +186,26 @@ namespace OpenFarCry.Importer.Cgf
 
             mesh.RecalculateBounds();
             return mesh;
+        }
+
+        static Matrix4x4 BuildAccumulatedNodeTransform(CgfFile cgf, CgfNodeChunk node)
+        {
+            // CryStaticModel.cpp applies the mesh node first, then walks parents:
+            // matNodeMatrix = matNodeMatrix * parent.tm; vertices use TransformPointOLD.
+            var accumulated = node.Transform;
+            var current = node;
+            var visited = new HashSet<int> { node.ChunkID };
+
+            while (current.ParentID >= 0 &&
+                   cgf.NodeByChunkID != null &&
+                   cgf.NodeByChunkID.TryGetValue(current.ParentID, out var parent) &&
+                   visited.Add(parent.ChunkID))
+            {
+                accumulated = accumulated * parent.Transform;
+                current = parent;
+            }
+
+            return accumulated;
         }
 
         // ------------------------------------------------------------------ bone weights

@@ -34,6 +34,35 @@ namespace OpenFarCry.Importer.Tests.Editor
         static CryVertex V(float x = 0f, float y = 0f, float z = 0f) =>
             new CryVertex { PX = x, PY = y, PZ = z };
 
+        static void AddNode(CgfFile file, int chunkId, int objectId, int parentId, Matrix4x4 transform)
+        {
+            var node = new CgfNodeChunk
+            {
+                ChunkID = chunkId,
+                ObjectID = objectId,
+                ParentID = parentId,
+                Transform = transform
+            };
+            file.NodeChunks.Add(node);
+            file.NodeByChunkID[chunkId] = node;
+        }
+
+        static Matrix4x4 OldMatrix44WithRowTranslation(float x, float y, float z)
+        {
+            var m = Matrix4x4.identity;
+            m.m30 = x;
+            m.m31 = y;
+            m.m32 = z;
+            return m;
+        }
+
+        static void AssertVector(Vector3 actual, Vector3 expected)
+        {
+            Assert.That(actual.x, Is.EqualTo(expected.x).Within(1e-5f));
+            Assert.That(actual.y, Is.EqualTo(expected.y).Within(1e-5f));
+            Assert.That(actual.z, Is.EqualTo(expected.z).Within(1e-5f));
+        }
+
         // ── vertex deduplication ──────────────────────────────────────────────
 
         [Test]
@@ -83,6 +112,36 @@ namespace OpenFarCry.Importer.Tests.Editor
             result.Mesh.GetUVs(0, uvList);
             Assert.That(uvList[0].x, Is.EqualTo(0.5f).Within(1e-5f));
             Assert.That(uvList[0].y, Is.EqualTo(0.25f).Within(1e-5f), "V should be flipped: 1 - 0.75");
+        }
+
+        // ── node transform bake ────────────────────────────────────────────────
+
+        [Test]
+        public void StaticMesh_NodeMatrix44RowTranslation_IsBakedIntoVertices()
+        {
+            var file = SimpleFile(StaticMesh(
+                verts: new[] { V(0, 0, 0) },
+                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } }));
+            AddNode(file, chunkId: 10, objectId: 1, parentId: -1, transform: OldMatrix44WithRowTranslation(10f, 20f, 30f));
+
+            var result = CgfMeshBuilder.Build(file, importSkeleton: false);
+
+            AssertVector(result.Mesh.vertices[0], new Vector3(10f, 30f, -20f));
+            AssertVector(result.NodeLocalOffset, Vector3.zero);
+        }
+
+        [Test]
+        public void StaticMesh_NodeParentChain_IsAccumulatedBeforeBake()
+        {
+            var file = SimpleFile(StaticMesh(
+                verts: new[] { V(0, 0, 0) },
+                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } }));
+            AddNode(file, chunkId: 10, objectId: -1, parentId: -1, transform: OldMatrix44WithRowTranslation(100f, 0f, 0f));
+            AddNode(file, chunkId: 11, objectId: 1, parentId: 10, transform: OldMatrix44WithRowTranslation(10f, 20f, 30f));
+
+            var result = CgfMeshBuilder.Build(file, importSkeleton: false);
+
+            AssertVector(result.Mesh.vertices[0], new Vector3(110f, 30f, -20f));
         }
 
         // ── submesh grouping ──────────────────────────────────────────────────

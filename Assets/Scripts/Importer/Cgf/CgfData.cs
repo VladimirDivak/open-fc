@@ -67,12 +67,15 @@ namespace OpenFarCry.Importer.Cgf
             return converted;
         }
 
-        // For standard column-vector matrices (brush.lst Matrix34 and similar world-space matrices).
-        // ReadMatrix44 already delivers a correct Unity column-vector form; only the
-        // Z-up → Y-up basis change is needed — no 3x3 transpose.
+        // CGF NODE_CHUNK_DESC.tm is an OLD row-vector Matrix44. Unlike Matrix43 bind
+        // matrices, ReadMatrix44 preserves its translation in row 3 (m30/m31/m32).
         public static Matrix4x4 NodeMatrixInImporterSpace(Matrix4x4 m, float scale = 1f)
         {
-            var converted = BasisChange * m * InverseBasisChange;
+            var converted = OldRowVectorMatrixToUnityColumnMatrix(m);
+            converted.m03 = m.m30;
+            converted.m13 = m.m31;
+            converted.m23 = m.m32;
+            converted = BasisChange * converted * InverseBasisChange;
             converted.m03 *= scale;
             converted.m13 *= scale;
             converted.m23 *= scale;
@@ -112,7 +115,7 @@ namespace OpenFarCry.Importer.Cgf
             outM.m10 = m.m01; outM.m11 = m.m11; outM.m12 = m.m21;
             outM.m20 = m.m02; outM.m21 = m.m12; outM.m22 = m.m22;
 
-            // ReadMatrix43/44 normalize OLD row translation into Unity's column slot.
+            // ReadMatrix43 normalizes OLD row translation into Unity's column slot.
             outM.m03 = m.m03;
             outM.m13 = m.m13;
             outM.m23 = m.m23;
