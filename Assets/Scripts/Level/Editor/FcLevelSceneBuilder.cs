@@ -173,8 +173,9 @@ namespace OpenFarCry.Level.Editor
         }
 
         // CryEngine Matrix34 (row-major, Z-up) -> Unity scene transform.
-        // Level placement uses Cry(x,y,z) -> Unity(x,z,y), while imported CGF mesh
-        // vertices are still in importer space Cry(x,y,z) -> Unity(x,z,-y).
+        // Static CGF vertices are imported as Cry(x,y,z) -> Unity asset(x,z,-y),
+        // while level placement uses Cry(x,y,z) -> Unity scene(x,z,y). Therefore
+        // instance linear transform is SceneBasis * CryMatrix * Inverse(AssetBasis).
         static void ApplyCryMatrix34(Transform t, float[] m)
         {
             float m00=m[0],  m01=m[1],  m02=m[2],  m03=m[3];
@@ -183,21 +184,23 @@ namespace OpenFarCry.Level.Editor
 
             t.position = new Vector3(m03, m23, m13);
 
-            var colX = new Vector3( m00,  m20, -m10);
-            var colY = new Vector3( m02,  m22, -m12);
-            var colZ = new Vector3(-m01, -m21,  m11);
+            var colX = new Vector3( m00,  m20,  m10);
+            var colY = new Vector3( m02,  m22,  m12);
+            var colZ = new Vector3(-m01, -m21, -m11);
 
             float sX = colX.magnitude;
             float sY = colY.magnitude;
             float sZ = colZ.magnitude;
 
+            // SceneBasis has opposite handedness from AssetBasis, so the composed
+            // instance matrix contains one reflection. Keep it explicit as -Z scale.
             if (sZ > 1e-5f && sY > 1e-5f)
-                t.rotation = Quaternion.LookRotation(colZ / sZ, colY / sY);
+                t.rotation = Quaternion.LookRotation(-colZ / sZ, colY / sY);
 
             t.localScale = new Vector3(
                 sX > 1e-5f ? sX : 1f,
                 sY > 1e-5f ? sY : 1f,
-                sZ > 1e-5f ? sZ : 1f);
+                sZ > 1e-5f ? -sZ : -1f);
         }
 
         // ── Shared entity/object build ────────────────────────────────────────────
