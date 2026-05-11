@@ -1,6 +1,6 @@
 # Level Loading Refactor Plan
 
-Дата среза: 2026-05-08.
+Дата среза: 2026-05-10.
 
 ## Цель
 
@@ -14,11 +14,43 @@
 
 ---
 
+## Состояние на 2026-05-10
+
+### Что уже сделано
+
+| Компонент | Статус |
+|-----------|--------|
+| `FcBrushLoadService` | **DONE** — async, distance-sorted, concurrency-limited (`_maxConcurrent`, `_loadsPerFrame`) |
+| `FcBrushInstance.ApplyLoadResult` | **DONE** — регистрируется в сервисе, не self-loading |
+| `FcLevelCacheService` | **DONE** — scope ownership, `ReleaseLevelScope` + `TrimUnused` on destroy |
+| `FcLevelResourceService` | есть — тонкая обёртка над sync `CgfRuntimeImporter.Import` |
+| `FcLevelLayoutData` | есть — сериализует mission + brush layout в ScriptableObject |
+
+### Что ещё self-loading (нужна Phase 2)
+
+- `FcMeshEntity.Start()` — sync `service.ImportCgf(...)` на main thread
+- `FcCharacterEntity.Start()` — sync `service.ImportCgf(...)` + sync `TryAttachAnimations` на main thread
+
+### Что отсутствует полностью
+
+- `FcLevelLoadReport` — timing accumulator, нет нигде
+- `FcLevelLoadService` — главный orchestrator уровня
+- `FcEntityLoadService` — priority queue + load state tracking
+- `FcMeshLoadService` — async CGF pipeline для entity (отдельно от `FcBrushLoadService`)
+- `FcAnimationLoadService` — async CAL/CAF pipeline
+
+### Что нужно уточнить по farcry-sources/docs
+
+- `docs/unity-entities.md` — иерархия entity-классов (`FarCryEntity` → NPC/Vehicle/Weapon/…); при создании `FcLevelLoadService` надо учитывать, что загрузка entity должна знать о типах сущностей для приоритетизации.
+- `docs/materials.md` — shader/texture mapping (топ-16 шейдеров, структура MTL-чанка); влияет на `FcMeshLoadService.ResolveMaterials` шаг.
+
+---
+
 ## Проблемы текущего состояния
 
 ### 1. Self-loading у entity
 
-Сейчас `FcMeshEntity`, `FcCharacterEntity` и `FcBrushInstance` сами начинают загрузку в `Start()`.
+Сейчас `FcMeshEntity` и `FcCharacterEntity` сами начинают загрузку в `Start()`.
 
 Следствия:
 
@@ -30,18 +62,9 @@
 
 ### 2. Загрузка в основном синхронная
 
-Сейчас основной runtime path вызывает synchronous import на main thread:
+`FcMeshEntity` и `FcCharacterEntity` вызывают `service.ImportCgf(...)` синхронно на main thread.
 
-- `FcLevelResourceService.ImportCgf(...)`
-- `CgfRuntimeImporter.Import(...)`
-
-Хотя в VFS уже есть `FcFileSystem.ReadAllBytesAsync(...)`, pipeline уровня его почти не использует.
-
-Следствия:
-
-- main-thread spikes;
-- плохая масштабируемость на больших уровнях;
-- невозможно аккуратно загружать персонажей/brushes/декорации по приоритету.
+Хотя `FcBrushLoadService` уже перешёл на async `CgfRuntimeImporter.ImportAsync`, entity-компоненты пока нет.
 
 ### 3. Анимационный кеш всё ещё ненадёжен
 
@@ -52,17 +75,9 @@
 - сигнатуру совместимости controller mapping;
 - semantic clip reuse между разными моделями.
 
-Требование: кеш анимаций должен повторно использовать clip, когда результат действительно идентичен, и не reuse-ить его, когда отличаются значимые кривые/маппинг.
-
 ### 4. Нет нормального timing breakdown по уровню
 
-Сейчас в логах есть:
-
-- факт сборки уровня;
-- отдельные warning/error сообщения;
-- runtime smoke logs для тестового импортера.
-
-Но нет системного breakdown по этапам загрузки реального уровня.
+Нет системного breakdown ни по editor build, ни по runtime load.
 
 ---
 
@@ -74,7 +89,7 @@ Level Scene / Mission Data
   -> FcEntityLoadService
       -> FcMeshLoadService
       -> FcAnimationLoadService
-      -> FcBrushLoadService
+      -> FcBrushLoadService  ← уже реализован
   -> apply loaded state to placeholders
 ```
 
@@ -175,16 +190,20 @@ Placeholders хранят только данные и состояние при
   - cache stats
   - warning summary
 
-### FcBrushLoadService
+### FcBrushLoadService ← уже реализован
 
-Сервис для brush-ориентированного runtime path.
+Async loader для brush-ориентированного runtime path.
 
-Ответственность:
+Реализовано:
 
-- batching для большого числа brush instances;
-- shared mesh reuse;
-- proxy/no-draw collider extraction;
-- deferred loading для дальних brushes.
+- batching, distance-sort, shared mesh cache (через `CgfRuntimeImporter`);
+- async import + texture preload;
+- concurrency limits (`_maxConcurrent`, `_loadsPerFrame`).
+
+Нужно добавить:
+
+- timing instrumentation (Phase 1);
+- интеграция с `FcLevelLoadReport`.
 
 ---
 
@@ -213,17 +232,16 @@ Entity-компоненты больше не должны делать import �
 - `ApplyLoadedCharacter(LoadedMeshArtifact mesh, LoadedAnimationArtifact anim)`
 - `ReleaseLoadedCharacter()`
 
-`FcBrushInstance`:
+`FcBrushInstance` ← уже реализован:
 
-- `CreateLoadRequest()`
-- `ApplyLoadedBrush(LoadedMeshArtifact artifact)`
-- `ReleaseLoadedBrush()`
+- `Register(this)` в `Start()`
+- `ApplyLoadResult(CgfRuntimeImportResult result, string levelScopeId)`
 
 ---
 
 ## Async Pipeline
 
-## Общий принцип
+### Общий принцип
 
 Каждый load request должен быть разложен на этапы:
 
@@ -289,11 +307,6 @@ Entity-компоненты больше не должны делать import �
 - `virtualPath`
 - fingerprint исходных bytes или source version
 
-Назначение:
-
-- быстро понять, изменился ли сам CAF;
-- не держать устаревший parse только по path.
-
 #### Built clip cache key
 
 Основа:
@@ -303,11 +316,6 @@ Entity-компоненты больше не должны делать import �
 - import scale
 - controller mapping signature
 - loop policy / import options
-
-Назначение:
-
-- reuse clip между разными моделями, если итоговый результат действительно идентичен;
-- не reuse-ить clip, если поменялся mapping или meaningful curve content.
 
 ### Level scope ownership
 
@@ -338,16 +346,12 @@ LoadLevelAsync
 
 ### Critical set
 
-В critical batch обычно входят:
-
 - player-near entities;
 - gameplay-critical characters;
-- важные triggers/spawn points, если для них нужны runtime resources;
+- важные triggers/spawn points;
 - ближайшие visible brushes/props.
 
 ### Deferred set
-
-В deferred batch идут:
 
 - дальние props;
 - дальние brushes;
@@ -358,18 +362,14 @@ LoadLevelAsync
 
 ## Инструментация и метрики
 
-Нужно добавить обязательный timing breakdown.
-
 ### Editor level build
 
 Логировать отдельно:
 
-- `MountLevelPak`
 - `LoadMissionXml`
-- `ParseMissionXml`
 - `LoadBrushList`
+- `SaveLayoutData`
 - `BuildEntities`
-- `BuildObjects`
 - `BuildBrushPlaceholders`
 - `TotalEditorBuild`
 
@@ -389,13 +389,10 @@ LoadLevelAsync
 - `ConfigureLod`
 - `ApplyToSceneObject`
 
-### Итоговый report
-
-В конце загрузки уровня нужен агрегированный summary:
+### Итоговый report (runtime)
 
 - total wall time;
 - total main-thread time;
-- total background time;
 - average per entity class;
 - top slowest assets;
 - cache hit/miss ratios;
@@ -406,25 +403,22 @@ LoadLevelAsync
 
 ## Порядок внедрения
 
-### Phase 1. Instrumentation first
+### Phase 1. Instrumentation — **STARTED 2026-05-10**
 
-Сначала добавить тайминги без изменения архитектуры.
+Добавить timing без изменения архитектуры:
 
-Задача:
-
-- понять реальные bottleneck-и;
-- зафиксировать baseline;
-- иметь чем измерять эффект последующих изменений.
+- [x] `FcLevelLoadReport` — accumulator для timing entries
+- [x] `FcLevelSceneBuilder` — timing по editor build phases
+- [x] `FcBrushLoadService` — per-load timing + aggregate report
 
 ### Phase 2. Remove self-loading
 
 Убрать `Start() -> ImportCgf()` из:
 
-- `FcMeshEntity`
-- `FcCharacterEntity`
-- `FcBrushInstance`
+- `FcMeshEntity` — заменить на регистрацию в `FcEntityLoadService`
+- `FcCharacterEntity` — заменить на регистрацию в `FcEntityLoadService`
 
-Заменить на orchestration через `FcEntityLoadService`.
+Потребует создания `FcEntityLoadService` + `FcMeshLoadService`.
 
 ### Phase 3. Introduce async queue
 
@@ -441,7 +435,6 @@ LoadLevelAsync
 
 - `FcMeshLoadService`
 - `FcAnimationLoadService`
-- `FcBrushLoadService`
 
 И перевести entity apply на результаты сервисов.
 
@@ -454,8 +447,6 @@ LoadLevelAsync
 - built model;
 - built clip;
 - materials.
-
-Особый фокус: animation semantic reuse.
 
 ### Phase 6. Streaming and polish
 
@@ -473,21 +464,26 @@ LoadLevelAsync
 
 ### Нужно переработать
 
-- `Assets/Scripts/Level/Services/FcLevelResourceService.cs`
-- `Assets/Scripts/Level/Entities/FcMeshEntity.cs`
-- `Assets/Scripts/Level/Entities/FcCharacterEntity.cs`
-- `Assets/Scripts/Level/Entities/FcBrushInstance.cs`
-- `Assets/Scripts/Importer/Cgf/CgfAnimationRuntimeImportService.cs`
+- `Assets/Scripts/Level/Services/FcLevelResourceService.cs` — сейчас только sync wrapper
+- `Assets/Scripts/Level/Entities/FcMeshEntity.cs` — убрать self-loading из `Start()`
+- `Assets/Scripts/Level/Entities/FcCharacterEntity.cs` — убрать self-loading из `Start()`
+- `Assets/Scripts/Importer/Cgf/CgfAnimationRuntimeImportService.cs` — стабилизировать cache policy
 
 ### Нужно добавить
 
+- `Assets/Scripts/Level/Services/FcLevelLoadReport.cs` ← Phase 1 ✓
 - `Assets/Scripts/Level/Services/FcLevelLoadService.cs`
 - `Assets/Scripts/Level/Services/FcEntityLoadService.cs`
 - `Assets/Scripts/Level/Services/FcMeshLoadService.cs`
 - `Assets/Scripts/Level/Services/FcAnimationLoadService.cs`
-- `Assets/Scripts/Level/Services/FcBrushLoadService.cs`
-- `Assets/Scripts/Level/Services/FcLevelLoadReport.cs`
 - DTO/Request/Artifact types для pipeline.
+
+### Уже есть (не добавлять повторно)
+
+- `Assets/Scripts/Level/Services/FcBrushLoadService.cs` ← готов
+- `Assets/Scripts/Level/Services/FcLevelCacheService.cs` ← готов
+- `Assets/Scripts/Level/Services/FcLevelResourceService.cs` ← частично
+- `Assets/Scripts/Level/Services/FcLevelEnvironment.cs` ← готов
 
 ---
 
@@ -507,24 +503,18 @@ LoadLevelAsync
 
 ## Что не входит в первую итерацию
 
-Не пытаться тащить в первый проход:
-
 - полноценную terrain streaming систему;
 - vegetation system;
 - audio importer;
 - full Lua/AI runtime behavior;
 - глобальную ECS/Jobs migration.
 
-Первая итерация должна решить именно architecture + loading + caching + timing.
-
 ---
 
-## Практический следующий шаг
+## Практический следующий шаг (после Phase 1)
 
-Самый разумный следующий шаг:
+После фиксации baseline Phase 1:
 
-1. добавить timing instrumentation в current pipeline;
-2. зафиксировать baseline на уровне `Training`;
-3. после этого начинать вынос orchestration в `FcLevelLoadService`.
-
-Без baseline дальнейший рефакторинг будет трудно оценивать объективно.
+1. создать `FcEntityLoadService` с priority queue;
+2. создать `FcMeshLoadService` как async версию текущего sync path в `FcMeshEntity`;
+3. переключить `FcMeshEntity` и `FcCharacterEntity` на регистрацию вместо self-loading.

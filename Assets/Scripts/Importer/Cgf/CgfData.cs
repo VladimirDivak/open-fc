@@ -55,9 +55,24 @@ namespace OpenFarCry.Importer.Cgf
             return RotationFromMatrix(BasisChange * rowVectorEquivalent * InverseBasisChange);
         }
 
+        // For OLD row-vector matrices (SBoneInitPosMatrix / CAF controllers):
+        // ReadMatrix43 normalises translation into the Unity column slot, then this
+        // transposes the 3x3 and applies the Z-up → Y-up basis change.
         public static Matrix4x4 MatrixInImporterSpace(Matrix4x4 m, float scale = 1f)
         {
             var converted = BasisChange * OldRowVectorMatrixToUnityColumnMatrix(m) * InverseBasisChange;
+            converted.m03 *= scale;
+            converted.m13 *= scale;
+            converted.m23 *= scale;
+            return converted;
+        }
+
+        // For standard column-vector matrices (brush.lst Matrix34 and similar world-space matrices).
+        // ReadMatrix44 already delivers a correct Unity column-vector form; only the
+        // Z-up → Y-up basis change is needed — no 3x3 transpose.
+        public static Matrix4x4 NodeMatrixInImporterSpace(Matrix4x4 m, float scale = 1f)
+        {
+            var converted = BasisChange * m * InverseBasisChange;
             converted.m03 *= scale;
             converted.m13 *= scale;
             converted.m23 *= scale;

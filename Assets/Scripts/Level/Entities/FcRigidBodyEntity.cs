@@ -19,6 +19,12 @@ namespace OpenFarCry.Level.Entities
             var rb = gameObject.AddComponent<Rigidbody>();
             rb.mass = _mass;
             rb.isKinematic = _isKinematic;
+            // Non-convex MeshCollider + dynamic Rigidbody is unsupported in Unity.
+            if (!_isKinematic)
+            {
+                foreach (var col in GetComponentsInChildren<MeshCollider>())
+                    col.convex = true;
+            }
         }
 
         public override void SetData(FcEntityDesc desc)

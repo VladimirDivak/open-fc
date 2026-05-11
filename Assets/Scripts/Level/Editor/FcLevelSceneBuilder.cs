@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
@@ -7,6 +9,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using Debug = UnityEngine.Debug;
 using Object = UnityEngine.Object;
 
 namespace OpenFarCry.Level.Editor
@@ -23,12 +26,29 @@ namespace OpenFarCry.Level.Editor
             bool skipHidden = true,
             bool buildBrushes = true)
         {
+            var sw = new Stopwatch();
+            var report = new FcLevelLoadReport { LevelName = levelName, MissionName = missionName };
+
+            sw.Restart();
             var mission = FcLevelLoader.LoadMission(levelName, missionName);
+            report.RecordPhase("LoadMissionXml", sw.Elapsed.TotalMilliseconds);
+
             if (mission == null)
             {
                 Debug.LogError($"[FcLevelSceneBuilder] Failed to load mission '{missionName}' for level '{levelName}'.");
                 return default;
             }
+
+            // Load brushes once; used both for layout save and scene build.
+            sw.Restart();
+            IReadOnlyList<FcBrushDesc> brushList = buildBrushes
+                ? FcBrushLoader.LoadBrushes(levelName)
+                : System.Array.Empty<FcBrushDesc>();
+            report.RecordPhase("LoadBrushList", sw.Elapsed.TotalMilliseconds);
+
+            sw.Restart();
+            SaveLayoutData(levelName, missionName, mission, brushList);
+            report.RecordPhase("SaveLayoutData", sw.Elapsed.TotalMilliseconds);
 
             // Root GO
             var levelRoot = new GameObject($"Level_{levelName}");
@@ -37,73 +57,57 @@ namespace OpenFarCry.Level.Editor
             // Services
             InstantiateServices(levelRoot, levelName, mission.Environment);
 
-            // Entity container
+            // Entity + object containers
             var entityRoot = new GameObject("Entities");
             entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
-
-            // Objects container
             var objectRoot = new GameObject("Objects");
             objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
-            var stats = new BuildStats();
-            var entityById = new Dictionary<int, Transform>();
+            sw.Restart();
+            var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
+            report.RecordPhase("BuildEntities", sw.Elapsed.TotalMilliseconds);
 
-            // ── Pass 1: entities ────────────────────────────────────────────────
-            foreach (var desc in mission.Entities)
-            {
-                if (skipHidden && desc.HiddenInGame) { stats.Skipped++; continue; }
-
-                var prefab = registry.GetPrefabForClass(desc.EntityClass);
-                if (prefab == null)
-                {
-                    Debug.LogWarning($"[FcLevelSceneBuilder] No prefab for EntityClass='{desc.EntityClass}' (id={desc.Id})");
-                    stats.Unknown++;
-                    continue;
-                }
-
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.EntityClass}_{desc.Id}" : desc.Name;
-                go.transform.SetParent(entityRoot.transform, worldPositionStays: false);
-
-                SetTransform(go.transform, desc.Pos, desc.Angles, desc.Scale);
-
-                var entity = go.GetComponent<FcEntity>();
-                entity?.SetData(desc);
-
-                if (desc.Id > 0) entityById[desc.Id] = go.transform;
-                stats.Entities++;
-            }
-
-            // ── Pass 2: objects ─────────────────────────────────────────────────
-            foreach (var desc in mission.Objects)
-            {
-                var prefab = registry.GetPrefabForObjectType(desc.Type);
-                if (prefab == null) { stats.Unknown++; continue; }
-
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.Type}_obj" : desc.Name;
-                go.transform.SetParent(objectRoot.transform, worldPositionStays: false);
-
-                SetTransform(go.transform, desc.Pos, desc.Angles, 1f);
-
-                var entity = go.GetComponent<FcEntity>();
-                entity?.SetData(desc);
-
-                stats.Objects++;
-            }
-
-            // ── Pass 3: parent remap ────────────────────────────────────────────
-            foreach (var desc in mission.Entities)
-            {
-                if (desc.ParentId <= 0) continue;
-                if (!entityById.TryGetValue(desc.Id, out var child)) continue;
-                if (!entityById.TryGetValue(desc.ParentId, out var parent)) continue;
-                child.SetParent(parent, worldPositionStays: true);
-            }
-
-            // ── Pass 4: brush geometry ──────────────────────────────────────────
+            // ── Brush geometry ──────────────────────────────────────────────────
             if (buildBrushes)
-                stats.Brushes = BuildBrushes(levelName, levelRoot);
+            {
+                sw.Restart();
+                stats.Brushes = BuildBrushesFromList(brushList, levelRoot);
+                report.RecordPhase("BuildBrushPlaceholders", sw.Elapsed.TotalMilliseconds);
+            }
+
+            report.LogEditorBuild();
+            EditorSceneManager.MarkSceneDirty(targetScene);
+            return stats;
+        }
+
+        // Rebuilds a level scene from serialized layout data without reading PAK archives.
+        public static BuildStats RebuildFromLayoutData(
+            FcLevelLayoutData layoutData,
+            FcEntityPrefabRegistry registry,
+            Scene targetScene,
+            bool skipHidden = true)
+        {
+            if (layoutData == null)
+            {
+                Debug.LogError("[FcLevelSceneBuilder] layoutData is null.");
+                return default;
+            }
+
+            var mission = layoutData.ToMission();
+            var brushList = layoutData.ToBrushList();
+
+            var levelRoot = new GameObject($"Level_{layoutData.LevelName}");
+            SceneManager.MoveGameObjectToScene(levelRoot, targetScene);
+
+            InstantiateServices(levelRoot, layoutData.LevelName, mission.Environment);
+
+            var entityRoot = new GameObject("Entities");
+            entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+            var objectRoot = new GameObject("Objects");
+            objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+
+            var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
+            stats.Brushes = BuildBrushesFromList(brushList, levelRoot);
 
             EditorSceneManager.MarkSceneDirty(targetScene);
             return stats;
@@ -111,10 +115,9 @@ namespace OpenFarCry.Level.Editor
 
         // ── Brushes ──────────────────────────────────────────────────────────────
 
-        static int BuildBrushes(string levelName, GameObject levelRoot)
+        static int BuildBrushesFromList(IReadOnlyList<FcBrushDesc> brushes, GameObject levelRoot)
         {
-            var brushes = FcBrushLoader.LoadBrushes(levelName);
-            if (brushes.Count == 0) return 0;
+            if (brushes == null || brushes.Count == 0) return 0;
 
             var brushRoot = new GameObject("Brushes");
             brushRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
@@ -133,6 +136,40 @@ namespace OpenFarCry.Level.Editor
             }
 
             return brushes.Count;
+        }
+
+        // ── Layout data ───────────────────────────────────────────────────────────
+
+        static void SaveLayoutData(string levelName, string missionName,
+            FcMissionDesc mission, IReadOnlyList<FcBrushDesc> brushes)
+        {
+            const string dir = "Assets/FCData/Levels";
+            EnsureDir(dir);
+
+            string path = $"{dir}/{levelName}_{missionName}.asset";
+            var data = FcLevelLayoutData.FromMission(mission, brushes);
+
+            var existing = AssetDatabase.LoadAssetAtPath<FcLevelLayoutData>(path);
+            if (existing != null)
+            {
+                EditorUtility.CopySerialized(data, existing);
+                EditorUtility.SetDirty(existing);
+            }
+            else
+            {
+                AssetDatabase.CreateAsset(data, path);
+            }
+            AssetDatabase.SaveAssets();
+        }
+
+        static void EnsureDir(string dir)
+        {
+            if (AssetDatabase.IsValidFolder(dir)) return;
+            string parent = Path.GetDirectoryName(dir)?.Replace('\\', '/');
+            string leaf   = Path.GetFileName(dir);
+            if (!string.IsNullOrEmpty(parent) && !AssetDatabase.IsValidFolder(parent))
+                EnsureDir(parent);
+            AssetDatabase.CreateFolder(parent, leaf);
         }
 
         // CryEngine Matrix34 (row-major, Z-up right-handed) → Unity Transform (Y-up left-handed).
@@ -164,6 +201,74 @@ namespace OpenFarCry.Level.Editor
                 sZ > 1e-5f ? sZ : 1f);
         }
 
+        // ── Shared entity/object build ────────────────────────────────────────────
+
+        static BuildStats BuildMission(
+            FcMissionDesc mission,
+            FcEntityPrefabRegistry registry,
+            GameObject entityRoot,
+            GameObject objectRoot,
+            bool skipHidden)
+        {
+            var stats = new BuildStats();
+            var entityById = new Dictionary<int, Transform>();
+
+            // Pass 1: entities
+            foreach (var desc in mission.Entities)
+            {
+                if (skipHidden && desc.HiddenInGame) { stats.Skipped++; continue; }
+
+                var prefab = registry.GetPrefabForClass(desc.EntityClass);
+                if (prefab == null)
+                {
+                    Debug.LogWarning($"[FcLevelSceneBuilder] No prefab for EntityClass='{desc.EntityClass}' (id={desc.Id})");
+                    stats.Unknown++;
+                    continue;
+                }
+
+                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.EntityClass}_{desc.Id}" : desc.Name;
+                go.transform.SetParent(entityRoot.transform, worldPositionStays: false);
+
+                SetTransform(go.transform, desc.Pos, desc.Angles, desc.Scale);
+
+                var entity = go.GetComponent<FcEntity>();
+                entity?.SetData(desc);
+
+                if (desc.Id > 0) entityById[desc.Id] = go.transform;
+                stats.Entities++;
+            }
+
+            // Pass 2: objects
+            foreach (var desc in mission.Objects)
+            {
+                var prefab = registry.GetPrefabForObjectType(desc.Type);
+                if (prefab == null) { stats.Unknown++; continue; }
+
+                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.Type}_obj" : desc.Name;
+                go.transform.SetParent(objectRoot.transform, worldPositionStays: false);
+
+                SetTransform(go.transform, desc.Pos, desc.Angles, 1f);
+
+                var entity = go.GetComponent<FcEntity>();
+                entity?.SetData(desc);
+
+                stats.Objects++;
+            }
+
+            // Pass 3: parent remap
+            foreach (var desc in mission.Entities)
+            {
+                if (desc.ParentId <= 0) continue;
+                if (!entityById.TryGetValue(desc.Id, out var child)) continue;
+                if (!entityById.TryGetValue(desc.ParentId, out var parent)) continue;
+                child.SetParent(parent, worldPositionStays: true);
+            }
+
+            return stats;
+        }
+
         // ── Clear ────────────────────────────────────────────────────────────────
 
         public static void ClearScene(Scene targetScene)
@@ -187,6 +292,7 @@ namespace OpenFarCry.Level.Editor
             var cache = servicesGo.AddComponent<FcLevelCacheService>();
             cache.SetLevelScope(levelName);
             servicesGo.AddComponent<FcLevelResourceService>();
+            servicesGo.AddComponent<FcBrushLoadService>();
 
             var environment = servicesGo.AddComponent<FcLevelEnvironment>();
             if (env != null)

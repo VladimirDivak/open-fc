@@ -17,11 +17,12 @@ namespace OpenFarCry.Importer.Cgf
         public Matrix4x4[] BindPoses;   // Unity-space inverse bind matrices
         public int[]       BoneIdToIndex;
         public int[]       BoneIndexToId;
+        public Vector3     NodeLocalOffset; // node transform translation in Unity space; zero for skeletal meshes
     }
 
     public static class CgfMeshBuilder
     {
-        public const string MeshCacheVersionName = "CGFMesh_CryLinkBind_v4_UvFlipV";
+        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v6";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -76,9 +77,13 @@ namespace OpenFarCry.Importer.Cgf
 
             // Cry applies the object Node transform only to geometry that is not
             // driven by bone links. Skinned geometry is already in skeleton space.
+            // CGF Node.Transform is an OLD row-vector Matrix44 (translation in row 3, rows = local axes).
+            // MatrixInImporterSpace transposes the 3x3 to convert row-vector to column-vector
+            // before applying the Z-up → Y-up basis change.
             var unityNodeTransform = hasBones
                 ? Matrix4x4.identity
                 : CryTransformConversion.MatrixInImporterSpace(nodeTransform, importScale);
+
             var bindGlobalsByBoneId = hasBones
                 ? BuildBindPoseGlobalMatricesByBoneId(boneInitPos, boneNames.Names.Length, importScale)
                 : null;

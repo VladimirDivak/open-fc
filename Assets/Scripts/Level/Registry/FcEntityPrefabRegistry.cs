@@ -15,6 +15,15 @@ namespace OpenFarCry.Level.Registry
         Trigger,
         SpawnPoint,
         TagPoint,
+        Vehicle,
+        Door,
+        Pickup,
+        Mine,
+        Particle,
+        Environment,
+        Boid,
+        FcCamera,
+        Destructible,
     }
 
     [Serializable]
@@ -38,6 +47,15 @@ namespace OpenFarCry.Level.Registry
         [SerializeField] GameObject _triggerEntityPrefab;
         [SerializeField] GameObject _spawnPointPrefab;
         [SerializeField] GameObject _tagPointPrefab;
+        [SerializeField] GameObject _vehicleEntityPrefab;
+        [SerializeField] GameObject _doorEntityPrefab;
+        [SerializeField] GameObject _pickupEntityPrefab;
+        [SerializeField] GameObject _mineEntityPrefab;
+        [SerializeField] GameObject _particleEntityPrefab;
+        [SerializeField] GameObject _environmentEntityPrefab;
+        [SerializeField] GameObject _boidEntityPrefab;
+        [SerializeField] GameObject _cameraEntityPrefab;
+        [SerializeField] GameObject _destructibleEntityPrefab;
 
         [Header("Class Mappings (override built-in)")]
         [SerializeField] EntityClassMapping[] _classMappings = Array.Empty<EntityClassMapping>();
@@ -69,14 +87,23 @@ namespace OpenFarCry.Level.Registry
         {
             return type switch
             {
-                FcEntityPrefabType.Mesh => _meshEntityPrefab,
-                FcEntityPrefabType.RigidBody => _rigidBodyEntityPrefab,
-                FcEntityPrefabType.Character => _characterEntityPrefab,
-                FcEntityPrefabType.Light => _lightEntityPrefab,
-                FcEntityPrefabType.Sound => _soundEntityPrefab,
-                FcEntityPrefabType.Trigger => _triggerEntityPrefab,
-                FcEntityPrefabType.SpawnPoint => _spawnPointPrefab,
-                FcEntityPrefabType.TagPoint => _tagPointPrefab,
+                FcEntityPrefabType.Mesh        => _meshEntityPrefab,
+                FcEntityPrefabType.RigidBody   => _rigidBodyEntityPrefab,
+                FcEntityPrefabType.Character   => _characterEntityPrefab,
+                FcEntityPrefabType.Light       => _lightEntityPrefab,
+                FcEntityPrefabType.Sound       => _soundEntityPrefab,
+                FcEntityPrefabType.Trigger     => _triggerEntityPrefab,
+                FcEntityPrefabType.SpawnPoint  => _spawnPointPrefab,
+                FcEntityPrefabType.TagPoint    => _tagPointPrefab,
+                FcEntityPrefabType.Vehicle     => _vehicleEntityPrefab,
+                FcEntityPrefabType.Door        => _doorEntityPrefab,
+                FcEntityPrefabType.Pickup      => _pickupEntityPrefab,
+                FcEntityPrefabType.Mine        => _mineEntityPrefab,
+                FcEntityPrefabType.Particle    => _particleEntityPrefab,
+                FcEntityPrefabType.Environment => _environmentEntityPrefab,
+                FcEntityPrefabType.Boid        => _boidEntityPrefab,
+                FcEntityPrefabType.FcCamera    => _cameraEntityPrefab,
+                FcEntityPrefabType.Destructible => _destructibleEntityPrefab,
                 _ => null,
             };
         }
@@ -104,6 +131,11 @@ namespace OpenFarCry.Level.Registry
                 if (cls.Equals(pat, StringComparison.OrdinalIgnoreCase))
                     return FcEntityPrefabType.TagPoint;
 
+            // Vehicles (check before Character — gunship/cargochopper are vehicles)
+            foreach (string pat in s_vehiclePatterns)
+                if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return FcEntityPrefabType.Vehicle;
+
             // AI / character types
             foreach (string pat in s_characterPatterns)
                 if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
@@ -123,6 +155,46 @@ namespace OpenFarCry.Level.Registry
                 if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
                     return FcEntityPrefabType.Trigger;
 
+            // Doors
+            foreach (string pat in s_doorPatterns)
+                if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return FcEntityPrefabType.Door;
+
+            // Pickups (substring — covers Pickup*, Ammo*, health, Armor, KeyCard*, Checkpoint)
+            foreach (string pat in s_pickupPatterns)
+                if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return FcEntityPrefabType.Pickup;
+
+            // Mines (exact match to avoid false positives)
+            foreach (string pat in s_minePatterns)
+                if (cls.Equals(pat, StringComparison.OrdinalIgnoreCase))
+                    return FcEntityPrefabType.Mine;
+
+            // Particle effects
+            foreach (string pat in s_particlePatterns)
+                if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return FcEntityPrefabType.Particle;
+
+            // Environment volumes
+            foreach (string pat in s_environmentPatterns)
+                if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return FcEntityPrefabType.Environment;
+
+            // Boids (exact match — short names like "Bugs" could be substrings)
+            foreach (string pat in s_boidPatterns)
+                if (cls.Equals(pat, StringComparison.OrdinalIgnoreCase))
+                    return FcEntityPrefabType.Boid;
+
+            // Destructibles
+            foreach (string pat in s_destructiblePatterns)
+                if (cls.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return FcEntityPrefabType.Destructible;
+
+            // Camera entities (exact match)
+            foreach (string pat in s_cameraPatterns)
+                if (cls.Equals(pat, StringComparison.OrdinalIgnoreCase))
+                    return FcEntityPrefabType.FcCamera;
+
             // RigidBody types
             foreach (string pat in s_rigidBodyPatterns)
                 if (cls.Equals(pat, StringComparison.OrdinalIgnoreCase))
@@ -137,10 +209,22 @@ namespace OpenFarCry.Level.Registry
             return FcEntityPrefabType.Mesh;
         }
 
+        static readonly string[] s_tagPointPatterns =
+        {
+            "AIAnchor", "Waypoint", "TagPoint", "Group",
+            "NavigationSeed", "Anchor", "AIPoint", "VisualScriptHook",
+        };
+
+        static readonly string[] s_vehiclePatterns =
+        {
+            "fwdvehicle", "Buggy", "Bigtrack", "Forklift",
+            "boat", "Paraglider", "gunship", "cargochopper",
+        };
+
         static readonly string[] s_characterPatterns =
         {
             "Grunt", "MercCover", "MercScout", "MercSniper", "MercRear",
-            "Mutant", "Pig", "Shark", "Worm", "gunship", "cargochopper",
+            "Mutant", "Pig", "Shark", "Worm",
             "BasicAI", "NPC", "CreatureGenerator",
         };
 
@@ -159,10 +243,45 @@ namespace OpenFarCry.Level.Registry
             "ProximityKeyTrigger", "ImpulseTrigger",
         };
 
-        static readonly string[] s_tagPointPatterns =
+        static readonly string[] s_doorPatterns =
         {
-            "AIAnchor", "Waypoint", "TagPoint", "Group",
-            "NavigationSeed", "Anchor", "AIPoint", "VisualScriptHook",
+            "Door", "AutomaticElevator", "FlyingFox", "ladder",
+        };
+
+        static readonly string[] s_pickupPatterns =
+        {
+            "Pickup", "Ammo", "health", "Armor", "KeyCard", "Checkpoint",
+        };
+
+        static readonly string[] s_minePatterns =
+        {
+            "AreaMine", "FrogMine", "ProximityMine", "PlaceableExplo", "PlaceableGeneric",
+        };
+
+        static readonly string[] s_particlePatterns =
+        {
+            "ParticleEffect", "ParticleSpray", "BFly", "Grasshopper",
+        };
+
+        static readonly string[] s_environmentPatterns =
+        {
+            "Fog", "Storm", "EnvColor", "ViewDist", "RaisingWater",
+        };
+
+        static readonly string[] s_boidPatterns =
+        {
+            "Birds", "Fish", "Bugs",
+        };
+
+        static readonly string[] s_destructiblePatterns =
+        {
+            "BreakableObject", "DestroyableObject", "BuildableObject",
+            "DeadBody", "AnimObject", "AICrate", "AIObject", "SwivilChair",
+        };
+
+        static readonly string[] s_cameraPatterns =
+        {
+            "CameraSource", "CameraTargetPoint",
         };
 
         static readonly string[] s_rigidBodyPatterns =
@@ -175,14 +294,23 @@ namespace OpenFarCry.Level.Registry
         // Validation helper for editor — returns which prefabs are unassigned.
         public IEnumerable<string> GetUnassignedPrefabNames()
         {
-            if (_meshEntityPrefab == null)      yield return nameof(_meshEntityPrefab);
-            if (_rigidBodyEntityPrefab == null) yield return nameof(_rigidBodyEntityPrefab);
-            if (_characterEntityPrefab == null) yield return nameof(_characterEntityPrefab);
-            if (_lightEntityPrefab == null)     yield return nameof(_lightEntityPrefab);
-            if (_soundEntityPrefab == null)     yield return nameof(_soundEntityPrefab);
-            if (_triggerEntityPrefab == null)   yield return nameof(_triggerEntityPrefab);
-            if (_spawnPointPrefab == null)      yield return nameof(_spawnPointPrefab);
-            if (_tagPointPrefab == null)        yield return nameof(_tagPointPrefab);
+            if (_meshEntityPrefab == null)        yield return nameof(_meshEntityPrefab);
+            if (_rigidBodyEntityPrefab == null)   yield return nameof(_rigidBodyEntityPrefab);
+            if (_characterEntityPrefab == null)   yield return nameof(_characterEntityPrefab);
+            if (_lightEntityPrefab == null)       yield return nameof(_lightEntityPrefab);
+            if (_soundEntityPrefab == null)       yield return nameof(_soundEntityPrefab);
+            if (_triggerEntityPrefab == null)     yield return nameof(_triggerEntityPrefab);
+            if (_spawnPointPrefab == null)        yield return nameof(_spawnPointPrefab);
+            if (_tagPointPrefab == null)          yield return nameof(_tagPointPrefab);
+            if (_vehicleEntityPrefab == null)     yield return nameof(_vehicleEntityPrefab);
+            if (_doorEntityPrefab == null)        yield return nameof(_doorEntityPrefab);
+            if (_pickupEntityPrefab == null)      yield return nameof(_pickupEntityPrefab);
+            if (_mineEntityPrefab == null)        yield return nameof(_mineEntityPrefab);
+            if (_particleEntityPrefab == null)    yield return nameof(_particleEntityPrefab);
+            if (_environmentEntityPrefab == null) yield return nameof(_environmentEntityPrefab);
+            if (_boidEntityPrefab == null)        yield return nameof(_boidEntityPrefab);
+            if (_cameraEntityPrefab == null)      yield return nameof(_cameraEntityPrefab);
+            if (_destructibleEntityPrefab == null) yield return nameof(_destructibleEntityPrefab);
         }
 #endif
     }

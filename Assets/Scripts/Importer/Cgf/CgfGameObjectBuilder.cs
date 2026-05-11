@@ -55,6 +55,7 @@ namespace OpenFarCry.Importer.Cgf
         {
             var result = request.Result;
             var go = new GameObject(request.Name);
+            go.transform.localPosition = result.NodeLocalOffset;
 
             if (result.HasSkeleton)
             {

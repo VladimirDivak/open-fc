@@ -16,45 +16,31 @@ namespace OpenFarCry.Level.Entities
         [SerializeField] string _virtualPath;
         [SerializeField] bool _noPhysics;
 
+        public string VirtualPath => _virtualPath;
+        public bool   NoPhysics   => _noPhysics;
+
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         readonly CgfLodImportService _lodService = new CgfLodImportService();
         CgfRuntimeImportResult _importResult;
         Mesh _physicsColliderMesh;
         Mesh _visualFilteredMesh;
 
-        async void Start()
+        void Start()
         {
             if (string.IsNullOrEmpty(_virtualPath)) return;
-            var destroyToken = this.GetCancellationTokenOnDestroy();
+            var svc = FcBrushLoadService.Current;
+            if (svc != null)
+                svc.Register(this);
+            else
+                FallbackLoadAsync().Forget();
+        }
 
-            var svc = FcLevelResourceService.Current;
-            if (svc == null)
-            {
-                Debug.LogWarning("[FcBrushInstance] FcLevelResourceService not found.", this);
-                return;
-            }
-
-            var result = svc.ImportCgf(new CgfRuntimeImportRequest(
-                virtualPath: _virtualPath,
-                importSkeleton: false,
-                importAnimations: false,
-                importScale: 0.01f,
-                useRuntimeMemoryCache: true));
-
-            if (!result.Success)
-            {
-                Debug.LogWarning($"[FcBrush] '{_virtualPath}': {result.ErrorMessage}", this);
-                return;
-            }
+        // Called by FcBrushLoadService after async import + texture preload complete.
+        public void ApplyLoadResult(CgfRuntimeImportResult result, string levelScopeId)
+        {
+            if (result == null || !result.Success) return;
 
             _importResult = result;
-            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                result.ParsedFile,
-                result.Mesh,
-                result.BuildResult?.SubmeshMaterialIds,
-                svc.LevelScopeId,
-                destroyToken);
-            await UniTask.SwitchToMainThread(destroyToken);
 
             string meshName = Path.GetFileNameWithoutExtension(_virtualPath);
             var output = _goBuilder.Build(new CgfGameObjectBuilder.BuildRequest(
@@ -63,7 +49,7 @@ namespace OpenFarCry.Level.Entities
                 rigDefinition: null,
                 name: meshName,
                 materialService: CgfRuntimeImporter.MaterialService,
-                textureScopeId: svc.LevelScopeId));
+                textureScopeId: levelScopeId));
 
             StripProxySubmeshesFromVisual(output.Root, result);
             output.Root.transform.SetParent(transform, worldPositionStays: false);
@@ -78,15 +64,56 @@ namespace OpenFarCry.Level.Entities
                 }
                 else
                 {
-                    col.sharedMesh = result.Mesh;
+                    var mf = output.Root.GetComponent<MeshFilter>();
+                    col.sharedMesh = mf?.sharedMesh ?? result.Mesh;
                 }
             }
 
             var lods = _lodService.FindSiblingLodPaths(result.VirtualPath);
             if (lods.Count > 0)
-                _lodService.ConfigureLodGroup(output.Root, hasSkeleton: false, importScale: 0.01f, siblingLodPaths: lods,
+                _lodService.ConfigureLodGroup(output.Root, hasSkeleton: false, importScale: 0.01f,
+                    siblingLodPaths: lods,
                     materialService: CgfRuntimeImporter.MaterialService,
-                    textureScopeId: svc.LevelScopeId);
+                    textureScopeId: levelScopeId);
+        }
+
+        // Fallback when FcBrushLoadService is absent (e.g. editor without full scene).
+        async UniTaskVoid FallbackLoadAsync()
+        {
+            var ct = this.GetCancellationTokenOnDestroy();
+            var resourceSvc = FcLevelResourceService.Current;
+            string scopeId = resourceSvc != null ? resourceSvc.LevelScopeId : string.Empty;
+
+            var result = await CgfRuntimeImporter.ImportAsync(
+                new CgfRuntimeImportRequest(
+                    virtualPath: _virtualPath,
+                    importSkeleton: false,
+                    importAnimations: false,
+                    importScale: 0.01f,
+                    useRuntimeMemoryCache: true),
+                scopeId,
+                ct);
+
+            if (ct.IsCancellationRequested) return;
+
+            if (!result.Success)
+            {
+                Debug.LogWarning($"[FcBrush] '{_virtualPath}': {result.ErrorMessage}", this);
+                return;
+            }
+
+            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
+                result.ParsedFile,
+                result.Mesh,
+                result.BuildResult?.SubmeshMaterialIds,
+                scopeId,
+                ct);
+
+            if (ct.IsCancellationRequested) return;
+            await UniTask.SwitchToMainThread(ct);
+
+            if (this == null || ct.IsCancellationRequested) return;
+            ApplyLoadResult(result, scopeId);
         }
 
         void OnDestroy()
@@ -116,7 +143,14 @@ namespace OpenFarCry.Level.Entities
                 return;
 
             var proxyMatIds = BuildProxyMaterialIds(result.ParsedFile, rootMat);
-            if (proxyMatIds == null || proxyMatIds.Count == 0)
+            if (proxyMatIds == null)
+            {
+                // Entire mesh is NoDraw/proxy: suppress rendering.
+                var noDrawMr = visualRoot.GetComponent<MeshRenderer>();
+                if (noDrawMr != null) noDrawMr.enabled = false;
+                return;
+            }
+            if (proxyMatIds.Count == 0)
                 return;
 
             var mf = visualRoot.GetComponent<MeshFilter>();

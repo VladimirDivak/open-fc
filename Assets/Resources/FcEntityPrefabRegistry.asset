@@ -20,4 +20,13 @@ MonoBehaviour:
   _triggerEntityPrefab: {fileID: 465575128985311190, guid: 6e608970c795b5dc48a01366d571b571, type: 3}
   _spawnPointPrefab: {fileID: 5826444064657785458, guid: df25792476fabb9729d30e907e125a80, type: 3}
   _tagPointPrefab: {fileID: 187494557732045798, guid: 6156a91a80b7f267389cae40540d5c86, type: 3}
+  _vehicleEntityPrefab: {fileID: 1580667205901471779, guid: d52de7cc06d4f177997c1458bf65b5d2, type: 3}
+  _doorEntityPrefab: {fileID: 2516925749977017841, guid: f2e324d9a884ef2a5a44285886d1bce8, type: 3}
+  _pickupEntityPrefab: {fileID: 1644748528347142914, guid: 41af346b331d52617876e678f6cfa937, type: 3}
+  _mineEntityPrefab: {fileID: 2931202136381200400, guid: b6ceee96f0bd5bd2f9f200da718dad66, type: 3}
+  _particleEntityPrefab: {fileID: 6395654966923845629, guid: e80abc0ddb4ebc216ad9399f7ff6601f, type: 3}
+  _environmentEntityPrefab: {fileID: 9200481188765771477, guid: f56f829c9c61fd4cbb8212275f2ce5bd, type: 3}
+  _boidEntityPrefab: {fileID: 2483887602777751609, guid: 05ed7483159bd4aa0a1c41fbcf80b26a, type: 3}
+  _cameraEntityPrefab: {fileID: 3046055233921630404, guid: 0647c07e0bf6bd24480c7b8f1c74d782, type: 3}
+  _destructibleEntityPrefab: {fileID: 4713287461087702240, guid: b435b99aacab1a2debc2c257c22ddf81, type: 3}
   _classMappings: []
