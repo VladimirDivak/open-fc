@@ -22,7 +22,7 @@ namespace OpenFarCry.Importer.Cgf
 
     public static class CgfMeshBuilder
     {
-        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v7";
+        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v8";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -30,6 +30,10 @@ namespace OpenFarCry.Importer.Cgf
                 throw new InvalidOperationException("CGF file has no Mesh chunk.");
 
             var mesh = cgf.MeshChunk;
+            bool selectedHasBones = importSkeleton &&
+                                    mesh.HasBoneInfo &&
+                                    cgf.BoneNames != null &&
+                                    cgf.BoneNames.Names.Length > 0;
             var nodeTransform = BuildStaticNodeTransform(cgf, mesh.ChunkID);
             string sourceNodeName = null;
 
@@ -49,6 +53,14 @@ namespace OpenFarCry.Importer.Cgf
                 SourceNodeName = sourceNodeName,
             };
 
+            if (!selectedHasBones && TryBuildStaticMeshParts(cgf, out var staticParts))
+            {
+                result.Mesh = BuildStaticCombinedMesh(staticParts, result, importScale);
+                if (string.IsNullOrEmpty(result.SourceNodeName) && staticParts.Count > 0)
+                    result.SourceNodeName = staticParts[0].NodeName;
+                return result;
+            }
+
             var unityMesh = BuildMesh(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale);
             result.Mesh   = unityMesh;
             return result;
@@ -67,6 +79,48 @@ namespace OpenFarCry.Importer.Cgf
             }
 
             return Matrix4x4.identity;
+        }
+
+        readonly struct StaticMeshPart
+        {
+            public readonly CgfMeshChunk Chunk;
+            public readonly Matrix4x4 NodeTransform;
+            public readonly string NodeName;
+
+            public StaticMeshPart(CgfMeshChunk chunk, Matrix4x4 nodeTransform, string nodeName)
+            {
+                Chunk = chunk;
+                NodeTransform = nodeTransform;
+                NodeName = nodeName;
+            }
+        }
+
+        static bool TryBuildStaticMeshParts(CgfFile cgf, out List<StaticMeshPart> parts)
+        {
+            parts = null;
+            if (cgf?.NodeChunks == null || cgf.MeshByChunkID == null)
+                return false;
+
+            var collected = new List<StaticMeshPart>();
+            for (int i = 0; i < cgf.NodeChunks.Count; i++)
+            {
+                var node = cgf.NodeChunks[i];
+                if (!cgf.MeshByChunkID.TryGetValue(node.ObjectID, out var chunk))
+                    continue;
+                if (chunk == null || chunk.HasBoneInfo || chunk.Vertices == null || chunk.Faces == null)
+                    continue;
+
+                collected.Add(new StaticMeshPart(
+                    chunk,
+                    BuildAccumulatedNodeTransform(cgf, node),
+                    node.Name));
+            }
+
+            if (collected.Count == 0)
+                return false;
+
+            parts = collected;
+            return true;
         }
 
         static Mesh BuildMesh(
@@ -197,6 +251,95 @@ namespace OpenFarCry.Importer.Cgf
                 result.BindPoses   = BuildBindPoses(boneInitPos, boneIndexToId, importScale);
                 mesh.bindposes     = result.BindPoses;
             }
+
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        static Mesh BuildStaticCombinedMesh(List<StaticMeshPart> parts, BuildResult result, float importScale)
+        {
+            var positions = new List<Vector3>();
+            var normals = new List<Vector3>();
+            var uvs = new List<Vector2>();
+            var submeshMap = new Dictionary<int, List<int>>();
+
+            for (int partIndex = 0; partIndex < parts.Count; partIndex++)
+            {
+                var part = parts[partIndex];
+                var chunk = part.Chunk;
+                var unityNodeTransform = CryTransformConversion.NodeMatrixInImporterSpace(part.NodeTransform, importScale);
+                var vertCache = new Dictionary<(int pi, int ti), int>();
+
+                var faces = chunk.Faces;
+                var texFaces = chunk.TexFaces;
+                var verts = chunk.Vertices;
+                var rawUVs = chunk.UVs;
+                bool hasTexFaces = texFaces != null && texFaces.Length == faces.Length;
+                bool hasUvs = rawUVs != null && rawUVs.Length > 0 && hasTexFaces;
+
+                for (int fi = 0; fi < faces.Length; fi++)
+                {
+                    var face = faces[fi];
+                    if (!submeshMap.TryGetValue(face.MatID, out var triList))
+                    {
+                        triList = new List<int>();
+                        submeshMap[face.MatID] = triList;
+                    }
+
+                    int t0 = hasTexFaces ? texFaces[fi].T0 : 0;
+                    int t1 = hasTexFaces ? texFaces[fi].T1 : 0;
+                    int t2 = hasTexFaces ? texFaces[fi].T2 : 0;
+
+                    ProcessCorner(face.V0, t0, triList);
+                    ProcessCorner(face.V1, t1, triList);
+                    ProcessCorner(face.V2, t2, triList);
+                }
+
+                void ProcessCorner(int pi, int ti, List<int> triangles)
+                {
+                    if (pi < 0 || pi >= verts.Length)
+                        return;
+
+                    var key = (pi, ti);
+                    if (!vertCache.TryGetValue(key, out int idx))
+                    {
+                        idx = positions.Count;
+                        var v = verts[pi];
+                        var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
+                        var rawNrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
+                        positions.Add(unityNodeTransform.MultiplyPoint3x4(rawPos));
+                        normals.Add(unityNodeTransform.MultiplyVector(rawNrm).normalized);
+
+                        if (hasUvs && ti >= 0 && ti < rawUVs.Length)
+                        {
+                            var uv = rawUVs[ti];
+                            uvs.Add(new Vector2(uv.U, 1f - uv.V));
+                        }
+                        else
+                        {
+                            uvs.Add(Vector2.zero);
+                        }
+
+                        vertCache[key] = idx;
+                    }
+
+                    triangles.Add(idx);
+                }
+            }
+
+            var mesh = new Mesh { name = MeshCacheVersionName };
+            if (positions.Count > 65535)
+                mesh.indexFormat = IndexFormat.UInt32;
+
+            mesh.SetVertices(positions);
+            mesh.SetNormals(normals);
+            mesh.SetUVs(0, uvs);
+
+            var sortedMatIDs = submeshMap.Keys.OrderBy(k => k).ToList();
+            mesh.subMeshCount = sortedMatIDs.Count;
+            for (int si = 0; si < sortedMatIDs.Count; si++)
+                mesh.SetTriangles(submeshMap[sortedMatIDs[si]], si);
+            result.SubmeshMaterialIds = sortedMatIDs.ToArray();
 
             mesh.RecalculateBounds();
             return mesh;

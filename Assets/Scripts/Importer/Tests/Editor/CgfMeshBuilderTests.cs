@@ -47,6 +47,12 @@ namespace OpenFarCry.Importer.Tests.Editor
             file.NodeByChunkID[chunkId] = node;
         }
 
+        static void AddMesh(CgfFile file, CgfMeshChunk mesh)
+        {
+            file.MeshChunks.Add(mesh);
+            file.MeshByChunkID[mesh.ChunkID] = mesh;
+        }
+
         static Matrix4x4 OldMatrix44WithRowTranslation(float x, float y, float z)
         {
             var m = Matrix4x4.identity;
@@ -142,6 +148,32 @@ namespace OpenFarCry.Importer.Tests.Editor
             var result = CgfMeshBuilder.Build(file, importSkeleton: false);
 
             AssertVector(result.Mesh.vertices[0], new Vector3(110f, 30f, -20f));
+        }
+
+        [Test]
+        public void StaticMesh_MultipleNodeMeshes_AreCombinedWithTheirNodeTransforms()
+        {
+            var meshA = StaticMesh(
+                verts: new[] { V(0, 0, 0) },
+                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } });
+            var meshB = StaticMesh(
+                verts: new[] { V(0, 0, 0) },
+                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 1 } });
+            meshB.ChunkID = 2;
+
+            var file = SimpleFile(meshA);
+            AddMesh(file, meshA);
+            AddMesh(file, meshB);
+            AddNode(file, chunkId: 10, objectId: 1, parentId: -1, transform: OldMatrix44WithRowTranslation(10f, 0f, 0f));
+            AddNode(file, chunkId: 11, objectId: 2, parentId: -1, transform: OldMatrix44WithRowTranslation(20f, 0f, 0f));
+
+            var result = CgfMeshBuilder.Build(file, importSkeleton: false);
+
+            Assert.That(result.Mesh.vertexCount, Is.EqualTo(2));
+            Assert.That(result.Mesh.subMeshCount, Is.EqualTo(2));
+            Assert.That(result.SubmeshMaterialIds, Is.EqualTo(new[] { 0, 1 }));
+            AssertVector(result.Mesh.vertices[0], new Vector3(10f, 0f, 0f));
+            AssertVector(result.Mesh.vertices[1], new Vector3(20f, 0f, 0f));
         }
 
         // ── submesh grouping ──────────────────────────────────────────────────
