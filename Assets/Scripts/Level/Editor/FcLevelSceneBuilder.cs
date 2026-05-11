@@ -314,17 +314,48 @@ namespace OpenFarCry.Level.Editor
         static void SetTransform(Transform t, Vector3 pos, Vector3 cryAngles, float scale)
         {
             t.position = pos;
-            t.rotation = CryAnglesToUnity(cryAngles);
-            t.localScale = Vector3.one * scale;
+            ApplyCryRotationXYZ(t, cryAngles, scale);
         }
 
-        // Cry XYZ Euler (degrees, Z-up) -> Unity scene Quaternion.
-        // Keep this consistent with historic level authoring assumptions for mission XML angles.
-        static Quaternion CryAnglesToUnity(Vector3 cryAngles)
+        // Cry entities render with Matrix34::CreateRotationXYZ(Deg2Rad(angles)).
+        // Convert that linear part through the same scene/asset basis bridge as brushes.
+        static void ApplyCryRotationXYZ(Transform t, Vector3 cryAngles, float scale)
         {
-            return Quaternion.AngleAxis(cryAngles.x, Vector3.right)
-                 * Quaternion.AngleAxis(-cryAngles.y, Vector3.forward)
-                 * Quaternion.AngleAxis(-cryAngles.z, Vector3.up);
+            float sx = Mathf.Sin(cryAngles.x * Mathf.Deg2Rad);
+            float cx = Mathf.Cos(cryAngles.x * Mathf.Deg2Rad);
+            float sy = Mathf.Sin(cryAngles.y * Mathf.Deg2Rad);
+            float cy = Mathf.Cos(cryAngles.y * Mathf.Deg2Rad);
+            float sz = Mathf.Sin(cryAngles.z * Mathf.Deg2Rad);
+            float cz = Mathf.Cos(cryAngles.z * Mathf.Deg2Rad);
+
+            float sycz = sy * cz;
+            float sysz = sy * sz;
+
+            float m00 = cy * cz;
+            float m01 = sycz * sx - cx * sz;
+            float m02 = sycz * cx + sx * sz;
+            float m10 = cy * sz;
+            float m11 = sysz * sx + cx * cz;
+            float m12 = sysz * cx - sx * cz;
+            float m20 = -sy;
+            float m21 = cy * sx;
+            float m22 = cy * cx;
+
+            var colX = new Vector3( m00,  m20,  m10);
+            var colY = new Vector3( m02,  m22,  m12);
+            var colZ = new Vector3(-m01, -m21, -m11);
+
+            float sX = colX.magnitude;
+            float sY = colY.magnitude;
+            float sZ = colZ.magnitude;
+
+            if (sZ > 1e-5f && sY > 1e-5f)
+                t.rotation = Quaternion.LookRotation(-colZ / sZ, colY / sY);
+
+            t.localScale = new Vector3(
+                (sX > 1e-5f ? sX : 1f) * scale,
+                (sY > 1e-5f ? sY : 1f) * scale,
+                (sZ > 1e-5f ? -sZ : -1f) * scale);
         }
 
         public struct BuildStats
