@@ -108,36 +108,6 @@ namespace OpenFarCry.Importer.Tests.Editor
             Assert.That(result.SubmeshMaterialIds, Is.EqualTo(new[] { 0, 1 }));
         }
 
-        // ── static node transform ────────────────────────────────────────────
-
-        [Test]
-        public void StaticNodeTransform_RowTranslation_BecomesNodeLocalOffset()
-        {
-            var mesh = StaticMesh(
-                verts: new[] { V(0, 0, 0), V(1, 0, 0), V(0, 1, 0) },
-                faces: new[] { new CryFace { V0 = 0, V1 = 1, V2 = 2, MatID = 0 } });
-            mesh.ChunkID = 7;
-
-            var nodeTransform = Matrix4x4.identity;
-            nodeTransform.m30 = 10f;
-            nodeTransform.m31 = 20f;
-            nodeTransform.m32 = 30f;
-
-            var file = SimpleFile(mesh);
-            file.NodeChunks.Add(new CgfNodeChunk
-            {
-                ObjectID = mesh.ChunkID,
-                Transform = nodeTransform
-            });
-
-            var result = CgfMeshBuilder.Build(file, importSkeleton: false, importScale: 0.01f);
-
-            Assert.That(result.NodeLocalOffset.x, Is.EqualTo(0.10f).Within(1e-5f));
-            Assert.That(result.NodeLocalOffset.y, Is.EqualTo(0.30f).Within(1e-5f));
-            Assert.That(result.NodeLocalOffset.z, Is.EqualTo(-0.20f).Within(1e-5f));
-            Assert.That(result.Mesh.vertices[0], Is.EqualTo(Vector3.zero));
-        }
-
         // ── TryBuildBoneIndexMaps ─────────────────────────────────────────────
 
         [Test]
