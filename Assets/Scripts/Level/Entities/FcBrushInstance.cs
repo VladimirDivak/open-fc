@@ -21,6 +21,7 @@ namespace OpenFarCry.Level.Entities
 
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         readonly CgfLodImportService _lodService = new CgfLodImportService();
+        static readonly int PropCull = Shader.PropertyToID("_Cull");
         CgfRuntimeImportResult _importResult;
         Mesh _physicsColliderMesh;
         Mesh _visualFilteredMesh;
@@ -52,6 +53,7 @@ namespace OpenFarCry.Level.Entities
                 textureScopeId: levelScopeId));
 
             StripProxySubmeshesFromVisual(output.Root, result);
+            DisableBrushBackfaceCulling(output.Root);
             output.Root.transform.SetParent(transform, worldPositionStays: false);
 
             if (!_noPhysics && result.Mesh != null)
@@ -71,10 +73,31 @@ namespace OpenFarCry.Level.Entities
 
             var lods = _lodService.FindSiblingLodPaths(result.VirtualPath);
             if (lods.Count > 0)
+            {
                 _lodService.ConfigureLodGroup(output.Root, hasSkeleton: false, importScale: 0.01f,
                     siblingLodPaths: lods,
                     materialService: CgfRuntimeImporter.MaterialService,
                     textureScopeId: levelScopeId);
+                DisableBrushBackfaceCulling(output.Root);
+            }
+        }
+
+        static void DisableBrushBackfaceCulling(GameObject root)
+        {
+            var renderers = root != null ? root.GetComponentsInChildren<MeshRenderer>(true) : null;
+            if (renderers == null)
+                return;
+
+            for (int r = 0; r < renderers.Length; r++)
+            {
+                var materials = renderers[r].sharedMaterials;
+                for (int i = 0; i < materials.Length; i++)
+                {
+                    var mat = materials[i];
+                    if (mat != null && mat.HasProperty(PropCull))
+                        mat.SetFloat(PropCull, (float)CullMode.Off);
+                }
+            }
         }
 
         // Fallback when FcBrushLoadService is absent (e.g. editor without full scene).
