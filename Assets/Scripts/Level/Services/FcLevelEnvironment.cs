@@ -59,9 +59,10 @@ namespace OpenFarCry.Level.Services
 
             sun.color = _sunColor;
             sun.intensity = _sunMultiplier;
+            sun.shadows = LightShadows.Soft;
 
             if (_sunDirection != Vector3.zero)
-                sun.transform.rotation = Quaternion.LookRotation(-_sunDirection);
+                sun.transform.rotation = Quaternion.LookRotation(_sunDirection);
         }
 
         Light GetSunLight()

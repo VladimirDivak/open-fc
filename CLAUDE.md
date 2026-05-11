@@ -146,6 +146,7 @@ Key files:
 - `Assets/Scripts/Level/Data/FcLevelLoader.cs`
 - `Assets/Scripts/Level/Data/FcBrushLoader.cs`
 - `Assets/Scripts/Level/Editor/FcLevelSceneBuilder.cs`
+- `Assets/Scripts/Level/Services/FcLevelEnvironment.cs`
 - `Assets/Scripts/Level/Services/FcLevelResourceService.cs`
 - `Assets/Scripts/Level/Services/FcBrushLoadService.cs`
 - `Assets/Scripts/Level/Services/FcLevelCacheService.cs`
@@ -158,8 +159,13 @@ Current behavior:
 - Editor level builder parses mission XML and `brush.lst`, then creates Unity scene placeholders.
 - Brushes load through `FcBrushLoadService`, async, distance-sorted and concurrency-limited.
 - Brush visuals and colliders are built from runtime CGF data; proxy/no-draw faces prefer collider usage and are stripped from visuals.
+- `FcLevelEnvironment.Apply()` is called at editor build time: DirectionalLight (sun) + `RenderSettings` (fog, ambient) placed immediately, not deferred to `Awake`.
+- `DynamicLight` entities are built as Unity `Light` (Point or Spot) at editor build; color from `clrDiffuse`, intensity from `DiffuseMultiplier`, range from `OuterRadius`, spot angle from `ProjectorFov`; `bActive=0` disables GO.
+- `SoundSpot` entities are built as Unity `AudioSource` (3D, linear rolloff) at editor build; min/max distance from `InnerRadius`/`OuterRadius`, volume from `iVolume` (0–255), `bLoop` sets loop.
+- Neither `DynamicLight` nor `SoundSpot` require prefab entries in `FcEntityPrefabRegistry`.
+- `SunVector` in mission XML = light travel direction (FROM sun TO scene); stored unconverted in `FcLevelEnvironmentDesc.SunVector`/`FcLevelEnvironment.SunDirection`; applied as `Quaternion.LookRotation(SunDirection)` (no negation). CryEngine itself negates SunVector to derive sun position (`3dEngineLoad.cpp:735`).
 - Entity/object placeholders still rely on entity components and `FcLevelResourceService`; further centralization is planned.
-- Terrain, vegetation, complex environment systems, audio, and full gameplay scripting are not complete.
+- Terrain, vegetation, complex environment systems, full audio pipeline, and gameplay scripting are not complete.
 
 Next level-loading architecture work is documented in `LEVEL_LOADING_REFACTOR_PLAN.md`.
 
@@ -170,6 +176,12 @@ EditMode tests exist under `Assets/Scripts/Importer/Tests/Editor/`.
 Unity batch tests are the preferred verification path, but in this workstation CLI batch mode may be blocked by licensing or another running Editor. `dotnet build` on Unity-generated `.csproj` is not a reliable substitute unless Unity has generated/restored `Temp/obj/.../project.assets.json`.
 
 For transform work, visual Unity checks are currently required.
+
+## Response Style
+
+- Respond in English only.
+- Be maximally short, concise, and to the point. No filler, no pleasantries.
+- Process commentary and reasoning: one sentence max per step. State results, not narration.
 
 ## Coding Conventions
 

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
@@ -220,6 +221,22 @@ namespace OpenFarCry.Level.Editor
             {
                 if (skipHidden && desc.HiddenInGame) { stats.Skipped++; continue; }
 
+                if (desc.EntityClass == "DynamicLight")
+                {
+                    var builtGo = BuildDynamicLightEntity(desc, entityRoot);
+                    if (desc.Id > 0) entityById[desc.Id] = builtGo.transform;
+                    stats.Entities++;
+                    continue;
+                }
+
+                if (desc.EntityClass == "SoundSpot")
+                {
+                    var builtGo = BuildSoundSpotEntity(desc, entityRoot);
+                    if (desc.Id > 0) entityById[desc.Id] = builtGo.transform;
+                    stats.Entities++;
+                    continue;
+                }
+
                 var prefab = registry.GetPrefabForClass(desc.EntityClass);
                 if (prefab == null)
                 {
@@ -295,6 +312,10 @@ namespace OpenFarCry.Level.Editor
             cache.SetLevelScope(levelName);
             servicesGo.AddComponent<FcLevelResourceService>();
             servicesGo.AddComponent<FcBrushLoadService>();
+            servicesGo.AddComponent<FcMeshLoadService>();
+            servicesGo.AddComponent<FcEntityLoadService>();
+            servicesGo.AddComponent<FcAnimationLoadService>();
+            servicesGo.AddComponent<FcLevelLoadService>();
 
             var environment = servicesGo.AddComponent<FcLevelEnvironment>();
             if (env != null)
@@ -308,6 +329,8 @@ namespace OpenFarCry.Level.Editor
 
                 if (env.SunVector != Vector3.zero)
                     environment.SunDirection = env.SunVector;
+
+                environment.Apply();
             }
         }
 
@@ -356,6 +379,77 @@ namespace OpenFarCry.Level.Editor
                 (sX > 1e-5f ? sX : 1f) * scale,
                 (sY > 1e-5f ? sY : 1f) * scale,
                 (sZ > 1e-5f ? -sZ : -1f) * scale);
+        }
+
+        static GameObject BuildDynamicLightEntity(FcEntityDesc desc, GameObject entityRoot)
+        {
+            var go = new GameObject(string.IsNullOrEmpty(desc.Name) ? $"DynamicLight_{desc.Id}" : desc.Name);
+            go.transform.SetParent(entityRoot.transform, false);
+            SetTransform(go.transform, desc.Pos, desc.Angles, desc.Scale);
+
+            var light = go.AddComponent<Light>();
+            var p = desc.Properties;
+
+            bool projectAll = p.TryGetValue("bProjectInAllDirs", out var piad) && piad == "1";
+            int lighttype   = p.TryGetValue("lighttype", out var lt) && int.TryParse(lt, out int lti) ? lti : 0;
+            light.type = lighttype == 2 && !projectAll ? LightType.Spot : LightType.Point;
+
+            if (p.TryGetValue("clrDiffuse", out var clrStr) && TryParseFloats(clrStr, out float r, out float g, out float b))
+            {
+                float mult = p.TryGetValue("DiffuseMultiplier", out var dm) && TryParseF(dm, out float dmf) ? dmf : 1f;
+                light.color     = new Color(r, g, b);
+                light.intensity = mult;
+            }
+
+            if (p.TryGetValue("OuterRadius", out var rad) && TryParseF(rad, out float radius))
+                light.range = radius;
+
+            if (light.type == LightType.Spot && p.TryGetValue("ProjectorFov", out var fov) && TryParseF(fov, out float fovF))
+                light.spotAngle = fovF;
+
+            bool active = !p.TryGetValue("bActive", out var act) || act == "1";
+            go.SetActive(active);
+
+            return go;
+        }
+
+        static GameObject BuildSoundSpotEntity(FcEntityDesc desc, GameObject entityRoot)
+        {
+            var go = new GameObject(string.IsNullOrEmpty(desc.Name) ? $"SoundSpot_{desc.Id}" : desc.Name);
+            go.transform.SetParent(entityRoot.transform, false);
+            go.transform.position = desc.Pos;
+
+            var audio = go.AddComponent<AudioSource>();
+            var p = desc.Properties;
+
+            audio.spatialBlend  = 1f;
+            audio.rolloffMode   = AudioRolloffMode.Linear;
+            audio.playOnAwake   = false;
+
+            if (p.TryGetValue("InnerRadius", out var ir) && TryParseF(ir, out float innerR))
+                audio.minDistance = innerR;
+            if (p.TryGetValue("OuterRadius", out var or2) && TryParseF(or2, out float outerR))
+                audio.maxDistance = outerR;
+            if (p.TryGetValue("iVolume", out var vol) && TryParseF(vol, out float volF))
+                audio.volume = Mathf.Clamp01(volF / 255f);
+
+            audio.loop = p.TryGetValue("bLoop", out var lp) && lp == "1";
+
+            bool enabled = !p.TryGetValue("bEnabled", out var en) || en == "1";
+            go.SetActive(enabled);
+
+            return go;
+        }
+
+        static bool TryParseF(string s, out float result) =>
+            float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out result);
+
+        static bool TryParseFloats(string s, out float a, out float b, out float c)
+        {
+            a = b = c = 0f;
+            var parts = s.Split(',');
+            if (parts.Length < 3) return false;
+            return TryParseF(parts[0], out a) && TryParseF(parts[1], out b) && TryParseF(parts[2], out c);
         }
 
         public struct BuildStats
