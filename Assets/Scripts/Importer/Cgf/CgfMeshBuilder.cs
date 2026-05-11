@@ -30,7 +30,7 @@ namespace OpenFarCry.Importer.Cgf
                 throw new InvalidOperationException("CGF file has no Mesh chunk.");
 
             var mesh = cgf.MeshChunk;
-            var nodeTransform = Matrix4x4.identity;
+            var nodeTransform = BuildStaticNodeTransform(cgf, mesh.ChunkID);
             string sourceNodeName = null;
 
             for (int i = 0; i < cgf.NodeChunks.Count; i++)
@@ -38,7 +38,6 @@ namespace OpenFarCry.Importer.Cgf
                 var node = cgf.NodeChunks[i];
                 if (node.ObjectID == mesh.ChunkID)
                 {
-                    nodeTransform = BuildAccumulatedNodeTransform(cgf, node);
                     sourceNodeName = node.Name;
                     break;
                 }
@@ -53,6 +52,21 @@ namespace OpenFarCry.Importer.Cgf
             var unityMesh = BuildMesh(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale);
             result.Mesh   = unityMesh;
             return result;
+        }
+
+        public static Matrix4x4 BuildStaticNodeTransform(CgfFile cgf, int meshChunkId)
+        {
+            if (cgf?.NodeChunks == null)
+                return Matrix4x4.identity;
+
+            for (int i = 0; i < cgf.NodeChunks.Count; i++)
+            {
+                var node = cgf.NodeChunks[i];
+                if (node.ObjectID == meshChunkId)
+                    return BuildAccumulatedNodeTransform(cgf, node);
+            }
+
+            return Matrix4x4.identity;
         }
 
         static Mesh BuildMesh(

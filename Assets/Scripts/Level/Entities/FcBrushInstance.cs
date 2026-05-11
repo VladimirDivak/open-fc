@@ -262,20 +262,20 @@ namespace OpenFarCry.Level.Entities
             if (proxyMatIds == null)
             {
                 // Single proxy-only material: use all faces.
-                return BuildColliderMeshFromFaces(meshChunk, importScale, allowedMatIds: null, "BrushNoDrawCollider", out mesh);
+                return BuildColliderMeshFromFaces(parsedFile, meshChunk, importScale, allowedMatIds: null, "BrushNoDrawCollider", out mesh);
             }
 
             if (proxyMatIds.Count == 0)
                 return false;
 
-            if (BuildColliderMeshFromFaces(meshChunk, importScale, proxyMatIds, "BrushNoDrawCollider", out mesh))
+            if (BuildColliderMeshFromFaces(parsedFile, meshChunk, importScale, proxyMatIds, "BrushNoDrawCollider", out mesh))
                 return true;
 
             // Some exporters write face MatID as 1-based sub-material index.
             var shifted = new HashSet<int>();
             foreach (int id in proxyMatIds)
                 shifted.Add(id + 1);
-            return BuildColliderMeshFromFaces(meshChunk, importScale, shifted, "BrushNoDrawCollider", out mesh);
+            return BuildColliderMeshFromFaces(parsedFile, meshChunk, importScale, shifted, "BrushNoDrawCollider", out mesh);
         }
 
         static bool TryBuildFromBoneMesh(CgfFile parsedFile, float importScale, out Mesh mesh)
@@ -302,10 +302,11 @@ namespace OpenFarCry.Level.Entities
             if (phys == null)
                 return false;
 
-            return BuildColliderMeshFromFaces(phys, importScale, allowedMatIds: null, "BrushPhysicsCollider", out mesh);
+            return BuildColliderMeshFromFaces(null, phys, importScale, allowedMatIds: null, "BrushPhysicsCollider", out mesh);
         }
 
         static bool BuildColliderMeshFromFaces(
+            CgfFile parsedFile,
             CgfMeshChunk source,
             float importScale,
             HashSet<int> allowedMatIds,
@@ -316,13 +317,21 @@ namespace OpenFarCry.Level.Entities
             if (source?.Vertices == null || source.Faces == null || source.Faces.Length == 0)
                 return false;
 
+            var nodeTransform = Matrix4x4.identity;
+            if (parsedFile != null && source == parsedFile.MeshChunk)
+            {
+                var rawNodeTransform = CgfMeshBuilder.BuildStaticNodeTransform(parsedFile, source.ChunkID);
+                nodeTransform = CryTransformConversion.NodeMatrixInImporterSpace(rawNodeTransform, importScale);
+            }
+
             var vertices = new List<Vector3>(source.Vertices.Length);
             for (int i = 0; i < source.Vertices.Length; i++)
             {
                 var v = source.Vertices[i];
-                vertices.Add(CryTransformConversion.PositionInImporterSpace(
+                var pos = CryTransformConversion.PositionInImporterSpace(
                     new Vector3(v.PX, v.PY, v.PZ),
-                    importScale));
+                    importScale);
+                vertices.Add(nodeTransform.MultiplyPoint3x4(pos));
             }
 
             var triangles = new List<int>(source.Faces.Length * 3);
