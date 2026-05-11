@@ -1,5 +1,6 @@
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Level.Data;
+using OpenFarCry.Level.Services;
 using UnityEngine;
 
 namespace OpenFarCry.Level.Entities
@@ -12,35 +13,20 @@ namespace OpenFarCry.Level.Entities
         [SerializeField] bool _importRagdoll = true;
 
         readonly CgfRagdollBuilder _ragdollBuilder = new CgfRagdollBuilder();
-        readonly CgfAnimationRuntimeImportService _animService = new CgfAnimationRuntimeImportService();
+        readonly CgfAnimationRuntimeImportService _animFallbackService = new CgfAnimationRuntimeImportService();
 
-        protected override void Start()
+        public override EntityLoadPriority GetDefaultLoadPriority() => EntityLoadPriority.Characters;
+
+        public override FcMeshLoadRequest CreateLoadRequest()
         {
-            if (string.IsNullOrEmpty(_virtualPath)) return;
-
-            var service = ResourceService;
-            if (service == null)
-            {
-                Debug.LogWarning($"[FcCharacterEntity] No FcLevelResourceService found for '{name}'", this);
-                return;
-            }
-
-            var request = new CgfRuntimeImportRequest(
+            return new FcMeshLoadRequest(
                 virtualPath: _virtualPath,
+                levelScopeId: GetLevelScopeId(),
+                selectedMeshChunkId: -1,
                 importSkeleton: true,
-                importAnimations: false, // handled manually below
                 importScale: _importScale,
-                useRuntimeMemoryCache: true);
-
-            var result = service.ImportCgf(request);
-            if (!result.Success)
-            {
-                Debug.LogWarning($"[FcCharacterEntity] CGF import failed for '{_virtualPath}': {result.ErrorMessage}", this);
-                return;
-            }
-
-            _importResult = result;
-            ApplyResult(result);
+                useRuntimeMemoryCache: true,
+                preloadTextures: true);
         }
 
         protected override void ApplyResult(CgfRuntimeImportResult result)
@@ -65,13 +51,28 @@ namespace OpenFarCry.Level.Entities
             // Animations
             if (_importAnimations)
             {
-                _animService.TryAttachAnimations(
-                    meshRoot,
-                    result.ParsedFile,
-                    rigDefinition: null,
-                    modelVirtualPath: result.VirtualPath,
-                    importScale: _importScale,
-                    out string animWarning);
+                string animWarning = null;
+                var animLoadService = FcAnimationLoadService.Current;
+                if (animLoadService != null)
+                {
+                    var artifact = animLoadService.LoadAndAttach(
+                        new FcAnimationLoadRequest(
+                            targetRoot: meshRoot,
+                            parsedFile: result.ParsedFile,
+                            modelVirtualPath: result.VirtualPath,
+                            importScale: _importScale));
+                    animWarning = artifact.WarningMessage;
+                }
+                else
+                {
+                    _animFallbackService.TryAttachAnimations(
+                        meshRoot,
+                        result.ParsedFile,
+                        rigDefinition: null,
+                        modelVirtualPath: result.VirtualPath,
+                        importScale: _importScale,
+                        out animWarning);
+                }
 
                 if (!string.IsNullOrEmpty(animWarning))
                     Debug.LogWarning($"[FcCharacterEntity] '{_virtualPath}': {animWarning}", this);

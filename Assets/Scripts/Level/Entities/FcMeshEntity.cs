@@ -1,8 +1,13 @@
 using System.IO;
+using System.Diagnostics;
+using System.Threading;
 using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Level.Data;
+using OpenFarCry.Level.Services;
 using UnityEngine;
+using Debug = UnityEngine.Debug;
+using System;
 
 namespace OpenFarCry.Level.Entities
 {
@@ -20,41 +25,98 @@ namespace OpenFarCry.Level.Entities
         protected CgfRuntimeImportResult _importResult;
         protected CgfGameObjectBuilder.BuildOutput _lastBuildOutput;
 
-        protected virtual async void Start()
+        protected virtual void Start()
         {
             if (string.IsNullOrEmpty(_virtualPath)) return;
-            var destroyToken = this.GetCancellationTokenOnDestroy();
+            var loadService = FcEntityLoadService.Current;
+            if (loadService != null && FcMeshLoadService.Current != null)
+            {
+                loadService.Enqueue(this, GetDefaultLoadPriority());
+                return;
+            }
 
+            FallbackLoadAsync().Forget();
+        }
+
+        async UniTaskVoid FallbackLoadAsync()
+        {
+            var ct = this.GetCancellationTokenOnDestroy();
+            var request = CreateLoadRequest();
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                var result = await CgfRuntimeImporter.ImportAsync(
+                    new CgfRuntimeImportRequest(
+                        virtualPath: request.VirtualPath,
+                        selectedMeshChunkId: request.SelectedMeshChunkId,
+                        importSkeleton: request.ImportSkeleton,
+                        importAnimations: false,
+                        importScale: request.ImportScale,
+                        useRuntimeMemoryCache: request.UseRuntimeMemoryCache),
+                    request.LevelScopeId,
+                    ct);
+
+                if (ct.IsCancellationRequested) return;
+                if (!result.Success)
+                {
+                    Debug.LogWarning($"[FcMeshEntity] CGF import failed for '{_virtualPath}': {result.ErrorMessage}", this);
+                    return;
+                }
+
+                if (request.PreloadTextures)
+                {
+                    await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
+                        result.ParsedFile,
+                        result.Mesh,
+                        result.BuildResult?.SubmeshMaterialIds,
+                        request.LevelScopeId,
+                        ct);
+                }
+
+                if (ct.IsCancellationRequested) return;
+                await UniTask.SwitchToMainThread(ct);
+                if (this == null || ct.IsCancellationRequested) return;
+                ApplyLoadedMesh(LoadedMeshArtifact.Completed(result, request.LevelScopeId, sw.Elapsed.TotalMilliseconds));
+            }
+            catch (OperationCanceledException) { }
+        }
+
+        public virtual EntityLoadPriority GetDefaultLoadPriority() => EntityLoadPriority.Background;
+
+        public virtual string GetLevelScopeId()
+        {
             var service = ResourceService;
-            if (service == null)
-            {
-                Debug.LogWarning($"[FcMeshEntity] No FcLevelResourceService found for '{name}'", this);
-                return;
-            }
+            return service != null ? service.LevelScopeId : string.Empty;
+        }
 
-            var request = new CgfRuntimeImportRequest(
+        public virtual FcMeshLoadRequest CreateLoadRequest()
+        {
+            return new FcMeshLoadRequest(
                 virtualPath: _virtualPath,
+                levelScopeId: GetLevelScopeId(),
+                selectedMeshChunkId: -1,
                 importSkeleton: _importSkeleton,
-                importAnimations: false,
                 importScale: _importScale,
-                useRuntimeMemoryCache: true);
+                useRuntimeMemoryCache: true,
+                preloadTextures: true);
+        }
 
-            var result = service.ImportCgf(request);
-            if (!result.Success)
-            {
-                Debug.LogWarning($"[FcMeshEntity] CGF import failed for '{_virtualPath}': {result.ErrorMessage}", this);
+        public virtual void ApplyLoadedMesh(LoadedMeshArtifact artifact)
+        {
+            if (artifact == null || !artifact.Success || artifact.ImportResult == null)
                 return;
-            }
 
-            _importResult = result;
-            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                result.ParsedFile,
-                result.Mesh,
-                result.BuildResult?.SubmeshMaterialIds,
-                service.LevelScopeId,
-                destroyToken);
-            await UniTask.SwitchToMainThread(destroyToken);
-            ApplyResult(result);
+            _importResult = artifact.ImportResult;
+            ApplyResult(artifact.ImportResult);
+        }
+
+        public virtual void ReleaseLoadedMesh()
+        {
+            if (_importResult != null)
+            {
+                ResourceService?.ReleaseImportResult(_importResult);
+                _importResult = null;
+            }
         }
 
         protected virtual void ApplyResult(CgfRuntimeImportResult result)
@@ -94,8 +156,7 @@ namespace OpenFarCry.Level.Entities
 
         protected virtual void OnDestroy()
         {
-            if (_importResult != null)
-                ResourceService?.ReleaseImportResult(_importResult);
+            ReleaseLoadedMesh();
         }
     }
 }

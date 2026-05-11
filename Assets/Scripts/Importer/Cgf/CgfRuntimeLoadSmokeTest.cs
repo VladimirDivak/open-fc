@@ -88,12 +88,12 @@ namespace OpenFarCry.Importer.Cgf
                 Debug.Log(
                     $"[CgfRuntimeSmoke] Start. Cache before: parsed={before.ParsedEntryCount}, models={before.ModelEntryCount}, " +
                     $"parsedRefs={before.ParsedTotalRefCount}, modelRefs={before.ModelTotalRefCount}. " +
-                    $"AnimCache before: caf={animationCacheBefore.CafEntryCount}, cafPath={animationCacheBefore.CafPathEntryCount}, clips={animationCacheBefore.ClipEntryCount}, " +
+                    $"AnimCache before: caf={animationCacheBefore.CafEntryCount}, cafPath={animationCacheBefore.CafPathEntryCount}, cafSourceHash={animationCacheBefore.CafSourceHashEntryCount}, clips={animationCacheBefore.ClipEntryCount}, " +
                     $"cafHit/miss={animationCacheBefore.CafHitCount}/{animationCacheBefore.CafMissCount}, " +
                     $"cafPathHit/miss={animationCacheBefore.CafPathHitCount}/{animationCacheBefore.CafPathMissCount}, " +
                     $"cafSemanticHit/miss={animationCacheBefore.CafSemanticHitCount}/{animationCacheBefore.CafSemanticMissCount}, " +
                     $"clipHit/miss={animationCacheBefore.ClipHitCount}/{animationCacheBefore.ClipMissCount}, " +
-                    $"setEntries={animationCacheBefore.AnimationSetEntryCount}, setHit/miss={animationCacheBefore.AnimationSetHitCount}/{animationCacheBefore.AnimationSetMissCount}, " +
+                    $"setEntries={animationCacheBefore.AnimationSetEntryCount}, setModelLinks={animationCacheBefore.AnimationSetModelLinkCount}, setHit/miss={animationCacheBefore.AnimationSetHitCount}/{animationCacheBefore.AnimationSetMissCount}, " +
                     $"semClipEntries={animationCacheBefore.SemanticClipEntryCount}, semClipHit/miss={animationCacheBefore.SemanticClipHitCount}/{animationCacheBefore.SemanticClipMissCount}.");
                 if (_logTextureRuntimeReport)
                     Debug.Log("[CgfRuntimeSmoke][Texture] " + CgfRuntimeImporter.GetTextureRuntimeDebugReport());
@@ -231,12 +231,12 @@ namespace OpenFarCry.Importer.Cgf
                     $"avgTotal={avgTotalMs:F1} ms, minTotal={totalMsMin:F1} ms, maxTotal={totalMsMax:F1} ms, " +
                     $"sum(import/build/physics/anim/lod)=({importMsSum:F1}/{buildMsSum:F1}/{physicsMsSum:F1}/{animationMsSum:F1}/{lodMsSum:F1}) ms, " +
                     $"cacheHits={cacheHitCount}. " +
-                    $"AnimCache after: caf={animationCacheAfter.CafEntryCount}, cafPath={animationCacheAfter.CafPathEntryCount}, clips={animationCacheAfter.ClipEntryCount}, " +
+                    $"AnimCache after: caf={animationCacheAfter.CafEntryCount}, cafPath={animationCacheAfter.CafPathEntryCount}, cafSourceHash={animationCacheAfter.CafSourceHashEntryCount}, clips={animationCacheAfter.ClipEntryCount}, " +
                     $"cafHit/miss={animationCacheAfter.CafHitCount}/{animationCacheAfter.CafMissCount}, " +
                     $"cafPathHit/miss={animationCacheAfter.CafPathHitCount}/{animationCacheAfter.CafPathMissCount}, " +
                     $"cafSemanticHit/miss={animationCacheAfter.CafSemanticHitCount}/{animationCacheAfter.CafSemanticMissCount}, " +
                     $"clipHit/miss={animationCacheAfter.ClipHitCount}/{animationCacheAfter.ClipMissCount}, " +
-                    $"setEntries={animationCacheAfter.AnimationSetEntryCount}, setHit/miss={animationCacheAfter.AnimationSetHitCount}/{animationCacheAfter.AnimationSetMissCount}. " +
+                    $"setEntries={animationCacheAfter.AnimationSetEntryCount}, setModelLinks={animationCacheAfter.AnimationSetModelLinkCount}, setHit/miss={animationCacheAfter.AnimationSetHitCount}/{animationCacheAfter.AnimationSetMissCount}. " +
                     $"semClipEntries={animationCacheAfter.SemanticClipEntryCount}, semClipHit/miss={animationCacheAfter.SemanticClipHitCount}/{animationCacheAfter.SemanticClipMissCount}. " +
                     $"Cache after: parsed={after.ParsedEntryCount}, models={after.ModelEntryCount}, " +
                     $"parsedRefs={after.ParsedTotalRefCount}, modelRefs={after.ModelTotalRefCount}.");

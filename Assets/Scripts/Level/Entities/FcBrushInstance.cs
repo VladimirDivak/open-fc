@@ -388,7 +388,12 @@ namespace OpenFarCry.Level.Entities
                 return new HashSet<int>();
 
             if (rootMat.MtlType != CgfMtlType.Multi)
-                return IsNoDrawProxyMaterial(rootMat.Name) ? null : new HashSet<int>();
+            {
+                var singleMaterialIds = new HashSet<int>();
+                if (IsNoDrawProxyMaterial(rootMat.Name))
+                    singleMaterialIds.Add(rootMat.TableIndex);
+                return singleMaterialIds;
+            }
 
             var ids = new HashSet<int>();
             if (!parsedFile.MaterialChildrenByParentChunkID.TryGetValue(rootMat.ChunkID, out var children) || children == null)

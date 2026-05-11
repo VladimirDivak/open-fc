@@ -22,9 +22,37 @@ namespace OpenFarCry.Importer.Cgf
 
     public static class CgfMeshBuilder
     {
+        internal sealed class PreparedBuild
+        {
+            public readonly BuildResult Result;
+            public readonly MeshBuildData Data;
+
+            public PreparedBuild(BuildResult result, MeshBuildData data)
+            {
+                Result = result;
+                Data = data;
+            }
+        }
+
+        internal sealed class MeshBuildData
+        {
+            public readonly List<Vector3> Positions = new List<Vector3>();
+            public readonly List<Vector3> Normals = new List<Vector3>();
+            public readonly List<Vector2> Uvs = new List<Vector2>();
+            public readonly Dictionary<int, List<int>> SubmeshMap = new Dictionary<int, List<int>>();
+            public BoneWeight[] BoneWeights;
+            public Matrix4x4[] BindPoses;
+        }
+
         public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v8";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
+        {
+            var prepared = PrepareBuild(cgf, importSkeleton, importScale);
+            return UploadPrepared(prepared);
+        }
+
+        internal static PreparedBuild PrepareBuild(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
             if (cgf.MeshChunk == null)
                 throw new InvalidOperationException("CGF file has no Mesh chunk.");
@@ -55,15 +83,28 @@ namespace OpenFarCry.Importer.Cgf
 
             if (!selectedHasBones && TryBuildStaticMeshParts(cgf, out var staticParts))
             {
-                result.Mesh = BuildStaticCombinedMesh(staticParts, result, importScale);
+                var staticData = BuildStaticCombinedMeshData(staticParts, importScale);
                 if (string.IsNullOrEmpty(result.SourceNodeName) && staticParts.Count > 0)
                     result.SourceNodeName = staticParts[0].NodeName;
-                return result;
+                return new PreparedBuild(result, staticData);
             }
 
-            var unityMesh = BuildMesh(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale);
-            result.Mesh   = unityMesh;
-            return result;
+            var meshData = BuildMeshData(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale);
+            return new PreparedBuild(result, meshData);
+        }
+
+        internal static BuildResult UploadPrepared(PreparedBuild prepared)
+        {
+            if (prepared == null)
+                throw new ArgumentNullException(nameof(prepared));
+            if (prepared.Result == null)
+                throw new ArgumentException("Prepared build result is null.", nameof(prepared));
+            if (prepared.Data == null)
+                throw new ArgumentException("Prepared build data is null.", nameof(prepared));
+
+            prepared.Result.Mesh = CreateUnityMesh(prepared.Data, out var submeshMaterialIds);
+            prepared.Result.SubmeshMaterialIds = submeshMaterialIds;
+            return prepared.Result;
         }
 
         public static Matrix4x4 BuildStaticNodeTransform(CgfFile cgf, int meshChunkId)
@@ -123,7 +164,7 @@ namespace OpenFarCry.Importer.Cgf
             return true;
         }
 
-        static Mesh BuildMesh(
+        static MeshBuildData BuildMeshData(
             CgfMeshChunk chunk,
             Matrix4x4 nodeTransform,
             CgfBoneNameListChunk boneNames,
@@ -157,13 +198,8 @@ namespace OpenFarCry.Importer.Cgf
 
             // --- UV remapping ---
             var vertCache       = new Dictionary<(int pi, int ti), int>();
-            var positions       = new List<Vector3>();
-            var normals         = new List<Vector3>();
-            var uvs             = new List<Vector2>();
+            var data = new MeshBuildData();
             var boneWeightsList = hasBones ? new List<CryLink[]>() : null;
-
-            // Group triangle indices by MatID for submeshes
-            var submeshMap = new Dictionary<int, List<int>>();
 
             var faces    = chunk.Faces;
             var texFaces = chunk.TexFaces;
@@ -175,10 +211,10 @@ namespace OpenFarCry.Importer.Cgf
             for (int fi = 0; fi < faces.Length; fi++)
             {
                 int matID = faces[fi].MatID;
-                if (!submeshMap.TryGetValue(matID, out var triList))
+                if (!data.SubmeshMap.TryGetValue(matID, out var triList))
                 {
                     triList = new List<int>();
-                    submeshMap[matID] = triList;
+                    data.SubmeshMap[matID] = triList;
                 }
 
                 int p0 = faces[fi].V0;
@@ -197,7 +233,7 @@ namespace OpenFarCry.Importer.Cgf
                     var key = (pi, ti);
                     if (!vertCache.TryGetValue(key, out int idx))
                     {
-                        idx = positions.Count;
+                        idx = data.Positions.Count;
                         var v = verts[pi];
                         var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
                         var links = chunk.BoneLinks?[pi];
@@ -206,16 +242,16 @@ namespace OpenFarCry.Importer.Cgf
                             ? linkedBindPos
                             : rawPos;
                         var nrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
-                        positions.Add(unityNodeTransform.MultiplyPoint3x4(pos));
-                        normals.Add(unityNodeTransform.MultiplyVector(nrm).normalized);
+                        data.Positions.Add(unityNodeTransform.MultiplyPoint3x4(pos));
+                        data.Normals.Add(unityNodeTransform.MultiplyVector(nrm).normalized);
                         if (hasUvs && ti >= 0 && ti < rawUVs.Length)
                         {
                             var uv = rawUVs[ti];
-                            uvs.Add(new Vector2(uv.U, 1f - uv.V));
+                            data.Uvs.Add(new Vector2(uv.U, 1f - uv.V));
                         }
                         else
                         {
-                            uvs.Add(Vector2.zero);
+                            data.Uvs.Add(Vector2.zero);
                         }
                         boneWeightsList?.Add(sortedLinks);
                         vertCache[key] = idx;
@@ -224,44 +260,24 @@ namespace OpenFarCry.Importer.Cgf
                 }
             }
 
-            // --- Build Unity Mesh ---
-            var mesh = new Mesh { name = MeshCacheVersionName };
-
-            if (positions.Count > 65535)
-                mesh.indexFormat = IndexFormat.UInt32;
-
-            mesh.SetVertices(positions);
-            mesh.SetNormals(normals);
-            mesh.SetUVs(0, uvs);
-
-            var sortedMatIDs = submeshMap.Keys.OrderBy(k => k).ToList();
-            mesh.subMeshCount = sortedMatIDs.Count;
-            for (int si = 0; si < sortedMatIDs.Count; si++)
-                mesh.SetTriangles(submeshMap[sortedMatIDs[si]], si);
-            result.SubmeshMaterialIds = sortedMatIDs.ToArray();
-
             // --- Skeleton ---
             if (hasBones)
             {
-                mesh.boneWeights = BuildBoneWeights(boneWeightsList, boneNames.Names.Length, boneIdToIndex);
+                data.BoneWeights = BuildBoneWeights(boneWeightsList, boneNames.Names.Length, boneIdToIndex);
                 result.HasSkeleton = true;
                 result.BoneNames   = orderedBoneNames;
                 result.BoneIdToIndex = boneIdToIndex;
                 result.BoneIndexToId = boneIndexToId;
                 result.BindPoses   = BuildBindPoses(boneInitPos, boneIndexToId, importScale);
-                mesh.bindposes     = result.BindPoses;
+                data.BindPoses = result.BindPoses;
             }
 
-            mesh.RecalculateBounds();
-            return mesh;
+            return data;
         }
 
-        static Mesh BuildStaticCombinedMesh(List<StaticMeshPart> parts, BuildResult result, float importScale)
+        static MeshBuildData BuildStaticCombinedMeshData(List<StaticMeshPart> parts, float importScale)
         {
-            var positions = new List<Vector3>();
-            var normals = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var submeshMap = new Dictionary<int, List<int>>();
+            var data = new MeshBuildData();
 
             for (int partIndex = 0; partIndex < parts.Count; partIndex++)
             {
@@ -280,10 +296,10 @@ namespace OpenFarCry.Importer.Cgf
                 for (int fi = 0; fi < faces.Length; fi++)
                 {
                     var face = faces[fi];
-                    if (!submeshMap.TryGetValue(face.MatID, out var triList))
+                    if (!data.SubmeshMap.TryGetValue(face.MatID, out var triList))
                     {
                         triList = new List<int>();
-                        submeshMap[face.MatID] = triList;
+                        data.SubmeshMap[face.MatID] = triList;
                     }
 
                     int t0 = hasTexFaces ? texFaces[fi].T0 : 0;
@@ -303,21 +319,21 @@ namespace OpenFarCry.Importer.Cgf
                     var key = (pi, ti);
                     if (!vertCache.TryGetValue(key, out int idx))
                     {
-                        idx = positions.Count;
+                        idx = data.Positions.Count;
                         var v = verts[pi];
                         var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
                         var rawNrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
-                        positions.Add(unityNodeTransform.MultiplyPoint3x4(rawPos));
-                        normals.Add(unityNodeTransform.MultiplyVector(rawNrm).normalized);
+                        data.Positions.Add(unityNodeTransform.MultiplyPoint3x4(rawPos));
+                        data.Normals.Add(unityNodeTransform.MultiplyVector(rawNrm).normalized);
 
                         if (hasUvs && ti >= 0 && ti < rawUVs.Length)
                         {
                             var uv = rawUVs[ti];
-                            uvs.Add(new Vector2(uv.U, 1f - uv.V));
+                            data.Uvs.Add(new Vector2(uv.U, 1f - uv.V));
                         }
                         else
                         {
-                            uvs.Add(Vector2.zero);
+                            data.Uvs.Add(Vector2.zero);
                         }
 
                         vertCache[key] = idx;
@@ -327,19 +343,29 @@ namespace OpenFarCry.Importer.Cgf
                 }
             }
 
+            return data;
+        }
+
+        static Mesh CreateUnityMesh(MeshBuildData data, out int[] submeshMaterialIds)
+        {
             var mesh = new Mesh { name = MeshCacheVersionName };
-            if (positions.Count > 65535)
+            if (data.Positions.Count > 65535)
                 mesh.indexFormat = IndexFormat.UInt32;
 
-            mesh.SetVertices(positions);
-            mesh.SetNormals(normals);
-            mesh.SetUVs(0, uvs);
+            mesh.SetVertices(data.Positions);
+            mesh.SetNormals(data.Normals);
+            mesh.SetUVs(0, data.Uvs);
 
-            var sortedMatIDs = submeshMap.Keys.OrderBy(k => k).ToList();
+            var sortedMatIDs = data.SubmeshMap.Keys.OrderBy(k => k).ToList();
             mesh.subMeshCount = sortedMatIDs.Count;
             for (int si = 0; si < sortedMatIDs.Count; si++)
-                mesh.SetTriangles(submeshMap[sortedMatIDs[si]], si);
-            result.SubmeshMaterialIds = sortedMatIDs.ToArray();
+                mesh.SetTriangles(data.SubmeshMap[sortedMatIDs[si]], si);
+            submeshMaterialIds = sortedMatIDs.ToArray();
+
+            if (data.BoneWeights != null)
+                mesh.boneWeights = data.BoneWeights;
+            if (data.BindPoses != null)
+                mesh.bindposes = data.BindPoses;
 
             mesh.RecalculateBounds();
             return mesh;

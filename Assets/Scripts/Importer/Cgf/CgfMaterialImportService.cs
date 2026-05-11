@@ -115,6 +115,9 @@ namespace OpenFarCry.Importer.Cgf
             }
             else
             {
+                if (TryResolveMaterialTableIndexSlots(parsedFile, subCount, submeshMaterialIds, textureScopeId, out var tableIndexMats))
+                    return tableIndexMats;
+
                 var single = GetOrBuild(parsedFile, rootMat, textureScopeId);
                 var mats = new Material[subCount];
                 for (int i = 0; i < subCount; i++)
@@ -140,38 +143,31 @@ namespace OpenFarCry.Importer.Cgf
             if (chunks.Count == 0)
                 return;
 
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var tasks = new System.Collections.Generic.List<UniTask>(chunks.Count * 4);
             for (int i = 0; i < chunks.Count; i++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 var chunk = chunks[i];
                 if (chunk == null)
                     continue;
 
-                await PreloadTextureNameAsync(
-                    parsedFile,
+                tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.DiffuseTextureName),
-                    textureScopeId,
-                    linearColorSpace: false,
-                    cancellationToken);
-                await PreloadTextureNameAsync(
-                    parsedFile,
+                    textureScopeId, linearColorSpace: false, cancellationToken));
+                tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.NormalTextureName),
-                    textureScopeId,
-                    linearColorSpace: true,
-                    cancellationToken);
-                await PreloadTextureNameAsync(
-                    parsedFile,
+                    textureScopeId, linearColorSpace: true, cancellationToken));
+                tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.SpecularTextureName),
-                    textureScopeId,
-                    linearColorSpace: true,
-                    cancellationToken);
-                await PreloadTextureNameAsync(
-                    parsedFile,
+                    textureScopeId, linearColorSpace: true, cancellationToken));
+                tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.OpacityTextureName),
-                    textureScopeId,
-                    linearColorSpace: true,
-                    cancellationToken);
+                    textureScopeId, linearColorSpace: true, cancellationToken));
             }
+
+            if (tasks.Count > 0)
+                await UniTask.WhenAll(tasks);
         }
 
         static CgfMaterialChunk ResolveMultiMaterialChild(
@@ -180,6 +176,16 @@ namespace OpenFarCry.Importer.Cgf
             List<CgfMaterialChunk> children,
             int matId)
         {
+            // Some LOD meshes store -1 in every face MatID even though the file still
+            // has a valid MTL_MULTI table. Cry treats this as the default material.
+            if (matId < 0)
+            {
+                if (children != null && children.Count > 0)
+                    return children[0];
+
+                matId = 0;
+            }
+
             if (children != null && matId >= 0 && matId < children.Count)
                 return children[matId];
 
@@ -223,6 +229,9 @@ namespace OpenFarCry.Importer.Cgf
 
             if (rootMat.MtlType != CgfMtlType.Multi)
             {
+                if (TryCollectMaterialTableIndexSlots(parsedFile, subCount, submeshMaterialIds, result))
+                    return result;
+
                 result.Add(rootMat);
                 return result;
             }
@@ -239,6 +248,75 @@ namespace OpenFarCry.Importer.Cgf
             }
 
             return result;
+        }
+
+        bool TryResolveMaterialTableIndexSlots(
+            CgfFile parsedFile,
+            int subCount,
+            int[] submeshMaterialIds,
+            string textureScopeId,
+            out Material[] materials)
+        {
+            // Some static CGFs store several MTL_STANDARD chunks instead of one MTL_MULTI.
+            // In that layout face MatID is the material table index, not an index under
+            // the primary node material chunk.
+            materials = null;
+            if (parsedFile?.MaterialChunks == null || parsedFile.MaterialChunks.Count == 0 || subCount <= 0)
+                return false;
+
+            var resolved = new Material[subCount];
+            for (int i = 0; i < subCount; i++)
+            {
+                int tableIndex = submeshMaterialIds != null && i < submeshMaterialIds.Length
+                    ? submeshMaterialIds[i]
+                    : i;
+
+                if (!TryResolveMaterialByTableIndex(parsedFile, tableIndex, out var chunk))
+                    return false;
+
+                resolved[i] = GetOrBuild(parsedFile, chunk, textureScopeId);
+            }
+
+            materials = resolved;
+            return true;
+        }
+
+        bool TryCollectMaterialTableIndexSlots(
+            CgfFile parsedFile,
+            int subCount,
+            int[] submeshMaterialIds,
+            List<CgfMaterialChunk> result)
+        {
+            if (parsedFile?.MaterialChunks == null || parsedFile.MaterialChunks.Count == 0 || subCount <= 0)
+                return false;
+
+            var resolved = new List<CgfMaterialChunk>(subCount);
+            for (int i = 0; i < subCount; i++)
+            {
+                int tableIndex = submeshMaterialIds != null && i < submeshMaterialIds.Length
+                    ? submeshMaterialIds[i]
+                    : i;
+
+                if (!TryResolveMaterialByTableIndex(parsedFile, tableIndex, out var chunk))
+                    return false;
+
+                resolved.Add(chunk);
+            }
+
+            result.AddRange(resolved);
+            return true;
+        }
+
+        static bool TryResolveMaterialByTableIndex(CgfFile parsedFile, int tableIndex, out CgfMaterialChunk chunk)
+        {
+            chunk = null;
+            if (parsedFile?.MaterialChunks == null ||
+                tableIndex < 0 ||
+                tableIndex >= parsedFile.MaterialChunks.Count)
+                return false;
+
+            chunk = parsedFile.MaterialChunks[tableIndex];
+            return chunk != null && chunk.MtlType != CgfMtlType.Multi;
         }
 
         Material GetOrBuild(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)
@@ -261,7 +339,9 @@ namespace OpenFarCry.Importer.Cgf
             var dc = chunk.DiffuseColor;
             string colorKey = $"{dc.r:X2}{dc.g:X2}{dc.b:X2}";
             string key = $"name:{name}|sh:{shader}|type:{(int)chunk.MtlType}|flags:{(int)chunk.Flags}|alpha:{chunk.AlphaTest:F3}|color:{colorKey}|d:{diffuseKey}|n:{normalKey}|s:{specularKey}|o:{opacityKey}";
-            return _cache.GetOrCreate(key, textureScopeId, () => CgfMaterialBuilder.Build(chunk, textures));
+            var material = _cache.GetOrCreate(key, textureScopeId, () => CgfMaterialBuilder.Build(chunk, textures));
+            CgfMaterialBuilder.ApplyResolvedTextures(material, textures);
+            return material;
         }
 
         CgfResolvedMaterialTextures ResolveTextures(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)

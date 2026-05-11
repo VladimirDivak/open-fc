@@ -46,18 +46,7 @@ namespace OpenFarCry.Importer.Cgf
             // Diffuse / base map
             var diffuse = chunk.DiffuseColor;
             mat.SetColor(PropBaseColor, new Color(diffuse.r / 255f, diffuse.g / 255f, diffuse.b / 255f, 1f));
-            if (textures.BaseMap != null)
-                mat.SetTexture(PropBaseMap, textures.BaseMap);
-            else if (textures.OpacityMap != null)
-                mat.SetTexture(PropBaseMap, textures.OpacityMap);
-
-            // Normal map
-            if (textures.NormalMap != null)
-            {
-                mat.SetTexture(PropBumpMap, textures.NormalMap);
-                mat.SetFloat(PropBumpScale, 1f);
-                mat.EnableKeyword("_NORMALMAP");
-            }
+            ApplyResolvedTextures(mat, textures);
 
             // Smoothness: low default until specular workflow is revisited
             mat.SetFloat(PropSmoothness, 0.2f);
@@ -85,6 +74,24 @@ namespace OpenFarCry.Importer.Cgf
             }
 
             return mat;
+        }
+
+        public static void ApplyResolvedTextures(Material mat, CgfResolvedMaterialTextures textures)
+        {
+            if (mat == null)
+                return;
+
+            if (textures.BaseMap != null)
+                mat.SetTexture(PropBaseMap, textures.BaseMap);
+            else if (textures.OpacityMap != null && mat.GetTexture(PropBaseMap) == null)
+                mat.SetTexture(PropBaseMap, textures.OpacityMap);
+
+            if (textures.NormalMap != null)
+            {
+                mat.SetTexture(PropBumpMap, textures.NormalMap);
+                mat.SetFloat(PropBumpScale, 1f);
+                mat.EnableKeyword("_NORMALMAP");
+            }
         }
 
         public static Material BuildFallback(string name)

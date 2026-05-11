@@ -18,8 +18,10 @@ namespace OpenFarCry.Level.Services
         {
             if (!string.IsNullOrEmpty(_levelScopeId))
             {
+                FcEntityLoadService.Current?.CancelAllForScope(_levelScopeId);
                 CgfRuntimeImporter.ReleaseLevelScope(_levelScopeId);
                 CgfRuntimeImporter.TrimUnused();
+                FcLevelRuntimeReportRegistry.Release(_levelScopeId);
             }
         }
     }

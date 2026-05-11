@@ -18,19 +18,13 @@ namespace OpenFarCry.Level.Services
     {
         public static FcBrushLoadService Current { get; private set; }
 
-        [SerializeField] int _maxConcurrent = 4;
-        [SerializeField] int _loadsPerFrame  = 2;
+        [SerializeField] int _maxConcurrent = 8;
+        [SerializeField] int _loadsPerFrame  = 8;
 
         readonly List<FcBrushInstance> _pending = new List<FcBrushInstance>();
         int _activeCount;
         int _totalRegistered;
-
-        // Timing stats (Phase 1 instrumentation).
-        int _loadedOk;
-        int _loadedFail;
-        double _totalLoadMs;
-        double _slowestMs;
-        double _fastestMs = double.MaxValue;
+        FcLevelLoadReport _report;
 
         public string LevelScopeId { get; private set; }
 
@@ -39,6 +33,7 @@ namespace OpenFarCry.Level.Services
             Current = this;
             var cache = GetComponent<FcLevelCacheService>() ?? GetComponentInParent<FcLevelCacheService>();
             LevelScopeId = cache != null ? cache.LevelScopeId : string.Empty;
+            _report = FcLevelRuntimeReportRegistry.GetOrCreate(LevelScopeId);
         }
 
         void OnDestroy()
@@ -52,6 +47,7 @@ namespace OpenFarCry.Level.Services
             {
                 _pending.Add(brush);
                 _totalRegistered++;
+                _report.BrushesRegistered = _totalRegistered;
             }
         }
 
@@ -136,17 +132,7 @@ namespace OpenFarCry.Level.Services
             {
                 _activeCount--;
                 double elapsed = sw.Elapsed.TotalMilliseconds;
-                if (success)
-                {
-                    _loadedOk++;
-                    _totalLoadMs += elapsed;
-                    if (elapsed < _fastestMs) _fastestMs = elapsed;
-                    if (elapsed > _slowestMs) _slowestMs = elapsed;
-                }
-                else
-                {
-                    _loadedFail++;
-                }
+                _report.RecordBrushLoad(success, elapsed);
 
                 if (_pending.Count == 0 && _activeCount == 0)
                     LogReport();
@@ -155,13 +141,7 @@ namespace OpenFarCry.Level.Services
 
         void LogReport()
         {
-            double avg = _loadedOk > 0 ? _totalLoadMs / _loadedOk : 0;
-            double fastest = _loadedOk > 0 ? _fastestMs : 0;
-            Debug.Log(
-                $"[FcBrushLoadService] {LevelScopeId}: " +
-                $"registered={_totalRegistered} ok={_loadedOk} fail={_loadedFail} " +
-                $"total={_totalLoadMs:F0}ms avg={avg:F1}ms " +
-                $"min={fastest:F1}ms max={_slowestMs:F1}ms");
+            _report.LogRuntimeBrushes();
         }
     }
 }

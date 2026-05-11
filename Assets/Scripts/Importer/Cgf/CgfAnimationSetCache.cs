@@ -12,6 +12,7 @@ namespace OpenFarCry.Importer.Cgf
         {
             public readonly int ClipEntryCount;
             public readonly int AnimationSetEntryCount;
+            public readonly int AnimationSetModelLinkCount;
             public readonly int SemanticClipEntryCount;
             public readonly int ClipHitCount;
             public readonly int ClipMissCount;
@@ -21,13 +22,14 @@ namespace OpenFarCry.Importer.Cgf
             public readonly int SemanticClipMissCount;
 
             public Stats(
-                int clipEntryCount, int animationSetEntryCount, int semanticClipEntryCount,
+                int clipEntryCount, int animationSetEntryCount, int animationSetModelLinkCount, int semanticClipEntryCount,
                 int clipHitCount, int clipMissCount,
                 int animationSetHitCount, int animationSetMissCount,
                 int semanticClipHitCount, int semanticClipMissCount)
             {
                 ClipEntryCount = clipEntryCount;
                 AnimationSetEntryCount = animationSetEntryCount;
+                AnimationSetModelLinkCount = animationSetModelLinkCount;
                 SemanticClipEntryCount = semanticClipEntryCount;
                 ClipHitCount = clipHitCount;
                 ClipMissCount = clipMissCount;
@@ -44,13 +46,19 @@ namespace OpenFarCry.Importer.Cgf
             public long LastAccessTick;
         }
 
+        sealed class CachedModelLayoutLink
+        {
+            public string AnimationSetCacheKey;
+            public long LastAccessTick;
+        }
+
         static readonly object s_sync = new object();
         static readonly Dictionary<string, CachedClipEntry> s_clipByCacheKey =
             new Dictionary<string, CachedClipEntry>(StringComparer.Ordinal);
         static readonly Dictionary<string, CachedAnimationSetEntry> s_animationSetByCacheKey =
             new Dictionary<string, CachedAnimationSetEntry>(StringComparer.Ordinal);
-        static readonly Dictionary<string, string> s_animationSetKeyByModelLayout =
-            new Dictionary<string, string>(StringComparer.Ordinal);
+        static readonly Dictionary<string, CachedModelLayoutLink> s_animationSetKeyByModelLayout =
+            new Dictionary<string, CachedModelLayoutLink>(StringComparer.Ordinal);
         static readonly Dictionary<string, CachedSemanticClipEntry> s_semanticClipByCacheKey =
             new Dictionary<string, CachedSemanticClipEntry>(StringComparer.Ordinal);
         static long s_tick;
@@ -80,6 +88,7 @@ namespace OpenFarCry.Importer.Cgf
                 return new Stats(
                     s_clipByCacheKey.Count,
                     s_animationSetByCacheKey.Count,
+                    s_animationSetKeyByModelLayout.Count,
                     s_semanticClipByCacheKey.Count,
                     s_clipHitCount, s_clipMissCount,
                     s_animationSetHitCount, s_animationSetMissCount,
@@ -275,7 +284,24 @@ namespace OpenFarCry.Importer.Cgf
                 return false;
 
             lock (s_sync)
-                return s_animationSetKeyByModelLayout.TryGetValue(modelLayoutKey, out animationSetCacheKey);
+            {
+                if (!s_animationSetKeyByModelLayout.TryGetValue(modelLayoutKey, out var cached) || cached == null)
+                {
+                    s_animationSetKeyByModelLayout.Remove(modelLayoutKey);
+                    return false;
+                }
+
+                if (string.IsNullOrEmpty(cached.AnimationSetCacheKey) ||
+                    !s_animationSetByCacheKey.ContainsKey(cached.AnimationSetCacheKey))
+                {
+                    s_animationSetKeyByModelLayout.Remove(modelLayoutKey);
+                    return false;
+                }
+
+                cached.LastAccessTick = ++s_tick;
+                animationSetCacheKey = cached.AnimationSetCacheKey;
+                return true;
+            }
         }
 
         internal static void StoreAnimationSetKeyForModelLayout(string modelLayoutKey, string animationSetCacheKey)
@@ -285,20 +311,32 @@ namespace OpenFarCry.Importer.Cgf
 
             lock (s_sync)
             {
-                s_animationSetKeyByModelLayout[modelLayoutKey] = animationSetCacheKey;
-                while (s_animationSetKeyByModelLayout.Count > MaxAnimationSetModelLinks)
+                s_animationSetKeyByModelLayout[modelLayoutKey] = new CachedModelLayoutLink
                 {
-                    string keyToRemove = null;
-                    foreach (var kv in s_animationSetKeyByModelLayout)
-                    {
-                        keyToRemove = kv.Key;
-                        break;
-                    }
+                    AnimationSetCacheKey = animationSetCacheKey,
+                    LastAccessTick = ++s_tick
+                };
+                EvictModelLayoutLinksUnsafe();
+            }
+        }
 
-                    if (keyToRemove == null)
-                        break;
-                    s_animationSetKeyByModelLayout.Remove(keyToRemove);
+        internal static void InvalidateAnimationSetKeyForModelLayout(string modelLayoutKey, string expectedAnimationSetCacheKey = null)
+        {
+            if (string.IsNullOrEmpty(modelLayoutKey))
+                return;
+
+            lock (s_sync)
+            {
+                if (!s_animationSetKeyByModelLayout.TryGetValue(modelLayoutKey, out var cached) || cached == null)
+                    return;
+
+                if (!string.IsNullOrEmpty(expectedAnimationSetCacheKey) &&
+                    !string.Equals(cached.AnimationSetCacheKey, expectedAnimationSetCacheKey, StringComparison.Ordinal))
+                {
+                    return;
                 }
+
+                s_animationSetKeyByModelLayout.Remove(modelLayoutKey);
             }
         }
 
@@ -410,6 +448,49 @@ namespace OpenFarCry.Importer.Cgf
                 if (oldest == null)
                     break;
                 s_animationSetByCacheKey.Remove(oldest);
+            }
+
+            EvictModelLayoutLinksUnsafe();
+        }
+
+        static void EvictModelLayoutLinksUnsafe()
+        {
+            if (s_animationSetKeyByModelLayout.Count == 0)
+                return;
+
+            // First remove stale links to missing animation-set entries.
+            var stale = new List<string>();
+            foreach (var kv in s_animationSetKeyByModelLayout)
+            {
+                var link = kv.Value;
+                if (link == null ||
+                    string.IsNullOrEmpty(link.AnimationSetCacheKey) ||
+                    !s_animationSetByCacheKey.ContainsKey(link.AnimationSetCacheKey))
+                {
+                    stale.Add(kv.Key);
+                }
+            }
+
+            for (int i = 0; i < stale.Count; i++)
+                s_animationSetKeyByModelLayout.Remove(stale[i]);
+
+            while (s_animationSetKeyByModelLayout.Count > MaxAnimationSetModelLinks)
+            {
+                string oldest = null;
+                long oldestTick = long.MaxValue;
+                foreach (var kv in s_animationSetKeyByModelLayout)
+                {
+                    long tick = kv.Value != null ? kv.Value.LastAccessTick : long.MinValue;
+                    if (tick < oldestTick)
+                    {
+                        oldestTick = tick;
+                        oldest = kv.Key;
+                    }
+                }
+
+                if (oldest == null)
+                    break;
+                s_animationSetKeyByModelLayout.Remove(oldest);
             }
         }
 

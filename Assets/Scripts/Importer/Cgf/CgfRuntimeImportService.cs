@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 
@@ -8,6 +9,10 @@ namespace OpenFarCry.Importer.Cgf
     {
         readonly CgfResourceImportService _resourceService;
         readonly CgfRuntimeAssetCache _runtimeCache;
+
+        readonly Dictionary<string, UniTaskCompletionSource<CgfFile>> _inFlightParsed =
+            new Dictionary<string, UniTaskCompletionSource<CgfFile>>();
+        readonly object _inFlightParsedLock = new object();
 
         public CgfRuntimeImportService(
             CgfResourceImportService resourceService = null,
@@ -74,10 +79,11 @@ namespace OpenFarCry.Importer.Cgf
                     parsedBase.SourceVirtualPath = normalizedVirtualPath;
 
                 var parsedForBuild = CreateSelectedMeshView(parsedBase, request.SelectedMeshChunkId);
-                var buildResult = CgfMeshBuilder.Build(
+                var prepared = CgfMeshBuilder.PrepareBuild(
                     parsedForBuild,
                     importSkeleton: request.ImportSkeleton,
                     importScale: request.ImportScale);
+                var buildResult = CgfMeshBuilder.UploadPrepared(prepared);
 
                 if (request.UseRuntimeMemoryCache)
                 {
@@ -148,21 +154,62 @@ namespace OpenFarCry.Importer.Cgf
                 }
                 else
                 {
-                    // I/O + parsing off main thread — neither FcFileSystem.ReadAllBytes nor
-                    // CgfParser.Parse touches Unity API, so thread pool is safe.
-                    string pathForLambda = normalizedVirtualPath;
-                    parsedBase = await UniTask.RunOnThreadPool(
-                        () =>
+                    // In-flight coalescing: if another task is already reading+parsing this
+                    // path, join it instead of starting redundant I/O.
+                    UniTaskCompletionSource<CgfFile> tcs;
+                    bool isOwner;
+                    lock (_inFlightParsedLock)
+                    {
+                        if (_inFlightParsed.TryGetValue(parsedCacheKey, out tcs))
                         {
-                            byte[] bytes = _resourceService.LoadRuntimeResourceBytes(pathForLambda);
-                            var parsed = CgfParser.Parse(bytes);
-                            parsed.SourceVirtualPath = pathForLambda;
-                            return parsed;
-                        },
-                        cancellationToken: ct);
+                            isOwner = false;
+                        }
+                        else
+                        {
+                            tcs = new UniTaskCompletionSource<CgfFile>();
+                            _inFlightParsed[parsedCacheKey] = tcs;
+                            isOwner = true;
+                        }
+                    }
 
-                    if (request.UseRuntimeMemoryCache)
-                        _runtimeCache.StoreParsed(parsedCacheKey, parsedBase, levelScopeId);
+                    if (isOwner)
+                    {
+                        try
+                        {
+                            // Use CancellationToken.None so one consumer cancelling doesn't
+                            // discard I/O that other waiters can use.
+                            string pathForLambda = normalizedVirtualPath;
+                            parsedBase = await UniTask.RunOnThreadPool(
+                                () =>
+                                {
+                                    byte[] bytes = _resourceService.LoadRuntimeResourceBytes(pathForLambda);
+                                    var parsed = CgfParser.Parse(bytes);
+                                    parsed.SourceVirtualPath = pathForLambda;
+                                    return parsed;
+                                },
+                                cancellationToken: CancellationToken.None);
+
+                            if (request.UseRuntimeMemoryCache)
+                                _runtimeCache.StoreParsed(parsedCacheKey, parsedBase, levelScopeId);
+
+                            tcs.TrySetResult(parsedBase);
+                        }
+                        catch (Exception e)
+                        {
+                            tcs.TrySetException(e);
+                            throw;
+                        }
+                        finally
+                        {
+                            lock (_inFlightParsedLock)
+                                _inFlightParsed.Remove(parsedCacheKey);
+                        }
+                    }
+                    else
+                    {
+                        parsedBase = await tcs.Task;
+                        ct.ThrowIfCancellationRequested();
+                    }
                 }
 
                 ct.ThrowIfCancellationRequested();
@@ -171,10 +218,19 @@ namespace OpenFarCry.Importer.Cgf
                     parsedBase.SourceVirtualPath = normalizedVirtualPath;
 
                 var parsedForBuild = CreateSelectedMeshView(parsedBase, request.SelectedMeshChunkId);
-                var buildResult = CgfMeshBuilder.Build(
-                    parsedForBuild,
-                    importSkeleton: request.ImportSkeleton,
-                    importScale: request.ImportScale);
+                // Stage 1: data-only mesh preparation on worker thread.
+                var prepared = await UniTask.RunOnThreadPool(
+                    () => CgfMeshBuilder.PrepareBuild(
+                        parsedForBuild,
+                        importSkeleton: request.ImportSkeleton,
+                        importScale: request.ImportScale),
+                    cancellationToken: ct);
+
+                ct.ThrowIfCancellationRequested();
+
+                // Stage 2: Unity Mesh upload/apply on main thread.
+                await UniTask.SwitchToMainThread(ct);
+                var buildResult = CgfMeshBuilder.UploadPrepared(prepared);
 
                 if (request.UseRuntimeMemoryCache)
                 {

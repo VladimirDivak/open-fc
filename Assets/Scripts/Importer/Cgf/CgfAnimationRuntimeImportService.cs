@@ -14,6 +14,7 @@ namespace OpenFarCry.Importer.Cgf
         {
             public readonly int CafEntryCount;
             public readonly int CafPathEntryCount;
+            public readonly int CafSourceHashEntryCount;
             public readonly int ClipEntryCount;
             public readonly int CafHitCount;
             public readonly int CafMissCount;
@@ -24,6 +25,7 @@ namespace OpenFarCry.Importer.Cgf
             public readonly int ClipHitCount;
             public readonly int ClipMissCount;
             public readonly int AnimationSetEntryCount;
+            public readonly int AnimationSetModelLinkCount;
             public readonly int AnimationSetHitCount;
             public readonly int AnimationSetMissCount;
             public readonly int SemanticClipEntryCount;
@@ -33,6 +35,7 @@ namespace OpenFarCry.Importer.Cgf
             public RuntimeCacheStats(
                 int cafEntryCount,
                 int cafPathEntryCount,
+                int cafSourceHashEntryCount,
                 int clipEntryCount,
                 int cafHitCount,
                 int cafMissCount,
@@ -43,6 +46,7 @@ namespace OpenFarCry.Importer.Cgf
                 int clipHitCount,
                 int clipMissCount,
                 int animationSetEntryCount,
+                int animationSetModelLinkCount,
                 int animationSetHitCount,
                 int animationSetMissCount,
                 int semanticClipEntryCount,
@@ -51,6 +55,7 @@ namespace OpenFarCry.Importer.Cgf
             {
                 CafEntryCount = cafEntryCount;
                 CafPathEntryCount = cafPathEntryCount;
+                CafSourceHashEntryCount = cafSourceHashEntryCount;
                 ClipEntryCount = clipEntryCount;
                 CafHitCount = cafHitCount;
                 CafMissCount = cafMissCount;
@@ -61,6 +66,7 @@ namespace OpenFarCry.Importer.Cgf
                 ClipHitCount = clipHitCount;
                 ClipMissCount = clipMissCount;
                 AnimationSetEntryCount = animationSetEntryCount;
+                AnimationSetModelLinkCount = animationSetModelLinkCount;
                 AnimationSetHitCount = animationSetHitCount;
                 AnimationSetMissCount = animationSetMissCount;
                 SemanticClipEntryCount = semanticClipEntryCount;
@@ -76,6 +82,7 @@ namespace OpenFarCry.Importer.Cgf
             return new RuntimeCacheStats(
                 cafEntryCount: caf.SemanticEntryCount,
                 cafPathEntryCount: caf.PathEntryCount,
+                cafSourceHashEntryCount: caf.SourceHashEntryCount,
                 clipEntryCount: cache.ClipEntryCount,
                 cafHitCount: caf.TotalHitCount,
                 cafMissCount: caf.SemanticMissCount,
@@ -86,6 +93,7 @@ namespace OpenFarCry.Importer.Cgf
                 clipHitCount: cache.ClipHitCount,
                 clipMissCount: cache.ClipMissCount,
                 animationSetEntryCount: cache.AnimationSetEntryCount,
+                animationSetModelLinkCount: cache.AnimationSetModelLinkCount,
                 animationSetHitCount: cache.AnimationSetHitCount,
                 animationSetMissCount: cache.AnimationSetMissCount,
                 semanticClipEntryCount: cache.SemanticClipEntryCount,
@@ -183,7 +191,9 @@ namespace OpenFarCry.Importer.Cgf
             int semClipHitBefore = cacheStatsBefore.SemanticClipHitCount;
             int semClipMissBefore = cacheStatsBefore.SemanticClipMissCount;
 
-            if (CgfAnimationSetCache.TryGetAnimationSetKeyForModelLayout(modelLayoutKey, out string cachedAnimationSetKey) &&
+            bool hasCachedSetKeyForLayout =
+                CgfAnimationSetCache.TryGetAnimationSetKeyForModelLayout(modelLayoutKey, out string cachedAnimationSetKey);
+            if (hasCachedSetKeyForLayout &&
                 CgfAnimationSetCache.TryGetCachedAnimationSet(cachedAnimationSetKey, out var cachedAnimationSet))
             {
                 usedAnimationSetCache = true;
@@ -194,6 +204,9 @@ namespace OpenFarCry.Importer.Cgf
             }
             else
             {
+                if (hasCachedSetKeyForLayout)
+                    CgfAnimationSetCache.InvalidateAnimationSetKeyForModelLayout(modelLayoutKey, cachedAnimationSetKey);
+
                 for (int i = 0; i < sources.Count; i++)
                 {
                     var source = sources[i];

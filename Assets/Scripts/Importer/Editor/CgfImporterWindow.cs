@@ -456,7 +456,8 @@ namespace OpenFarCry.Importer.Editor
                 hasSkeleton: hasSkeleton,
                 importScale: importScale,
                 siblingLodPaths: _siblingLodPaths,
-                persistMesh: saveToProject ? PersistMeshAssetForVirtualPath : null);
+                persistMesh: saveToProject ? PersistMeshAssetForVirtualPath : null,
+                materialService: CgfRuntimeImporter.MaterialService);
         }
 
         List<CgfImportedAnimationClip> TryAttachAnimations(

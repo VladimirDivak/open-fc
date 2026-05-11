@@ -14,6 +14,7 @@ namespace OpenFarCry.Importer.Cgf
         {
             public readonly int PathEntryCount;
             public readonly int SemanticEntryCount;
+            public readonly int SourceHashEntryCount;
             public readonly int PathHitCount;
             public readonly int PathMissCount;
             public readonly int SemanticHitCount;
@@ -22,12 +23,13 @@ namespace OpenFarCry.Importer.Cgf
             public int TotalHitCount => PathHitCount + SemanticHitCount;
 
             public Stats(
-                int pathEntries, int semanticEntries,
+                int pathEntries, int semanticEntries, int sourceHashEntries,
                 int pathHits, int pathMisses,
                 int semanticHits, int semanticMisses)
             {
                 PathEntryCount = pathEntries;
                 SemanticEntryCount = semanticEntries;
+                SourceHashEntryCount = sourceHashEntries;
                 PathHitCount = pathHits;
                 PathMissCount = pathMisses;
                 SemanticHitCount = semanticHits;
@@ -65,6 +67,7 @@ namespace OpenFarCry.Importer.Cgf
 
         const int MaxPathEntries = 1024;
         const int MaxSemanticEntries = 256;
+        const int MaxSourceHashEntries = 4096;
 
         internal static CafFile GetOrParse(string virtualPath, out string contentHash)
         {
@@ -148,7 +151,7 @@ namespace OpenFarCry.Importer.Cgf
         internal static Stats GetStats()
         {
             lock (s_sync)
-                return new Stats(s_byPath.Count, s_bySemantic.Count,
+                return new Stats(s_byPath.Count, s_bySemantic.Count, s_contentHashBySource.Count,
                     s_pathHits, s_pathMisses, s_semanticHits, s_semanticMisses);
         }
 
@@ -201,6 +204,46 @@ namespace OpenFarCry.Importer.Cgf
                 if (oldest == null) break;
                 s_bySemantic.Remove(oldest);
             }
+
+            PruneSourceHashIndexUnsafe();
+        }
+
+        // Best-effort prune for bytes-hash index.
+        // Entries in this map are only an optimization for semantic dedup; they are safe to drop.
+        // Must be called under s_sync.
+        static void PruneSourceHashIndexUnsafe()
+        {
+            if (s_contentHashBySource.Count <= MaxSourceHashEntries)
+                return;
+
+            var liveSemanticKeys = new HashSet<string>(s_bySemantic.Keys, StringComparer.Ordinal);
+            if (liveSemanticKeys.Count > 0)
+            {
+                var removeKeys = new List<string>();
+                foreach (var kv in s_contentHashBySource)
+                {
+                    if (string.IsNullOrEmpty(kv.Value) || !liveSemanticKeys.Contains(kv.Value))
+                        removeKeys.Add(kv.Key);
+                }
+
+                for (int i = 0; i < removeKeys.Count; i++)
+                    s_contentHashBySource.Remove(removeKeys[i]);
+            }
+
+            if (s_contentHashBySource.Count <= MaxSourceHashEntries)
+                return;
+
+            // Hard cap fallback: remove arbitrary entries until limit.
+            var overflowKeys = new List<string>(s_contentHashBySource.Count - MaxSourceHashEntries);
+            foreach (var kv in s_contentHashBySource)
+            {
+                overflowKeys.Add(kv.Key);
+                if (overflowKeys.Count >= s_contentHashBySource.Count - MaxSourceHashEntries)
+                    break;
+            }
+
+            for (int i = 0; i < overflowKeys.Count; i++)
+                s_contentHashBySource.Remove(overflowKeys[i]);
         }
 
         // FNV-1a 64-bit over normalized CAF content — reuse is possible even when
@@ -270,6 +313,46 @@ namespace OpenFarCry.Importer.Cgf
                     }
                 }
             }
+        }
+
+        // ── Test hooks (internal; no VFS dependency) ─────────────────────────
+
+        internal static void SeedPathEntryForTest(string path, string sourceBytesHash, string contentHash, CafFile caf)
+        {
+            lock (s_sync)
+            {
+                s_byPath[path] = new CachedPathEntry
+                {
+                    Caf = caf,
+                    SourceBytesHash = sourceBytesHash,
+                    ContentHash = contentHash,
+                    LastAccessTick = ++s_tick
+                };
+            }
+        }
+
+        internal static void SeedSemanticEntryForTest(string contentHash, CafFile caf)
+        {
+            lock (s_sync)
+            {
+                s_bySemantic[contentHash] = new CachedSemanticEntry
+                {
+                    Caf = caf,
+                    LastAccessTick = ++s_tick
+                };
+            }
+        }
+
+        internal static void SeedSourceHashEntryForTest(string sourceBytesHash, string contentHash)
+        {
+            lock (s_sync)
+                s_contentHashBySource[sourceBytesHash] = contentHash;
+        }
+
+        internal static void TrimToCapacityForTest()
+        {
+            lock (s_sync)
+                EvictOldestUnsafe();
         }
 
         static string ComputeBytesHash(byte[] bytes)

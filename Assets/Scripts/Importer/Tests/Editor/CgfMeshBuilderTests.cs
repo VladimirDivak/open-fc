@@ -314,6 +314,49 @@ namespace OpenFarCry.Importer.Tests.Editor
                         $"bindPose[{r},{c}]");
         }
 
+        // ── prepare/upload split parity ───────────────────────────────────────
+
+        [Test]
+        public void PrepareAndUpload_StaticMesh_MatchesBuild()
+        {
+            var file = SimpleFile(StaticMesh(
+                verts: new[]
+                {
+                    V(0, 0, 0), V(1, 0, 0), V(0, 1, 0),
+                    V(2, 0, 0), V(3, 0, 0), V(2, 1, 0)
+                },
+                faces: new[]
+                {
+                    new CryFace { V0 = 0, V1 = 1, V2 = 2, MatID = 0 },
+                    new CryFace { V0 = 3, V1 = 4, V2 = 5, MatID = 1 }
+                }));
+
+            var baseline = CgfMeshBuilder.Build(file, importSkeleton: false, importScale: 0.01f);
+            var prepared = CgfMeshBuilder.PrepareBuild(file, importSkeleton: false, importScale: 0.01f);
+            var split = CgfMeshBuilder.UploadPrepared(prepared);
+
+            AssertBuildResultsEquivalent(baseline, split);
+        }
+
+        [Test]
+        public void PrepareAndUpload_SkeletalMesh_MatchesBuild()
+        {
+            var file = MakeSkeletalFile(
+                boneCount: 3,
+                links: new[]
+                {
+                    new CryLink { BoneID = 0, Blending = 0.6f },
+                    new CryLink { BoneID = 1, Blending = 0.3f },
+                    new CryLink { BoneID = 2, Blending = 0.1f }
+                });
+
+            var baseline = CgfMeshBuilder.Build(file, importSkeleton: true, importScale: 0.01f);
+            var prepared = CgfMeshBuilder.PrepareBuild(file, importSkeleton: true, importScale: 0.01f);
+            var split = CgfMeshBuilder.UploadPrepared(prepared);
+
+            AssertBuildResultsEquivalent(baseline, split);
+        }
+
         // ── fixture builder ───────────────────────────────────────────────────
 
         // Builds a minimal CgfFile with a one-vertex degenerate triangle so we can
@@ -352,6 +395,93 @@ namespace OpenFarCry.Importer.Tests.Editor
                 BoneAnim    = new CgfBoneAnimChunk { Bones = bones },
                 BoneInitPos = new CgfBoneInitPosChunk { BindMatrices = matrices }
             };
+        }
+
+        static void AssertBuildResultsEquivalent(BuildResult expected, BuildResult actual)
+        {
+            Assert.That(actual.MeshChunkID, Is.EqualTo(expected.MeshChunkID));
+            Assert.That(actual.SourceNodeName, Is.EqualTo(expected.SourceNodeName));
+            Assert.That(actual.HasSkeleton, Is.EqualTo(expected.HasSkeleton));
+            Assert.That(actual.SubmeshMaterialIds, Is.EqualTo(expected.SubmeshMaterialIds));
+            Assert.That(actual.BoneNames, Is.EqualTo(expected.BoneNames));
+            Assert.That(actual.BoneIdToIndex, Is.EqualTo(expected.BoneIdToIndex));
+            Assert.That(actual.BoneIndexToId, Is.EqualTo(expected.BoneIndexToId));
+            Assert.That(actual.NodeLocalOffset.x, Is.EqualTo(expected.NodeLocalOffset.x).Within(1e-5f));
+            Assert.That(actual.NodeLocalOffset.y, Is.EqualTo(expected.NodeLocalOffset.y).Within(1e-5f));
+            Assert.That(actual.NodeLocalOffset.z, Is.EqualTo(expected.NodeLocalOffset.z).Within(1e-5f));
+
+            Assert.That(actual.Mesh, Is.Not.Null);
+            Assert.That(expected.Mesh, Is.Not.Null);
+            AssertMeshEquivalent(expected.Mesh, actual.Mesh);
+        }
+
+        static void AssertMeshEquivalent(Mesh expected, Mesh actual)
+        {
+            Assert.That(actual.vertexCount, Is.EqualTo(expected.vertexCount));
+            Assert.That(actual.subMeshCount, Is.EqualTo(expected.subMeshCount));
+            Assert.That(actual.indexFormat, Is.EqualTo(expected.indexFormat));
+
+            var expectedVerts = expected.vertices;
+            var actualVerts = actual.vertices;
+            Assert.That(actualVerts.Length, Is.EqualTo(expectedVerts.Length));
+            for (int i = 0; i < expectedVerts.Length; i++)
+                AssertVector(actualVerts[i], expectedVerts[i]);
+
+            var expectedNormals = expected.normals;
+            var actualNormals = actual.normals;
+            Assert.That(actualNormals.Length, Is.EqualTo(expectedNormals.Length));
+            for (int i = 0; i < expectedNormals.Length; i++)
+                AssertVector(actualNormals[i], expectedNormals[i]);
+
+            var expectedUv = new List<Vector2>();
+            var actualUv = new List<Vector2>();
+            expected.GetUVs(0, expectedUv);
+            actual.GetUVs(0, actualUv);
+            Assert.That(actualUv.Count, Is.EqualTo(expectedUv.Count));
+            for (int i = 0; i < expectedUv.Count; i++)
+            {
+                Assert.That(actualUv[i].x, Is.EqualTo(expectedUv[i].x).Within(1e-5f));
+                Assert.That(actualUv[i].y, Is.EqualTo(expectedUv[i].y).Within(1e-5f));
+            }
+
+            for (int si = 0; si < expected.subMeshCount; si++)
+            {
+                Assert.That(actual.GetTriangles(si), Is.EqualTo(expected.GetTriangles(si)));
+            }
+
+            Assert.That(actual.bindposes.Length, Is.EqualTo(expected.bindposes.Length));
+            for (int i = 0; i < expected.bindposes.Length; i++)
+            {
+                var e = expected.bindposes[i];
+                var a = actual.bindposes[i];
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        Assert.That(a[r, c], Is.EqualTo(e[r, c]).Within(1e-4f));
+            }
+
+            var expectedWeights = expected.boneWeights;
+            var actualWeights = actual.boneWeights;
+            Assert.That(actualWeights.Length, Is.EqualTo(expectedWeights.Length));
+            for (int i = 0; i < expectedWeights.Length; i++)
+            {
+                Assert.That(actualWeights[i].boneIndex0, Is.EqualTo(expectedWeights[i].boneIndex0));
+                Assert.That(actualWeights[i].boneIndex1, Is.EqualTo(expectedWeights[i].boneIndex1));
+                Assert.That(actualWeights[i].boneIndex2, Is.EqualTo(expectedWeights[i].boneIndex2));
+                Assert.That(actualWeights[i].boneIndex3, Is.EqualTo(expectedWeights[i].boneIndex3));
+                Assert.That(actualWeights[i].weight0, Is.EqualTo(expectedWeights[i].weight0).Within(1e-5f));
+                Assert.That(actualWeights[i].weight1, Is.EqualTo(expectedWeights[i].weight1).Within(1e-5f));
+                Assert.That(actualWeights[i].weight2, Is.EqualTo(expectedWeights[i].weight2).Within(1e-5f));
+                Assert.That(actualWeights[i].weight3, Is.EqualTo(expectedWeights[i].weight3).Within(1e-5f));
+            }
+
+            var eBounds = expected.bounds;
+            var aBounds = actual.bounds;
+            Assert.That(aBounds.center.x, Is.EqualTo(eBounds.center.x).Within(1e-4f));
+            Assert.That(aBounds.center.y, Is.EqualTo(eBounds.center.y).Within(1e-4f));
+            Assert.That(aBounds.center.z, Is.EqualTo(eBounds.center.z).Within(1e-4f));
+            Assert.That(aBounds.size.x, Is.EqualTo(eBounds.size.x).Within(1e-4f));
+            Assert.That(aBounds.size.y, Is.EqualTo(eBounds.size.y).Within(1e-4f));
+            Assert.That(aBounds.size.z, Is.EqualTo(eBounds.size.z).Within(1e-4f));
         }
     }
 }
