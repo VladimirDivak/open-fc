@@ -257,7 +257,7 @@ namespace OpenFarCry.Importer.Cgf
             float importScale)
         {
             return
-                $"{normalizedVirtualPath}|mesh:{selectedMeshChunkId}|skel:{(importSkeleton ? 1 : 0)}|scale:{importScale:R}";
+                $"{normalizedVirtualPath}|builder:{CgfMeshBuilder.MeshCacheVersionName}|mesh:{selectedMeshChunkId}|skel:{(importSkeleton ? 1 : 0)}|scale:{importScale:R}";
         }
 
         static CgfFile CreateSelectedMeshView(CgfFile source, int selectedMeshChunkId)
