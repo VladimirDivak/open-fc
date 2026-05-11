@@ -55,9 +55,9 @@ namespace OpenFarCry.Importer.Cgf
             return RotationFromMatrix(BasisChange * rowVectorEquivalent * InverseBasisChange);
         }
 
-        // For OLD row-vector matrices (SBoneInitPosMatrix / CAF controllers):
-        // ReadMatrix43 normalises translation into the Unity column slot, then this
-        // transposes the 3x3 and applies the Z-up → Y-up basis change.
+        // For OLD row-vector matrices (NODE_CHUNK_DESC.tm / SBoneInitPosMatrix / CAF controllers).
+        // Matrix44 nodes keep translation in row 3; Matrix43 bind poses are normalized
+        // into Unity's column slot while reading.
         public static Matrix4x4 MatrixInImporterSpace(Matrix4x4 m, float scale = 1f)
         {
             var converted = BasisChange * OldRowVectorMatrixToUnityColumnMatrix(m) * InverseBasisChange;
@@ -112,10 +112,15 @@ namespace OpenFarCry.Importer.Cgf
             outM.m10 = m.m01; outM.m11 = m.m11; outM.m12 = m.m21;
             outM.m20 = m.m02; outM.m21 = m.m12; outM.m22 = m.m22;
 
-            // ReadMatrix43/44 normalize OLD row translation into Unity's column slot.
-            outM.m03 = m.m03;
-            outM.m13 = m.m13;
-            outM.m23 = m.m23;
+            var rowTranslation = new Vector3(m.m30, m.m31, m.m32);
+            var columnTranslation = new Vector3(m.m03, m.m13, m.m23);
+            var translation = rowTranslation.sqrMagnitude > 1e-12f
+                ? rowTranslation
+                : columnTranslation;
+
+            outM.m03 = translation.x;
+            outM.m13 = translation.y;
+            outM.m23 = translation.z;
             return outM;
         }
 

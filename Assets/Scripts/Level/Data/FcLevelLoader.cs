@@ -4,7 +4,6 @@ using System.IO;
 using System.Text;
 using System.Xml;
 using OpenFarCry.FileSystem;
-using OpenFarCry.Importer.Cgf;
 using UnityEngine;
 
 namespace OpenFarCry.Level.Data
@@ -105,13 +104,14 @@ namespace OpenFarCry.Level.Data
 
         // ── Coordinate conversion ────────────────────────────────────────────────
 
-        // Cry Z-up (x,y,z) → Unity Y-up (x,z,−y). No scale: level positions are in metres.
+        // Cry level space (x,y,z) -> Unity scene space (x,z,y). No scale: level positions are in metres.
+        // This keeps Far Cry's north/south axis aligned with Unity +Z for level layouts.
         public static Vector3 ConvertPosition(float x, float y, float z)
-            => CryTransformConversion.PositionInImporterSpace(new Vector3(x, y, z), 1f);
+            => new Vector3(x, z, y);
 
-        // Cry direction (Z-up) → Unity direction (Y-up).
+        // Cry direction (Z-up) -> Unity scene direction (Y-up).
         public static Vector3 ConvertDirection(float x, float y, float z)
-            => CryTransformConversion.DirectionInImporterSpace(new Vector3(x, y, z));
+            => new Vector3(x, z, y);
 
         // ── Private ──────────────────────────────────────────────────────────────
 

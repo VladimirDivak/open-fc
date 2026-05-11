@@ -172,17 +172,16 @@ namespace OpenFarCry.Level.Editor
             AssetDatabase.CreateFolder(parent, leaf);
         }
 
-        // CryEngine Matrix34 (row-major, Z-up right-handed) → Unity Transform (Y-up left-handed).
-        // Coordinate map M: Cry(x,y,z) → Unity(x,z,−y).
-        // Columns: colX=(m00,m20,−m10), colY=(m02,m22,−m12), colZ=(−m01,−m21,m11).
-        // Translation: pos=(m03, m23, −m13).
+        // CryEngine Matrix34 (row-major, Z-up) -> Unity scene transform.
+        // Level placement uses Cry(x,y,z) -> Unity(x,z,y), while imported CGF mesh
+        // vertices are still in importer space Cry(x,y,z) -> Unity(x,z,-y).
         static void ApplyCryMatrix34(Transform t, float[] m)
         {
             float m00=m[0],  m01=m[1],  m02=m[2],  m03=m[3];
             float m10=m[4],  m11=m[5],  m12=m[6],  m13=m[7];
             float m20=m[8],  m21=m[9],  m22=m[10], m23=m[11];
 
-            t.position = new Vector3(m03, m23, -m13);
+            t.position = new Vector3(m03, m23, m13);
 
             var colX = new Vector3( m00,  m20, -m10);
             var colY = new Vector3( m02,  m22, -m12);
@@ -316,13 +315,13 @@ namespace OpenFarCry.Level.Editor
             t.localScale = Vector3.one * scale;
         }
 
-        // Cry XYZ Euler (degrees, Z-up right-handed) → Unity Quaternion (Y-up left-handed).
+        // Cry XYZ Euler (degrees, Z-up) -> Unity scene Quaternion.
         // Keep this consistent with historic level authoring assumptions for mission XML angles.
         static Quaternion CryAnglesToUnity(Vector3 cryAngles)
         {
             return Quaternion.AngleAxis(cryAngles.x, Vector3.right)
                  * Quaternion.AngleAxis(-cryAngles.y, Vector3.forward)
-                 * Quaternion.AngleAxis(cryAngles.z, Vector3.up);
+                 * Quaternion.AngleAxis(-cryAngles.z, Vector3.up);
         }
 
         public struct BuildStats

@@ -77,12 +77,19 @@ namespace OpenFarCry.Importer.Cgf
 
             // Cry applies the object Node transform only to geometry that is not
             // driven by bone links. Skinned geometry is already in skeleton space.
-            // CGF Node.Transform is an OLD row-vector Matrix44 (translation in row 3, rows = local axes).
-            // MatrixInImporterSpace transposes the 3x3 to convert row-vector to column-vector
-            // before applying the Z-up → Y-up basis change.
-            var unityNodeTransform = hasBones
+            // NODE_CHUNK_DESC.tm is applied with Cry's TransformPointOLD. Keep the
+            // translation on the GameObject so static model pivots stay usable.
+            var unityNodeTransformFull = hasBones
                 ? Matrix4x4.identity
                 : CryTransformConversion.MatrixInImporterSpace(nodeTransform, importScale);
+            result.NodeLocalOffset = hasBones
+                ? Vector3.zero
+                : new Vector3(unityNodeTransformFull.m03, unityNodeTransformFull.m13, unityNodeTransformFull.m23);
+
+            var unityNodeTransform = unityNodeTransformFull;
+            unityNodeTransform.m03 = 0f;
+            unityNodeTransform.m13 = 0f;
+            unityNodeTransform.m23 = 0f;
 
             var bindGlobalsByBoneId = hasBones
                 ? BuildBindPoseGlobalMatricesByBoneId(boneInitPos, boneNames.Names.Length, importScale)
