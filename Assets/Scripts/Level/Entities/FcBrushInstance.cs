@@ -190,36 +190,10 @@ namespace OpenFarCry.Level.Entities
             if (matIds.Length != subCount)
                 return;
 
-            int directMatches = 0;
-            int minusOneMatches = 0;
-            int plusOneMatches = 0;
-            for (int i = 0; i < matIds.Length; i++)
-            {
-                int id = matIds[i];
-                if (proxyMatIds.Contains(id)) directMatches++;
-                if (proxyMatIds.Contains(id - 1)) minusOneMatches++;
-                if (proxyMatIds.Contains(id + 1)) plusOneMatches++;
-            }
-
-            int mode = 0; // 0=direct, -1=(id-1), +1=(id+1)
-            int best = directMatches;
-            if (minusOneMatches > best) { best = minusOneMatches; mode = -1; }
-            if (plusOneMatches > best) { best = plusOneMatches; mode = 1; }
-
-            bool IsProxySubmesh(int matId)
-            {
-                return mode switch
-                {
-                    -1 => proxyMatIds.Contains(matId - 1),
-                    1 => proxyMatIds.Contains(matId + 1),
-                    _ => proxyMatIds.Contains(matId),
-                };
-            }
-
             var keep = new List<int>(subCount);
             for (int i = 0; i < subCount; i++)
             {
-                if (!IsProxySubmesh(matIds[i]))
+                if (!proxyMatIds.Contains(matIds[i]))
                     keep.Add(i);
             }
 
