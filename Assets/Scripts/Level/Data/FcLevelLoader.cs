@@ -79,7 +79,39 @@ namespace OpenFarCry.Level.Data
             var mission = new FcMissionDesc { LevelName = levelName, MissionName = missionName };
             ParseMissionXml(doc, mission);
             ParseEnvironmentFromMission(doc, mission);
+            ParseEnvironmentFromLevelData(levelName, mission);
             return mission;
+        }
+
+        public static bool TryLoadTerrainSettings(string levelName, out int heightmapSize, out int heightmapUnitSize)
+        {
+            heightmapSize = 1024;
+            heightmapUnitSize = 2;
+
+            EnsureLevelMounted(levelName);
+
+            string levelDataPath = LevelXmlPath(levelName, "leveldata.xml");
+            if (!FcFileSystem.Exists(levelDataPath))
+                return false;
+
+            try
+            {
+                byte[] bytes = FcFileSystem.ReadAllBytes(levelDataPath);
+                XmlDocument doc = LoadXml(bytes);
+                XmlNodeList infoNodes = doc.GetElementsByTagName("LevelInfo");
+                if (infoNodes.Count == 0)
+                    return false;
+
+                var attrs = infoNodes[0].Attributes;
+                heightmapSize = ParseInt(attrs?["HeightmapSize"]?.Value, heightmapSize);
+                heightmapUnitSize = ParseInt(attrs?["HeightmapUnitSize"]?.Value, heightmapUnitSize);
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[FcLevelLoader] Failed to parse terrain settings from leveldata.xml for '{levelName}': {e.Message}");
+                return false;
+            }
         }
 
         // ── Mount ───────────────────────────────────────────────────────────────
@@ -137,8 +169,11 @@ namespace OpenFarCry.Level.Data
                 }
                 else if (tag.Equals("Object", StringComparison.OrdinalIgnoreCase))
                 {
-                    var desc = ParseObjectNode(child);
-                    if (desc != null) mission.Objects.Add(desc);
+                    var levelObject = ParseLevelObjectNode(child);
+                    if (levelObject == null) continue;
+
+                    mission.LevelObjects.Add(levelObject);
+                    mission.Objects.Add(ToLegacyObject(levelObject));
                 }
             }
         }
@@ -151,6 +186,7 @@ namespace OpenFarCry.Level.Data
             if (string.IsNullOrEmpty(cls) || string.IsNullOrEmpty(posStr)) return null;
 
             var desc = new FcEntityDesc();
+            CopyAttributes(node.Attributes, desc.RootAttributes);
             desc.EntityClass = cls;
             desc.Name = name ?? cls;
             desc.Layer = node.Attributes?["Layer"]?.Value ?? string.Empty;
@@ -184,18 +220,19 @@ namespace OpenFarCry.Level.Data
             return desc;
         }
 
-        static FcObjectDesc ParseObjectNode(XmlNode node)
+        static FcLevelObjectDesc ParseLevelObjectNode(XmlNode node)
         {
             string type = node.Attributes?["Type"]?.Value;
             string name = node.Attributes?["Name"]?.Value;
             string posStr = node.Attributes?["Pos"]?.Value;
-            if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(posStr)) return null;
+            if (string.IsNullOrEmpty(type)) return null;
 
-            var desc = new FcObjectDesc();
+            var desc = new FcLevelObjectDesc();
+            CopyAttributes(node.Attributes, desc.Attributes);
             desc.Type = type;
             desc.Name = name ?? type;
 
-            if (TryParseVec3(posStr, out Vector3 pos))
+            if (!string.IsNullOrEmpty(posStr) && TryParseVec3(posStr, out Vector3 pos))
                 desc.Pos = ConvertPosition(pos.x, pos.y, pos.z);
 
             string angStr = node.Attributes?["Angles"]?.Value;
@@ -203,18 +240,37 @@ namespace OpenFarCry.Level.Data
                 desc.Angles = ang; // raw Cry angles; converted in FcLevelSceneBuilder
 
             desc.AreaId = ParseInt(node.Attributes?["AreaId"]?.Value);
+            FlattenObjectChildAttributes(node, desc.Attributes);
 
             if (type.Equals("Shape", StringComparison.OrdinalIgnoreCase))
-                desc.ShapePoints = ParseShapePoints(node);
+                desc.ShapePoints.AddRange(ParseShapePoints(node));
 
-            if (type.Equals("AreaBox", StringComparison.OrdinalIgnoreCase))
+            return desc;
+        }
+
+        static FcObjectDesc ToLegacyObject(FcLevelObjectDesc src)
+        {
+            var desc = new FcObjectDesc
             {
-                float w = ParseFloat(node.Attributes?["Width"]?.Value, 5f);
-                float h = ParseFloat(node.Attributes?["Height"]?.Value, 5f);
-                float l = ParseFloat(node.Attributes?["Length"]?.Value, 5f);
-                desc.AreaBoxDims = new Vector3(w, h, l);
+                Type = src.Type,
+                Name = src.Name,
+                Pos = src.Pos,
+                Angles = src.Angles,
+                AreaId = src.AreaId,
+                ShapePoints = src.ShapePoints.Count > 0 ? src.ShapePoints.ToArray() : null,
+            };
+
+            if (src.Attributes.TryGetValue("Width", out string wText) &&
+                src.Attributes.TryGetValue("Height", out string hText) &&
+                src.Attributes.TryGetValue("Length", out string lText))
+            {
+                desc.AreaBoxDims = new Vector3(
+                    ParseFloat(wText, 5f),
+                    ParseFloat(hText, 5f),
+                    ParseFloat(lText, 5f));
             }
 
+            CopyDictionary(src.Attributes, desc.Attributes);
             return desc;
         }
 
@@ -282,6 +338,36 @@ namespace OpenFarCry.Level.Data
             mission.Environment = env;
         }
 
+        static void ParseEnvironmentFromLevelData(string levelName, FcMissionDesc mission)
+        {
+            if (mission == null)
+                return;
+
+            if (mission.Environment == null)
+                mission.Environment = new FcLevelEnvironmentDesc();
+
+            string levelDataPath = LevelXmlPath(levelName, "leveldata.xml");
+            if (!FcFileSystem.Exists(levelDataPath))
+                return;
+
+            try
+            {
+                byte[] bytes = FcFileSystem.ReadAllBytes(levelDataPath);
+                XmlDocument doc = LoadXml(bytes);
+                XmlNodeList infoNodes = doc.GetElementsByTagName("LevelInfo");
+                if (infoNodes.Count == 0)
+                    return;
+
+                var attrs = infoNodes[0].Attributes;
+                string waterText = attrs?["WaterLevel"]?.Value;
+                mission.Environment.WaterLevel = ParseFloat(waterText, mission.Environment.WaterLevel);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[FcLevelLoader] Failed to parse WaterLevel from leveldata.xml for '{levelName}': {e.Message}");
+            }
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────────
 
         static void FlattenProperties(XmlNode node, Dictionary<string, string> dict, string prefix = "")
@@ -300,6 +386,34 @@ namespace OpenFarCry.Level.Data
                     : prefix + child.Name + ".";
                 FlattenProperties(child, dict, childPrefix);
             }
+        }
+
+        static void FlattenObjectChildAttributes(XmlNode objectNode, Dictionary<string, string> dict)
+        {
+            foreach (XmlNode child in objectNode.ChildNodes)
+            {
+                if (child.NodeType != XmlNodeType.Element)
+                    continue;
+
+                string prefix = child.Name + ".";
+                FlattenProperties(child, dict, prefix);
+            }
+        }
+
+        static void CopyAttributes(XmlAttributeCollection attributes, Dictionary<string, string> dict)
+        {
+            dict.Clear();
+            if (attributes == null) return;
+
+            foreach (XmlAttribute attr in attributes)
+                dict[attr.Name] = attr.Value;
+        }
+
+        static void CopyDictionary(Dictionary<string, string> source, Dictionary<string, string> target)
+        {
+            target.Clear();
+            foreach (var kv in source)
+                target[kv.Key] = kv.Value;
         }
 
         static XmlDocument LoadXml(byte[] bytes)

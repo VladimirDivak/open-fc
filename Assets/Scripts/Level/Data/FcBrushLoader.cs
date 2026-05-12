@@ -92,15 +92,15 @@ namespace OpenFarCry.Level.Data
                 int id       = r.ReadInt32();
                 int geomIdx  = r.ReadInt32();
                 int matIdx   = r.ReadInt32();
-                r.ReadInt32(); // flags (entity render flags, not geom flags)
-                r.ReadInt32(); // mergeId
+                int flags    = r.ReadInt32(); // brush instance flags (render/lightmap/etc)
+                int mergeId  = r.ReadInt32();
 
                 var matrix = new float[12];
                 for (int j = 0; j < 12; j++)
                     matrix[j] = r.ReadSingle();
 
                 byte lodRatio    = r.ReadByte();
-                r.ReadByte();   // ratioViewDist
+                byte viewDistRatio = r.ReadByte();
                 r.ReadByte();   // reserved1
                 r.ReadByte();   // reserved2
 
@@ -120,9 +120,13 @@ namespace OpenFarCry.Level.Data
                     Id               = id,
                     VirtualPath      = path,
                     MaterialOverride = matOverride,
+                    MaterialId       = matIdx,
                     Matrix           = matrix,
                     NoPhysics        = (geomFlags[geomIdx] & GeomFlagNoPhysics) != 0,
+                    Flags            = flags,
+                    MergeId          = mergeId,
                     LodRatio         = lodRatio,
+                    ViewDistRatio    = viewDistRatio,
                 });
             }
 
