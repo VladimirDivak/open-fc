@@ -5,6 +5,7 @@ using System.Linq;
 using OpenFarCry.Importer.Cgf;
 using UnityEditor;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace OpenFarCry.Importer.Editor
 {
@@ -82,6 +83,7 @@ namespace OpenFarCry.Importer.Editor
                     AssetDatabase.DeleteAsset(paths.MeshPath);
                 AssetDatabase.CreateAsset(mesh, paths.MeshPath);
 
+                PersistMaterialAndTextureAssets(virtualPath, go);
                 _animationCacheService.RebindAnimationComponentToSharedClips(paths.MeshPath, go, clips);
                 PrefabUtility.SaveAsPrefabAsset(go, paths.PrefabPath);
 
@@ -93,6 +95,209 @@ namespace OpenFarCry.Importer.Editor
             catch (Exception e)
             {
                 Debug.LogError($"[CgfImporter] Save failed: {e}");
+            }
+        }
+
+        void PersistMaterialAndTextureAssets(string virtualPath, GameObject go)
+        {
+            if (string.IsNullOrWhiteSpace(virtualPath) || go == null)
+                return;
+
+            string baseAssetPath = ImportAssetPaths.GetBaseAssetPathNoExtension(virtualPath);
+            string materialsDir = $"{baseAssetPath}_materials";
+            string texturesDir = $"{baseAssetPath}_textures";
+            EnsureDirectory(materialsDir);
+            EnsureDirectory(texturesDir);
+
+            var materialBySourceId = new Dictionary<int, Material>();
+            var textureByKey = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+
+            var renderers = go.GetComponentsInChildren<Renderer>(true);
+            for (int r = 0; r < renderers.Length; r++)
+            {
+                var renderer = renderers[r];
+                var shared = renderer.sharedMaterials;
+                if (shared == null || shared.Length == 0)
+                    continue;
+
+                bool changed = false;
+                for (int i = 0; i < shared.Length; i++)
+                {
+                    var source = shared[i];
+                    if (source == null)
+                        continue;
+
+                    if (EditorUtility.IsPersistent(source))
+                        continue;
+
+                    int sourceId = source.GetInstanceID();
+                    if (!materialBySourceId.TryGetValue(sourceId, out var persistedMaterial) || persistedMaterial == null)
+                    {
+                        string materialName = SanitizePathSegment(string.IsNullOrWhiteSpace(source.name) ? $"mat_{r}_{i}" : source.name);
+                        string materialPath = $"{materialsDir}/{materialName}_{sourceId}.mat";
+                        persistedMaterial = PersistMaterialAsset(source, materialPath, texturesDir, textureByKey);
+                        if (persistedMaterial == null)
+                            continue;
+
+                        materialBySourceId[sourceId] = persistedMaterial;
+                    }
+
+                    shared[i] = persistedMaterial;
+                    changed = true;
+                }
+
+                if (changed)
+                    renderer.sharedMaterials = shared;
+            }
+        }
+
+        static Material PersistMaterialAsset(
+            Material source,
+            string materialPath,
+            string texturesDir,
+            Dictionary<string, Texture2D> textureByKey)
+        {
+            if (source == null)
+                return null;
+
+            var clone = new Material(source)
+            {
+                name = source.name
+            };
+
+            var shader = clone.shader;
+            if (shader != null)
+            {
+                int propertyCount = ShaderUtil.GetPropertyCount(shader);
+                for (int i = 0; i < propertyCount; i++)
+                {
+                    if (ShaderUtil.GetPropertyType(shader, i) != ShaderUtil.ShaderPropertyType.TexEnv)
+                        continue;
+
+                    string propertyName = ShaderUtil.GetPropertyName(shader, i);
+                    if (string.IsNullOrEmpty(propertyName))
+                        continue;
+
+                    var sourceTexture = clone.GetTexture(propertyName) as Texture2D;
+                    if (sourceTexture == null)
+                        continue;
+
+                    var persistedTexture = PersistTextureAsset(
+                        sourceTexture,
+                        propertyName,
+                        texturesDir,
+                        textureByKey);
+                    if (persistedTexture != null)
+                        clone.SetTexture(propertyName, persistedTexture);
+                }
+            }
+
+            if (AssetDatabase.LoadAssetAtPath<Material>(materialPath) != null)
+                AssetDatabase.DeleteAsset(materialPath);
+
+            AssetDatabase.CreateAsset(clone, materialPath);
+            return AssetDatabase.LoadAssetAtPath<Material>(materialPath);
+        }
+
+        static Texture2D PersistTextureAsset(
+            Texture2D source,
+            string propertyName,
+            string texturesDir,
+            Dictionary<string, Texture2D> textureByKey)
+        {
+            if (source == null)
+                return null;
+
+            if (EditorUtility.IsPersistent(source))
+                return source;
+
+            string textureName = SanitizePathSegment(string.IsNullOrWhiteSpace(source.name) ? "tex" : source.name);
+            string propertyToken = SanitizePathSegment(string.IsNullOrWhiteSpace(propertyName) ? "map" : propertyName);
+            string key = source.GetInstanceID().ToString();
+
+            if (textureByKey.TryGetValue(key, out var cachedTexture) && cachedTexture != null)
+                return cachedTexture;
+
+            string texturePath = $"{texturesDir}/{textureName}_{propertyToken}_{source.GetInstanceID()}.asset";
+            var existing = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+            if (existing != null)
+            {
+                textureByKey[key] = existing;
+                return existing;
+            }
+
+            if (!TryDuplicateTextureForAsset(source, out var clone))
+            {
+                Debug.LogWarning($"[CgfImporter] Failed to duplicate texture '{source.name}' for cache asset.");
+                return null;
+            }
+
+            clone.name = source.name;
+            AssetDatabase.CreateAsset(clone, texturePath);
+
+            var persisted = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+            textureByKey[key] = persisted;
+            return persisted;
+        }
+
+        static bool TryDuplicateTextureForAsset(Texture2D source, out Texture2D clone)
+        {
+            clone = null;
+            if (source == null)
+                return false;
+
+            if (source.isReadable)
+            {
+                clone = Object.Instantiate(source);
+                return clone != null;
+            }
+
+            RenderTexture rt = null;
+            var previous = RenderTexture.active;
+            try
+            {
+                rt = RenderTexture.GetTemporary(
+                    source.width,
+                    source.height,
+                    0,
+                    RenderTextureFormat.ARGB32,
+                    RenderTextureReadWrite.Default);
+
+                Graphics.Blit(source, rt);
+                RenderTexture.active = rt;
+
+                clone = new Texture2D(
+                    source.width,
+                    source.height,
+                    TextureFormat.RGBA32,
+                    mipChain: source.mipmapCount > 1,
+                    linear: false);
+
+                clone.ReadPixels(new Rect(0, 0, source.width, source.height), 0, 0);
+                clone.Apply(updateMipmaps: source.mipmapCount > 1, makeNoLongerReadable: false);
+
+                clone.wrapMode = source.wrapMode;
+                clone.wrapModeU = source.wrapModeU;
+                clone.wrapModeV = source.wrapModeV;
+                clone.wrapModeW = source.wrapModeW;
+                clone.filterMode = source.filterMode;
+                clone.anisoLevel = source.anisoLevel;
+                clone.mipMapBias = source.mipMapBias;
+                return true;
+            }
+            catch (Exception e)
+            {
+                if (clone != null)
+                    Object.DestroyImmediate(clone);
+                clone = null;
+                Debug.LogWarning($"[CgfImporter] Texture duplication failed: {e.Message}");
+                return false;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (rt != null)
+                    RenderTexture.ReleaseTemporary(rt);
             }
         }
 
@@ -162,6 +367,22 @@ namespace OpenFarCry.Importer.Editor
                 return false;
             Directory.CreateDirectory(full);
             return true;
+        }
+
+        static string SanitizePathSegment(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "asset";
+
+            char[] invalid = Path.GetInvalidFileNameChars();
+            var chars = value.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+            {
+                if (chars[i] == '/' || chars[i] == '\\' || invalid.Contains(chars[i]))
+                    chars[i] = '_';
+            }
+
+            return new string(chars);
         }
     }
 }
