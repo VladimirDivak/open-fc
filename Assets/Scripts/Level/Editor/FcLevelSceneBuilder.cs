@@ -50,7 +50,8 @@ namespace OpenFarCry.Level.Editor
             report.RecordPhase("LoadBrushList", sw.Elapsed.TotalMilliseconds);
 
             sw.Restart();
-            SaveLayoutData(levelName, missionName, mission, brushList);
+            var supplement = FcLevelSupplementLoader.Load(levelName);
+            SaveLayoutData(levelName, missionName, mission, brushList, supplement);
             report.RecordPhase("SaveLayoutData", sw.Elapsed.TotalMilliseconds);
 
             // Root GO
@@ -70,6 +71,12 @@ namespace OpenFarCry.Level.Editor
             sw.Restart();
             var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
             report.RecordPhase("BuildEntities", sw.Elapsed.TotalMilliseconds);
+
+            // Vegetation
+            sw.Restart();
+            FcLevelLoader.TryLoadTerrainSettings(levelName, out int terrainRes, out int terrainUnit);
+            stats.Vegetation = BuildVegetationInstances(supplement, levelName, terrainRes, terrainUnit, levelRoot);
+            report.RecordPhase("BuildVegetation", sw.Elapsed.TotalMilliseconds);
 
             // ── Brush geometry ──────────────────────────────────────────────────
             if (buildBrushes)
@@ -112,6 +119,10 @@ namespace OpenFarCry.Level.Editor
             objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
+
+            FcLevelLoader.TryLoadTerrainSettings(layoutData.LevelName, out int terrainRes, out int terrainUnit);
+            stats.Vegetation = BuildVegetationInstancesFromLayout(layoutData, terrainRes, terrainUnit, levelRoot);
+
             stats.Brushes = BuildBrushesFromList(brushList, levelRoot);
 
             EditorSceneManager.MarkSceneDirty(targetScene);
@@ -141,6 +152,131 @@ namespace OpenFarCry.Level.Editor
             }
 
             return brushes.Count;
+        }
+
+        // ── Vegetation ───────────────────────────────────────────────────────────
+
+        static int BuildVegetationInstances(
+            FcLevelSupplementData supplement,
+            string levelName,
+            int terrainResolution,
+            int heightmapUnitSize,
+            GameObject levelRoot)
+        {
+            if (supplement == null ||
+                supplement.VegetationInstances == null || supplement.VegetationInstances.Length == 0 ||
+                supplement.VegetationTypes == null || supplement.VegetationTypes.Length == 0)
+                return 0;
+
+            var typeByIndex = new Dictionary<int, FcLevelSupplementData.VegetationTypeDesc>();
+            foreach (var t in supplement.VegetationTypes)
+            {
+                if (t.Index >= 0 && !string.IsNullOrEmpty(t.FileName))
+                    typeByIndex[t.Index] = t;
+            }
+
+            var heightSamples = LoadTerrainHeightSamples(levelName, terrainResolution);
+            return PlaceVegetationInstances(
+                supplement.VegetationInstances, typeByIndex,
+                terrainResolution, heightmapUnitSize, heightSamples, levelRoot);
+        }
+
+        static int BuildVegetationInstancesFromLayout(
+            FcLevelLayoutDataV2 layoutData,
+            int terrainResolution,
+            int heightmapUnitSize,
+            GameObject levelRoot)
+        {
+            if (layoutData.VegetationInstances == null || layoutData.VegetationInstances.Length == 0 ||
+                layoutData.VegetationTypes == null || layoutData.VegetationTypes.Length == 0)
+                return 0;
+
+            var typeByIndex = new Dictionary<int, FcLevelSupplementData.VegetationTypeDesc>();
+            foreach (var t in layoutData.VegetationTypes)
+            {
+                if (t.Index >= 0 && !string.IsNullOrEmpty(t.FileName))
+                    typeByIndex[t.Index] = t;
+            }
+
+            var heightSamples = LoadTerrainHeightSamples(layoutData.LevelName, terrainResolution);
+            return PlaceVegetationInstances(
+                layoutData.VegetationInstances, typeByIndex,
+                terrainResolution, heightmapUnitSize, heightSamples, levelRoot);
+        }
+
+        // CryEngine stores vegetation Z=0 in objects.lst; actual height sampled from terrain at runtime.
+        static ushort[] LoadTerrainHeightSamples(string levelName, int terrainResolution)
+        {
+            string h16Path = $"levels/{levelName.ToLowerInvariant()}/terrain/land_map.h16";
+            if (!FcFileSystem.Exists(h16Path)) return null;
+            byte[] bytes = FcFileSystem.ReadAllBytes(h16Path);
+            FcTerrainHeightmapDecoder.TryDecodeH16(bytes, terrainResolution, out var samples);
+            return samples;
+        }
+
+        static float SampleTerrainHeight(ushort[] samples, int resolution, int unitSize, float worldX, float worldZ)
+        {
+            const float heightScale = 1f / 256f;
+            int hx = Mathf.RoundToInt(worldX / unitSize);
+            int hz = Mathf.RoundToInt(worldZ / unitSize);
+            hx = Mathf.Clamp(hx, 1, resolution - 1);
+            hz = Mathf.Clamp(hz, 1, resolution - 1);
+            int idx = hx * resolution + hz; // transposed: world x -> first index (matches SampleCryHeightRaw)
+            ushort raw = (uint)idx < (uint)samples.Length ? samples[idx] : (ushort)0;
+            return (raw & 0xFFE0) * heightScale;
+        }
+
+        static int PlaceVegetationInstances(
+            FcLevelSupplementData.VegetationInstanceDesc[] instances,
+            Dictionary<int, FcLevelSupplementData.VegetationTypeDesc> typeByIndex,
+            int terrainResolution,
+            int heightmapUnitSize,
+            ushort[] heightSamples,
+            GameObject levelRoot)
+        {
+            const float coordMax = 65535f;
+            float terrainWorldSize = (terrainResolution - 1) * heightmapUnitSize;
+
+            var vegRoot = new GameObject("Vegetation");
+            vegRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+
+            int placed = 0;
+            for (int i = 0; i < instances.Length; i++)
+            {
+                var inst = instances[i];
+                if (!typeByIndex.TryGetValue(inst.Type, out var typeDef))
+                    continue;
+
+                // Cry XY (0..65535) -> Unity XZ scene space.
+                float worldX = inst.X * terrainWorldSize / coordMax;
+                float worldZ = inst.Y * terrainWorldSize / coordMax;
+                // Z in file is 0; sample actual height from terrain heightmap.
+                float worldY = heightSamples != null
+                    ? SampleTerrainHeight(heightSamples, terrainResolution, heightmapUnitSize, worldX, worldZ)
+                    : inst.Z / 256f;
+
+                float scale = inst.Scale > 0f ? inst.Scale : 1f;
+
+                var go = new GameObject($"Veg_{typeDef.Index}_{i}");
+                go.transform.SetParent(vegRoot.transform, worldPositionStays: false);
+                go.transform.position = new Vector3(worldX, worldY, worldZ);
+                go.transform.localScale = new Vector3(scale, scale, scale);
+
+                var veg = go.AddComponent<FcVegetationInstance>();
+                var so = new SerializedObject(veg);
+                so.FindProperty("_virtualPath").stringValue  = typeDef.FileName;
+                so.FindProperty("_typeIndex").intValue       = typeDef.Index;
+                so.FindProperty("_instanceScale").floatValue = scale;
+                so.FindProperty("_brightness").intValue      = inst.Brightness;
+                so.ApplyModifiedPropertiesWithoutUndo();
+
+                placed++;
+            }
+
+            if (placed == 0)
+                Object.DestroyImmediate(vegRoot);
+
+            return placed;
         }
 
         static void BuildTerrainSkeleton(GameObject levelRoot, string levelName, FcLevelEnvironmentDesc environment)
@@ -374,13 +510,13 @@ namespace OpenFarCry.Level.Editor
         // ── Layout data ───────────────────────────────────────────────────────────
 
         static void SaveLayoutData(string levelName, string missionName,
-            FcMissionDesc mission, IReadOnlyList<FcBrushDesc> brushes)
+            FcMissionDesc mission, IReadOnlyList<FcBrushDesc> brushes,
+            FcLevelSupplementData supplement)
         {
             const string dir = "Assets/FCData/Levels";
             EnsureDir(dir);
 
             string path = $"{dir}/{levelName}_{missionName}_v2.asset";
-            var supplement = FcLevelSupplementLoader.Load(levelName);
             var data = FcLevelLayoutDataV2.FromMission(mission, brushes, supplement);
 
             var existing = AssetDatabase.LoadAssetAtPath<FcLevelLayoutDataV2>(path);
@@ -603,6 +739,7 @@ namespace OpenFarCry.Level.Editor
             cache.SetLevelScope(levelName);
             servicesGo.AddComponent<FcLevelResourceService>();
             servicesGo.AddComponent<FcBrushLoadService>();
+            servicesGo.AddComponent<FcVegetationLoadService>();
             servicesGo.AddComponent<FcMeshLoadService>();
             servicesGo.AddComponent<FcEntityLoadService>();
             servicesGo.AddComponent<FcAnimationLoadService>();
@@ -748,11 +885,12 @@ namespace OpenFarCry.Level.Editor
             public int Entities;
             public int Objects;
             public int Brushes;
+            public int Vegetation;
             public int Skipped;
             public int Unknown;
 
             public override string ToString() =>
-                $"Entities: {Entities}  Objects: {Objects}  Brushes: {Brushes}  Skipped: {Skipped}  Unknown: {Unknown}";
+                $"Entities: {Entities}  Objects: {Objects}  Brushes: {Brushes}  Vegetation: {Vegetation}  Skipped: {Skipped}  Unknown: {Unknown}";
         }
     }
 }

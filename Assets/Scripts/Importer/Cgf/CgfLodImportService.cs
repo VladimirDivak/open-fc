@@ -165,7 +165,7 @@ namespace OpenFarCry.Importer.Cgf
             lodGroup.SetLODs(lods);
             lodGroup.RecalculateBounds();
 
-            Debug.Log($"[CgfImporter] Configured LODGroup with {lods.Length} level(s).");
+//            Debug.Log($"[CgfImporter] Configured LODGroup with {lods.Length} level(s).");
         }
 
         static LOD[] BuildLodSettings(List<Renderer> renderers)
