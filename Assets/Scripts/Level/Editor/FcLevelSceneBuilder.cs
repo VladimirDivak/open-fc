@@ -6,6 +6,8 @@ using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
 using OpenFarCry.Level.Services;
+using OpenFarCry.FileSystem;
+using OpenFarCry.Importer.Texture;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -57,6 +59,7 @@ namespace OpenFarCry.Level.Editor
 
             // Services
             InstantiateServices(levelRoot, levelName, mission.Environment);
+            BuildTerrainSkeleton(levelRoot, levelName, mission.Environment);
 
             // Entity + object containers
             var entityRoot = new GameObject("Entities");
@@ -81,16 +84,16 @@ namespace OpenFarCry.Level.Editor
             return stats;
         }
 
-        // Rebuilds a level scene from serialized layout data without reading PAK archives.
+        // V2 adapter: keeps current scene build path while layout format evolves.
         public static BuildStats RebuildFromLayoutData(
-            FcLevelLayoutData layoutData,
+            FcLevelLayoutDataV2 layoutData,
             FcEntityPrefabRegistry registry,
             Scene targetScene,
             bool skipHidden = true)
         {
             if (layoutData == null)
             {
-                Debug.LogError("[FcLevelSceneBuilder] layoutData is null.");
+                Debug.LogError("[FcLevelSceneBuilder] layoutData V2 is null.");
                 return default;
             }
 
@@ -101,6 +104,7 @@ namespace OpenFarCry.Level.Editor
             SceneManager.MoveGameObjectToScene(levelRoot, targetScene);
 
             InstantiateServices(levelRoot, layoutData.LevelName, mission.Environment);
+            BuildTerrainSkeleton(levelRoot, layoutData.LevelName, mission.Environment);
 
             var entityRoot = new GameObject("Entities");
             entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
@@ -139,6 +143,234 @@ namespace OpenFarCry.Level.Editor
             return brushes.Count;
         }
 
+        static void BuildTerrainSkeleton(GameObject levelRoot, string levelName, FcLevelEnvironmentDesc environment)
+        {
+            const float terrainVerticalSceneScale = 1f;
+            string basePath = $"levels/{levelName.ToLowerInvariant()}";
+            string h16Path = $"{basePath}/terrain/land_map.h16";
+            if (!FcFileSystem.Exists(h16Path))
+                return;
+
+            byte[] bytes = FcFileSystem.ReadAllBytes(h16Path);
+            int resolution = FcTerrainHeightmapDecoder.DefaultResolution;
+            int heightmapUnitSize = 2;
+            FcLevelLoader.TryLoadTerrainSettings(levelName, out resolution, out heightmapUnitSize);
+            if (!FcTerrainHeightmapDecoder.TryDecodeH16(bytes, resolution, out var samples))
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Could not decode terrain heightmap '{h16Path}' ({bytes?.Length ?? 0} bytes).");
+                return;
+            }
+
+            const int quadsPerChunk = 63;
+            float heightScale = (1f / 256f) * terrainVerticalSceneScale;      // CryEngine TERRAIN_Z_RATIO
+            float metersPerSample = heightmapUnitSize;
+
+            ushort minMasked = ushort.MaxValue;
+            ushort maxMasked = 0;
+            for (int hz = 1; hz < resolution; hz++)
+            {
+                for (int hx = 1; hx < resolution; hx++)
+                {
+                    ushort raw = SampleCryHeightRaw(samples, resolution, hx, hz);
+                    ushort masked = (ushort)(raw & 0xFFE0);
+                    if (masked < minMasked) minMasked = masked;
+                    if (masked > maxMasked) maxMasked = masked;
+                }
+            }
+            Debug.Log(
+                $"[FcLevelSceneBuilder] Terrain '{levelName}': size={resolution}, unit={heightmapUnitSize}, " +
+                $"heightRaw=[{minMasked}..{maxMasked}], worldY=[{minMasked * heightScale:F3}..{maxMasked * heightScale:F3}]");
+
+            var terrainRoot = new GameObject("Terrain");
+            terrainRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+
+            Material terrainMat = BuildTerrainFallbackMaterial(basePath);
+
+            int chunksPerAxis = (resolution - 1 + quadsPerChunk - 1) / quadsPerChunk;
+            for (int cz = 0; cz < chunksPerAxis; cz++)
+            {
+                for (int cx = 0; cx < chunksPerAxis; cx++)
+                {
+                    int startX = cx * quadsPerChunk;
+                    int startZ = cz * quadsPerChunk;
+                    int quadCountX = Mathf.Min(quadsPerChunk, resolution - 1 - startX);
+                    int quadCountZ = Mathf.Min(quadsPerChunk, resolution - 1 - startZ);
+                    if (quadCountX <= 0 || quadCountZ <= 0)
+                        continue;
+
+                    var mesh = BuildTerrainChunkMesh(
+                        samples,
+                        resolution,
+                        startX,
+                        startZ,
+                        quadCountX,
+                        quadCountZ,
+                        metersPerSample,
+                        heightScale);
+
+                    var chunk = new GameObject($"Chunk_{cx}_{cz}");
+                    chunk.transform.SetParent(terrainRoot.transform, worldPositionStays: false);
+                    chunk.transform.localPosition = new Vector3(
+                        startX * metersPerSample,
+                        0f,
+                        startZ * metersPerSample);
+
+                    var mf = chunk.AddComponent<MeshFilter>();
+                    mf.sharedMesh = mesh;
+                    var mr = chunk.AddComponent<MeshRenderer>();
+                    mr.sharedMaterial = terrainMat;
+                    var mc = chunk.AddComponent<MeshCollider>();
+                    mc.sharedMesh = mesh;
+                }
+            }
+
+            if (environment != null)
+                BuildWaterPlane(terrainRoot.transform, resolution, metersPerSample, environment.WaterLevel * terrainVerticalSceneScale);
+        }
+
+        static Mesh BuildTerrainChunkMesh(
+            ushort[] samples,
+            int resolution,
+            int startX,
+            int startZ,
+            int quadsX,
+            int quadsZ,
+            float metersPerSample,
+            float heightScale)
+        {
+            int vertsX = quadsX + 1;
+            int vertsZ = quadsZ + 1;
+            int vertexCount = vertsX * vertsZ;
+
+            var vertices = new Vector3[vertexCount];
+            var uvs = new Vector2[vertexCount];
+            var triangles = new int[quadsX * quadsZ * 6];
+
+            int vi = 0;
+            for (int z = 0; z < vertsZ; z++)
+            {
+                int hz = startZ + z;
+                for (int x = 0; x < vertsX; x++)
+                {
+                    int hx = startX + x;
+                    // Match Cry terrain loader/read path:
+                    // - exported h16 is transposed relative to world X/Y;
+                    // - low border row/column are treated as empty (index 0 remains default).
+                    ushort raw = SampleCryHeightRaw(samples, resolution, hx, hz);
+                    ushort h = (ushort)(raw & 0xFFE0);
+                    float worldX = x * metersPerSample;
+                    float worldZ = z * metersPerSample;
+                    float worldY = h * heightScale;
+
+                    vertices[vi] = new Vector3(worldX, worldY, worldZ);
+                    uvs[vi] = new Vector2(
+                        (float)hz / (resolution - 1),
+                        (float)hx / (resolution - 1));
+                    vi++;
+                }
+            }
+
+            int ti = 0;
+            for (int z = 0; z < quadsZ; z++)
+            {
+                int row = z * vertsX;
+                int next = (z + 1) * vertsX;
+                for (int x = 0; x < quadsX; x++)
+                {
+                    int i0 = row + x;
+                    int i1 = i0 + 1;
+                    int i2 = next + x;
+                    int i3 = i2 + 1;
+
+                    triangles[ti++] = i0;
+                    triangles[ti++] = i2;
+                    triangles[ti++] = i1;
+                    triangles[ti++] = i1;
+                    triangles[ti++] = i2;
+                    triangles[ti++] = i3;
+                }
+            }
+
+            var mesh = new Mesh
+            {
+                indexFormat = UnityEngine.Rendering.IndexFormat.UInt32,
+                vertices = vertices,
+                uv = uvs,
+                triangles = triangles,
+                name = $"Terrain_{startX}_{startZ}",
+            };
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        static ushort SampleCryHeightRaw(ushort[] samples, int resolution, int hx, int hz)
+        {
+            if (samples == null || resolution <= 0)
+                return 0;
+
+            // Cry LoadHighMap fills [1..size-1] from file and leaves [0,*]/[*,0] as default.
+            if (hx <= 0 || hz <= 0 || hx >= resolution || hz >= resolution)
+                return 0;
+
+            int index = (hx * resolution) + hz; // transposed mapping (world x -> first index)
+            if ((uint)index >= (uint)samples.Length)
+                return 0;
+            return samples[index];
+        }
+
+        static Material BuildTerrainFallbackMaterial(string basePath)
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+            if (shader == null)
+                shader = Shader.Find("Standard");
+            if (shader == null)
+                shader = Shader.Find("Sprites/Default");
+            if (shader == null)
+                shader = Shader.Find("Unlit/Color");
+            if (shader == null)
+                shader = Shader.Find("Hidden/InternalErrorShader");
+
+            var material = new Material(shader) { name = "TerrainFallback" };
+            string coverPath = $"{basePath}/terrain/cover_low.dds";
+            if (TextureImportService.TryLoadRuntimeTexture(coverPath, out var tex))
+            {
+                if (material.HasProperty("_BaseMap"))
+                    material.SetTexture("_BaseMap", tex);
+                if (material.HasProperty("_MainTex"))
+                    material.SetTexture("_MainTex", tex);
+            }
+            else
+            {
+                if (material.HasProperty("_BaseColor"))
+                    material.SetColor("_BaseColor", new Color(0.34f, 0.42f, 0.24f, 1f));
+                if (material.HasProperty("_Color"))
+                    material.SetColor("_Color", new Color(0.34f, 0.42f, 0.24f, 1f));
+            }
+
+            return material;
+        }
+
+        static void BuildWaterPlane(Transform terrainRoot, int resolution, float metersPerSample, float waterLevel)
+        {
+            float size = (resolution - 1) * metersPerSample;
+            var water = GameObject.CreatePrimitive(PrimitiveType.Plane);
+            water.name = "Water";
+            water.transform.SetParent(terrainRoot, worldPositionStays: false);
+            water.transform.localPosition = new Vector3(size * 0.5f, waterLevel, size * 0.5f);
+            water.transform.localScale = new Vector3(size / 10f, 1f, size / 10f);
+            Object.DestroyImmediate(water.GetComponent<Collider>());
+
+            var mr = water.GetComponent<MeshRenderer>();
+            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+            if (shader == null)
+                shader = Shader.Find("Standard");
+
+            var mat = new Material(shader) { name = "WaterFallback" };
+            mat.color = new Color(0.15f, 0.3f, 0.45f, 0.65f);
+            mr.sharedMaterial = mat;
+        }
+
         // ── Layout data ───────────────────────────────────────────────────────────
 
         static void SaveLayoutData(string levelName, string missionName,
@@ -147,10 +379,11 @@ namespace OpenFarCry.Level.Editor
             const string dir = "Assets/FCData/Levels";
             EnsureDir(dir);
 
-            string path = $"{dir}/{levelName}_{missionName}.asset";
-            var data = FcLevelLayoutData.FromMission(mission, brushes);
+            string path = $"{dir}/{levelName}_{missionName}_v2.asset";
+            var supplement = FcLevelSupplementLoader.Load(levelName);
+            var data = FcLevelLayoutDataV2.FromMission(mission, brushes, supplement);
 
-            var existing = AssetDatabase.LoadAssetAtPath<FcLevelLayoutData>(path);
+            var existing = AssetDatabase.LoadAssetAtPath<FcLevelLayoutDataV2>(path);
             if (existing != null)
             {
                 EditorUtility.CopySerialized(data, existing);
@@ -258,22 +491,45 @@ namespace OpenFarCry.Level.Editor
                 stats.Entities++;
             }
 
-            // Pass 2: objects
-            foreach (var desc in mission.Objects)
+            // Pass 2: objects (generic LevelObjects first; legacy fallback kept for safety)
+            if (mission.LevelObjects != null && mission.LevelObjects.Count > 0)
             {
-                var prefab = registry.GetPrefabForObjectType(desc.Type);
-                if (prefab == null) { stats.Unknown++; continue; }
+                foreach (var levelObject in mission.LevelObjects)
+                {
+                    var prefab = registry.GetPrefabForObjectType(levelObject.Type);
+                    if (prefab == null) { stats.Unknown++; continue; }
 
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.Type}_obj" : desc.Name;
-                go.transform.SetParent(objectRoot.transform, worldPositionStays: false);
+                    var desc = ToSceneObjectDesc(levelObject);
+                    var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                    go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.Type}_obj" : desc.Name;
+                    go.transform.SetParent(objectRoot.transform, worldPositionStays: false);
 
-                SetTransform(go.transform, desc.Pos, desc.Angles, 1f);
+                    SetTransform(go.transform, desc.Pos, desc.Angles, 1f);
 
-                var entity = go.GetComponent<FcEntity>();
-                entity?.SetData(desc);
+                    var entity = go.GetComponent<FcEntity>();
+                    entity?.SetData(desc);
 
-                stats.Objects++;
+                    stats.Objects++;
+                }
+            }
+            else
+            {
+                foreach (var desc in mission.Objects)
+                {
+                    var prefab = registry.GetPrefabForObjectType(desc.Type);
+                    if (prefab == null) { stats.Unknown++; continue; }
+
+                    var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                    go.name = string.IsNullOrEmpty(desc.Name) ? $"{desc.Type}_obj" : desc.Name;
+                    go.transform.SetParent(objectRoot.transform, worldPositionStays: false);
+
+                    SetTransform(go.transform, desc.Pos, desc.Angles, 1f);
+
+                    var entity = go.GetComponent<FcEntity>();
+                    entity?.SetData(desc);
+
+                    stats.Objects++;
+                }
             }
 
             // Pass 3: parent remap
@@ -286,6 +542,41 @@ namespace OpenFarCry.Level.Editor
             }
 
             return stats;
+        }
+
+        static FcObjectDesc ToSceneObjectDesc(FcLevelObjectDesc src)
+        {
+            var desc = new FcObjectDesc
+            {
+                Type = src.Type,
+                Name = src.Name,
+                Pos = src.Pos,
+                Angles = src.Angles,
+                AreaId = src.AreaId,
+                ShapePoints = src.ShapePoints.Count > 0 ? src.ShapePoints.ToArray() : null,
+            };
+
+            if (src.Attributes.TryGetValue("Width", out var wText) &&
+                src.Attributes.TryGetValue("Height", out var hText) &&
+                src.Attributes.TryGetValue("Length", out var lText))
+            {
+                desc.AreaBoxDims = new Vector3(
+                    ParseInvariantFloat(wText, 5f),
+                    ParseInvariantFloat(hText, 5f),
+                    ParseInvariantFloat(lText, 5f));
+            }
+
+            foreach (var kv in src.Attributes)
+                desc.Attributes[kv.Key] = kv.Value;
+
+            return desc;
+        }
+
+        static float ParseInvariantFloat(string value, float fallback)
+        {
+            if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float v))
+                return v;
+            return fallback;
         }
 
         // ── Clear ────────────────────────────────────────────────────────────────
