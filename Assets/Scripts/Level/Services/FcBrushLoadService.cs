@@ -22,6 +22,7 @@ namespace OpenFarCry.Level.Services
         [SerializeField] int _loadsPerFrame  = 8;
 
         readonly List<FcBrushInstance> _pending = new List<FcBrushInstance>();
+        readonly CgfLodImportService _lodService = new CgfLodImportService();
         int _activeCount;
         int _totalRegistered;
         FcLevelLoadReport _report;
@@ -95,36 +96,49 @@ namespace OpenFarCry.Level.Services
             bool success = false;
             try
             {
-                var result = await CgfRuntimeImporter.ImportAsync(
-                    new CgfRuntimeImportRequest(
-                        virtualPath: brush.VirtualPath,
-                        importSkeleton: false,
-                        importAnimations: false,
-                        importScale: 0.01f,
-                        useRuntimeMemoryCache: true),
+                if (TryGetPreloadedHandle(brush, out var preloadedHandle))
+                {
+                    await UniTask.SwitchToMainThread(ct);
+                    if (brush == null || ct.IsCancellationRequested) return;
+                    brush.ApplyLoadResult(
+                        preloadedHandle.BaseResult,
+                        preloadedHandle.LodResults,
+                        LevelScopeId,
+                        releaseImportResultsOnDestroy: false);
+                    success = true;
+                    return;
+                }
+
+                var result = await FcLevelGeometryImportHelper.ImportStaticGeometryWithTexturePreloadAsync(
+                    brush.VirtualPath,
                     LevelScopeId,
                     ct);
 
                 if (ct.IsCancellationRequested) return;
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
-                    Debug.LogWarning($"[FcBrushLoadService] '{brush.VirtualPath}': {result.ErrorMessage}", brush);
+                    Debug.LogWarning(
+                        $"[FcBrushLoadService] '{brush.VirtualPath}': {result?.ErrorMessage ?? "Import failed."}",
+                        brush);
                     return;
                 }
 
-                await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                    result.ParsedFile,
-                    result.Mesh,
-                    result.BuildResult?.SubmeshMaterialIds,
+                var lodResults = await FcLevelGeometryImportHelper.ImportSiblingLodsWithTexturePreloadAsync(
+                    brush.VirtualPath,
                     LevelScopeId,
+                    _lodService,
                     ct);
 
                 if (ct.IsCancellationRequested) return;
                 await UniTask.SwitchToMainThread(ct);
 
                 if (brush == null || ct.IsCancellationRequested) return;
-                brush.ApplyLoadResult(result, LevelScopeId);
+                brush.ApplyLoadResult(
+                    result,
+                    lodResults,
+                    LevelScopeId,
+                    releaseImportResultsOnDestroy: true);
                 success = true;
             }
             catch (OperationCanceledException) { }
@@ -142,6 +156,19 @@ namespace OpenFarCry.Level.Services
         void LogReport()
         {
             _report.LogRuntimeBrushes();
+        }
+
+        static bool TryGetPreloadedHandle(FcBrushInstance brush, out FcLevelGeometryAssetHandle handle)
+        {
+            handle = null;
+            if (brush == null || string.IsNullOrWhiteSpace(brush.VirtualPath))
+                return false;
+
+            var levelLoadService = FcLevelLoadService.Current;
+            if (levelLoadService == null)
+                return false;
+
+            return levelLoadService.TryGetBrushPreloadedHandle(brush.VirtualPath, out handle);
         }
     }
 }

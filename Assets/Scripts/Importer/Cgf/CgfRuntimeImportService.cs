@@ -13,6 +13,9 @@ namespace OpenFarCry.Importer.Cgf
         readonly Dictionary<string, UniTaskCompletionSource<CgfFile>> _inFlightParsed =
             new Dictionary<string, UniTaskCompletionSource<CgfFile>>();
         readonly object _inFlightParsedLock = new object();
+        readonly Dictionary<string, UniTaskCompletionSource<CgfRuntimeAssetCache.RuntimeModelArtifact>> _inFlightModel =
+            new Dictionary<string, UniTaskCompletionSource<CgfRuntimeAssetCache.RuntimeModelArtifact>>();
+        readonly object _inFlightModelLock = new object();
 
         public CgfRuntimeImportService(
             CgfResourceImportService resourceService = null,
@@ -55,7 +58,8 @@ namespace OpenFarCry.Importer.Cgf
                         buildResult: cachedModel.BuildResult,
                         usedRuntimeMemoryCache: true,
                         parsedCacheKey: cachedModel.ParsedCacheKey,
-                        modelCacheKey: modelCacheKey);
+                        modelCacheKey: modelCacheKey,
+                        usedModelRuntimeMemoryCache: true);
                 }
 
                 CgfFile parsedBase;
@@ -142,7 +146,8 @@ namespace OpenFarCry.Importer.Cgf
                         buildResult: cachedModel.BuildResult,
                         usedRuntimeMemoryCache: true,
                         parsedCacheKey: cachedModel.ParsedCacheKey,
-                        modelCacheKey: modelCacheKey);
+                        modelCacheKey: modelCacheKey,
+                        usedModelRuntimeMemoryCache: true);
                 }
 
                 CgfFile parsedBase;
@@ -218,33 +223,19 @@ namespace OpenFarCry.Importer.Cgf
                     parsedBase.SourceVirtualPath = normalizedVirtualPath;
 
                 var parsedForBuild = CreateSelectedMeshView(parsedBase, request.SelectedMeshChunkId);
-                // Stage 1: data-only mesh preparation on worker thread.
-                var prepared = await UniTask.RunOnThreadPool(
-                    () => CgfMeshBuilder.PrepareBuild(
-                        parsedForBuild,
-                        importSkeleton: request.ImportSkeleton,
-                        importScale: request.ImportScale),
-                    cancellationToken: ct);
 
-                ct.ThrowIfCancellationRequested();
-
-                // Stage 2: Unity Mesh upload/apply on main thread.
-                await UniTask.SwitchToMainThread(ct);
-                var buildResult = CgfMeshBuilder.UploadPrepared(prepared);
-
-                if (request.UseRuntimeMemoryCache)
-                {
-                    var artifact = new CgfRuntimeAssetCache.RuntimeModelArtifact(
-                        parsedFile: parsedForBuild,
-                        buildResult: buildResult,
-                        parsedCacheKey: parsedCacheKey);
-                    _runtimeCache.StoreModel(modelCacheKey, artifact, levelScopeId);
-                }
+                var artifact = await BuildModelArtifactAsync(
+                    request,
+                    parsedForBuild,
+                    parsedCacheKey,
+                    modelCacheKey,
+                    levelScopeId,
+                    ct);
 
                 return CgfRuntimeImportResult.Completed(
                     virtualPath: normalizedVirtualPath,
-                    parsedFile: parsedForBuild,
-                    buildResult: buildResult,
+                    parsedFile: artifact.ParsedFile,
+                    buildResult: artifact.BuildResult,
                     usedRuntimeMemoryCache: usedRuntimeCache,
                     parsedCacheKey: parsedCacheKey,
                     modelCacheKey: modelCacheKey);
@@ -257,6 +248,25 @@ namespace OpenFarCry.Importer.Cgf
             {
                 return CgfRuntimeImportResult.Failed(virtualPath, e.Message);
             }
+        }
+
+        public async UniTask<IReadOnlyDictionary<string, CgfRuntimeImportResult>> PreloadAsync(
+            IReadOnlyList<CgfRuntimeImportRequest> requests,
+            string levelScopeId = null,
+            CancellationToken ct = default)
+        {
+            var uniqueRequests = BuildUniquePreloadRequests(requests);
+            var results = new Dictionary<string, CgfRuntimeImportResult>(uniqueRequests.Count, StringComparer.Ordinal);
+
+            for (int i = 0; i < uniqueRequests.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var entry = uniqueRequests[i];
+                var result = await ImportAsync(entry.Request, levelScopeId, ct);
+                results[entry.ModelCacheKey] = result;
+            }
+
+            return results;
         }
 
         public void Release(string parsedCacheKey)
@@ -299,6 +309,130 @@ namespace OpenFarCry.Importer.Cgf
         public CgfRuntimeAssetCache.Stats GetCacheStats()
         {
             return _runtimeCache.GetStats();
+        }
+
+        async UniTask<CgfRuntimeAssetCache.RuntimeModelArtifact> BuildModelArtifactAsync(
+            CgfRuntimeImportRequest request,
+            CgfFile parsedForBuild,
+            string parsedCacheKey,
+            string modelCacheKey,
+            string levelScopeId,
+            CancellationToken ct)
+        {
+            if (!request.UseRuntimeMemoryCache)
+            {
+                // For no-cache editor paths keep cancellation behavior unchanged.
+                var preparedNoCache = await UniTask.RunOnThreadPool(
+                    () => CgfMeshBuilder.PrepareBuild(
+                        parsedForBuild,
+                        importSkeleton: request.ImportSkeleton,
+                        importScale: request.ImportScale),
+                    cancellationToken: ct);
+
+                ct.ThrowIfCancellationRequested();
+                await UniTask.SwitchToMainThread(ct);
+                var buildResultNoCache = CgfMeshBuilder.UploadPrepared(preparedNoCache);
+                return new CgfRuntimeAssetCache.RuntimeModelArtifact(
+                    parsedFile: parsedForBuild,
+                    buildResult: buildResultNoCache,
+                    parsedCacheKey: parsedCacheKey);
+            }
+
+            UniTaskCompletionSource<CgfRuntimeAssetCache.RuntimeModelArtifact> tcs;
+            bool isOwner;
+            lock (_inFlightModelLock)
+            {
+                if (_inFlightModel.TryGetValue(modelCacheKey, out tcs))
+                {
+                    isOwner = false;
+                }
+                else
+                {
+                    tcs = new UniTaskCompletionSource<CgfRuntimeAssetCache.RuntimeModelArtifact>();
+                    _inFlightModel[modelCacheKey] = tcs;
+                    isOwner = true;
+                }
+            }
+
+            if (isOwner)
+            {
+                try
+                {
+                    var prepared = await UniTask.RunOnThreadPool(
+                        () => CgfMeshBuilder.PrepareBuild(
+                            parsedForBuild,
+                            importSkeleton: request.ImportSkeleton,
+                            importScale: request.ImportScale),
+                        cancellationToken: CancellationToken.None);
+
+                    await UniTask.SwitchToMainThread();
+                    var buildResult = CgfMeshBuilder.UploadPrepared(prepared);
+                    var artifact = new CgfRuntimeAssetCache.RuntimeModelArtifact(
+                        parsedFile: parsedForBuild,
+                        buildResult: buildResult,
+                        parsedCacheKey: parsedCacheKey);
+
+                    _runtimeCache.StoreModel(modelCacheKey, artifact, levelScopeId);
+                    tcs.TrySetResult(artifact);
+                    return artifact;
+                }
+                catch (Exception e)
+                {
+                    tcs.TrySetException(e);
+                    throw;
+                }
+                finally
+                {
+                    lock (_inFlightModelLock)
+                        _inFlightModel.Remove(modelCacheKey);
+                }
+            }
+
+            var waitedArtifact = await tcs.Task;
+            ct.ThrowIfCancellationRequested();
+            return waitedArtifact;
+        }
+
+        internal static List<PreloadRequestEntry> BuildUniquePreloadRequests(
+            IReadOnlyList<CgfRuntimeImportRequest> requests)
+        {
+            var result = new List<PreloadRequestEntry>();
+            if (requests == null || requests.Count == 0)
+                return result;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < requests.Count; i++)
+            {
+                var request = requests[i];
+                if (request == null || string.IsNullOrWhiteSpace(request.VirtualPath))
+                    continue;
+
+                string normalizedVirtualPath = ImportAssetPaths.NormalizeVirtualPath(request.VirtualPath);
+                string modelCacheKey = BuildModelCacheKey(
+                    normalizedVirtualPath,
+                    request.SelectedMeshChunkId,
+                    request.ImportSkeleton,
+                    request.ImportScale);
+
+                if (!seen.Add(modelCacheKey))
+                    continue;
+
+                result.Add(new PreloadRequestEntry(request, modelCacheKey));
+            }
+
+            return result;
+        }
+
+        internal readonly struct PreloadRequestEntry
+        {
+            public readonly CgfRuntimeImportRequest Request;
+            public readonly string ModelCacheKey;
+
+            public PreloadRequestEntry(CgfRuntimeImportRequest request, string modelCacheKey)
+            {
+                Request = request;
+                ModelCacheKey = modelCacheKey;
+            }
         }
 
         static string BuildParsedCacheKey(string normalizedVirtualPath)

@@ -96,5 +96,33 @@ namespace OpenFarCry.Level.Tests.Editor
 
             FcLevelRuntimeReportRegistry.Release(scope);
         }
+
+        [Test]
+        public void GeometryPreloadCounters_StoreLatestSnapshot()
+        {
+            var report = new FcLevelLoadReport();
+
+            report.RecordGeometryPreloadStats(
+                uniqueBaseRequestCount: 11,
+                uniqueLodRequestCount: 7,
+                cachedModelReuseCount: 3,
+                uniqueTexturePreloadCount: 42);
+
+            Assert.That(report.GeometryUniqueBaseRequestCount, Is.EqualTo(11));
+            Assert.That(report.GeometryUniqueLodRequestCount, Is.EqualTo(7));
+            Assert.That(report.GeometryCachedModelReuseCount, Is.EqualTo(3));
+            Assert.That(report.GeometryUniqueTexturePreloadCount, Is.EqualTo(42));
+
+            report.RecordGeometryPreloadStats(
+                uniqueBaseRequestCount: -1,
+                uniqueLodRequestCount: -1,
+                cachedModelReuseCount: -1,
+                uniqueTexturePreloadCount: -1);
+
+            Assert.That(report.GeometryUniqueBaseRequestCount, Is.EqualTo(0));
+            Assert.That(report.GeometryUniqueLodRequestCount, Is.EqualTo(0));
+            Assert.That(report.GeometryCachedModelReuseCount, Is.EqualTo(0));
+            Assert.That(report.GeometryUniqueTexturePreloadCount, Is.EqualTo(0));
+        }
     }
 }

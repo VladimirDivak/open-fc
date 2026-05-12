@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer.Texture;
@@ -37,6 +38,14 @@ namespace OpenFarCry.Importer.Cgf
             CancellationToken ct = default)
         {
             return SharedService.ImportAsync(request, levelScopeId, ct);
+        }
+
+        public static UniTask<IReadOnlyDictionary<string, CgfRuntimeImportResult>> PreloadAsync(
+            IReadOnlyList<CgfRuntimeImportRequest> requests,
+            string levelScopeId = null,
+            CancellationToken ct = default)
+        {
+            return SharedService.PreloadAsync(requests, levelScopeId, ct);
         }
 
         public static void Release(string parsedCacheKey)

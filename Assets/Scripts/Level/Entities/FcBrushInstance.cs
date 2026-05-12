@@ -20,9 +20,10 @@ namespace OpenFarCry.Level.Entities
         public bool   NoPhysics   => _noPhysics;
 
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
-        readonly CgfLodImportService _lodService = new CgfLodImportService();
         static readonly int PropCull = Shader.PropertyToID("_Cull");
         CgfRuntimeImportResult _importResult;
+        IReadOnlyList<CgfRuntimeImportResult> _lodResults;
+        bool _releaseImportResultsOnDestroy = true;
         Mesh _physicsColliderMesh;
         Mesh _visualFilteredMesh;
 
@@ -37,11 +38,17 @@ namespace OpenFarCry.Level.Entities
         }
 
         // Called by FcBrushLoadService after async import + texture preload complete.
-        public void ApplyLoadResult(CgfRuntimeImportResult result, string levelScopeId)
+        public void ApplyLoadResult(
+            CgfRuntimeImportResult result,
+            IReadOnlyList<CgfRuntimeImportResult> lodResults,
+            string levelScopeId,
+            bool releaseImportResultsOnDestroy = true)
         {
             if (result == null || !result.Success) return;
 
             _importResult = result;
+            _lodResults = lodResults;
+            _releaseImportResultsOnDestroy = releaseImportResultsOnDestroy;
 
             string meshName = Path.GetFileNameWithoutExtension(_virtualPath);
             var output = _goBuilder.Build(new CgfGameObjectBuilder.BuildRequest(
@@ -53,7 +60,6 @@ namespace OpenFarCry.Level.Entities
                 textureScopeId: levelScopeId));
 
             StripProxySubmeshesFromVisual(output.Root, result);
-            DisableBrushBackfaceCulling(output.Root);
             output.Root.transform.SetParent(transform, worldPositionStays: false);
 
             if (!_noPhysics && result.Mesh != null)
@@ -71,15 +77,13 @@ namespace OpenFarCry.Level.Entities
                 }
             }
 
-            var lods = _lodService.FindSiblingLodPaths(result.VirtualPath);
-            if (lods.Count > 0)
-            {
-                _lodService.ConfigureLodGroup(output.Root, hasSkeleton: false, importScale: 0.01f,
-                    siblingLodPaths: lods,
-                    materialService: CgfRuntimeImporter.MaterialService,
-                    textureScopeId: levelScopeId);
-                DisableBrushBackfaceCulling(output.Root);
-            }
+            FcLevelRuntimeLodGroupBuilder.Apply(
+                output.Root,
+                output.MeshRenderer,
+                lodResults,
+                levelScopeId);
+
+            DisableBrushBackfaceCulling(output.Root);
         }
 
         static void DisableBrushBackfaceCulling(GameObject root)
@@ -107,42 +111,39 @@ namespace OpenFarCry.Level.Entities
             var resourceSvc = FcLevelResourceService.Current;
             string scopeId = resourceSvc != null ? resourceSvc.LevelScopeId : string.Empty;
 
-            var result = await CgfRuntimeImporter.ImportAsync(
-                new CgfRuntimeImportRequest(
-                    virtualPath: _virtualPath,
-                    importSkeleton: false,
-                    importAnimations: false,
-                    importScale: 0.01f,
-                    useRuntimeMemoryCache: true),
+            var result = await FcLevelGeometryImportHelper.ImportStaticGeometryWithTexturePreloadAsync(
+                _virtualPath,
                 scopeId,
                 ct);
 
             if (ct.IsCancellationRequested) return;
 
-            if (!result.Success)
+            if (result == null || !result.Success)
             {
-                Debug.LogWarning($"[FcBrush] '{_virtualPath}': {result.ErrorMessage}", this);
+                Debug.LogWarning($"[FcBrush] '{_virtualPath}': {result?.ErrorMessage ?? "Import failed."}", this);
                 return;
             }
 
-            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                result.ParsedFile,
-                result.Mesh,
-                result.BuildResult?.SubmeshMaterialIds,
+            var lodResults = await FcLevelGeometryImportHelper.ImportSiblingLodsWithTexturePreloadAsync(
+                _virtualPath,
                 scopeId,
-                ct);
+                lodService: null,
+                ct: ct);
 
             if (ct.IsCancellationRequested) return;
             await UniTask.SwitchToMainThread(ct);
 
             if (this == null || ct.IsCancellationRequested) return;
-            ApplyLoadResult(result, scopeId);
+            ApplyLoadResult(result, lodResults, scopeId, releaseImportResultsOnDestroy: true);
         }
 
         void OnDestroy()
         {
-            if (_importResult != null)
-                FcLevelResourceService.Current?.ReleaseImportResult(_importResult);
+            FcLevelGeometryResultOwnershipHelper.ReleaseOwnedResults(
+                _releaseImportResultsOnDestroy,
+                FcLevelResourceService.Current,
+                _importResult,
+                _lodResults);
 
             if (_physicsColliderMesh != null)
             {

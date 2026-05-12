@@ -82,6 +82,12 @@ namespace OpenFarCry.Level.Services
         public int AnimationCafHits;
         public int AnimationCafMisses;
 
+        // Runtime level geometry preload stats.
+        public int GeometryUniqueBaseRequestCount;
+        public int GeometryUniqueLodRequestCount;
+        public int GeometryCachedModelReuseCount;
+        public int GeometryUniqueTexturePreloadCount;
+
         public void RecordPhase(string phase, double ms)
         {
             lock (_sync)
@@ -176,6 +182,21 @@ namespace OpenFarCry.Level.Services
             }
         }
 
+        public void RecordGeometryPreloadStats(
+            int uniqueBaseRequestCount,
+            int uniqueLodRequestCount,
+            int cachedModelReuseCount,
+            int uniqueTexturePreloadCount)
+        {
+            lock (_sync)
+            {
+                GeometryUniqueBaseRequestCount = Mathf.Max(0, uniqueBaseRequestCount);
+                GeometryUniqueLodRequestCount = Mathf.Max(0, uniqueLodRequestCount);
+                GeometryCachedModelReuseCount = Mathf.Max(0, cachedModelReuseCount);
+                GeometryUniqueTexturePreloadCount = Mathf.Max(0, uniqueTexturePreloadCount);
+            }
+        }
+
         public void RecordEntityCompleted(
             string entityClass,
             string virtualPath,
@@ -260,6 +281,17 @@ namespace OpenFarCry.Level.Services
                     $"registered={BrushesRegistered} ok={BrushesLoaded} fail={BrushesFailed} " +
                     $"total={BrushTotalMs:F0}ms avg={avg:F1}ms " +
                     $"min={fastest:F1}ms max={BrushSlowestMs:F1}ms");
+
+                if (GeometryUniqueBaseRequestCount > 0 ||
+                    GeometryUniqueLodRequestCount > 0 ||
+                    GeometryUniqueTexturePreloadCount > 0 ||
+                    GeometryCachedModelReuseCount > 0)
+                {
+                    Debug.Log(
+                        $"[FcLevel] Geometry preload — {LevelName}: " +
+                        $"unique_base={GeometryUniqueBaseRequestCount} unique_lod={GeometryUniqueLodRequestCount} " +
+                        $"cached_model_reuse={GeometryCachedModelReuseCount} unique_textures={GeometryUniqueTexturePreloadCount}");
+                }
             }
         }
 

@@ -11,6 +11,7 @@ namespace OpenFarCry.Importer.Cgf
         public readonly CgfFile ParsedFile;
         public readonly BuildResult BuildResult;
         public readonly bool UsedRuntimeMemoryCache;
+        public readonly bool UsedModelRuntimeMemoryCache;
         public readonly string ParsedCacheKey;
         public readonly string ModelCacheKey;
         public readonly IReadOnlyList<string> Warnings;
@@ -24,6 +25,7 @@ namespace OpenFarCry.Importer.Cgf
             CgfFile parsedFile,
             BuildResult buildResult,
             bool usedRuntimeMemoryCache,
+            bool usedModelRuntimeMemoryCache,
             string parsedCacheKey,
             string modelCacheKey,
             IReadOnlyList<string> warnings)
@@ -34,6 +36,7 @@ namespace OpenFarCry.Importer.Cgf
             ParsedFile = parsedFile;
             BuildResult = buildResult;
             UsedRuntimeMemoryCache = usedRuntimeMemoryCache;
+            UsedModelRuntimeMemoryCache = usedModelRuntimeMemoryCache;
             ParsedCacheKey = parsedCacheKey;
             ModelCacheKey = modelCacheKey;
             Warnings = warnings;
@@ -48,6 +51,7 @@ namespace OpenFarCry.Importer.Cgf
                 parsedFile: null,
                 buildResult: null,
                 usedRuntimeMemoryCache: false,
+                usedModelRuntimeMemoryCache: false,
                 parsedCacheKey: null,
                 modelCacheKey: null,
                 warnings: null);
@@ -60,6 +64,7 @@ namespace OpenFarCry.Importer.Cgf
             bool usedRuntimeMemoryCache,
             string parsedCacheKey,
             string modelCacheKey,
+            bool usedModelRuntimeMemoryCache = false,
             IReadOnlyList<string> warnings = null)
         {
             return new CgfRuntimeImportResult(
@@ -69,6 +74,7 @@ namespace OpenFarCry.Importer.Cgf
                 parsedFile: parsedFile,
                 buildResult: buildResult,
                 usedRuntimeMemoryCache: usedRuntimeMemoryCache,
+                usedModelRuntimeMemoryCache: usedModelRuntimeMemoryCache,
                 parsedCacheKey: parsedCacheKey,
                 modelCacheKey: modelCacheKey,
                 warnings: warnings);

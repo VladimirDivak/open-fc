@@ -170,6 +170,34 @@ namespace OpenFarCry.Importer.Cgf
                 await UniTask.WhenAll(tasks);
         }
 
+        public async UniTask PreloadTexturesForResultsAsync(
+            IReadOnlyList<CgfRuntimeImportResult> results,
+            string textureScopeId = null,
+            CancellationToken cancellationToken = default)
+        {
+            var preloadRequests = CollectUniqueTexturePreloadRequests(results);
+            if (preloadRequests.Count == 0)
+                return;
+
+            var tasks = new List<UniTask>(preloadRequests.Count);
+            for (int i = 0; i < preloadRequests.Count; i++)
+            {
+                var request = preloadRequests[i];
+                tasks.Add(PreloadTexturePathAsync(
+                    request.VirtualPath,
+                    textureScopeId,
+                    request.LinearColorSpace,
+                    cancellationToken));
+            }
+
+            await UniTask.WhenAll(tasks);
+        }
+
+        public int CountUniqueTexturePreloadRequests(IReadOnlyList<CgfRuntimeImportResult> results)
+        {
+            return CollectUniqueTexturePreloadRequests(results).Count;
+        }
+
         static CgfMaterialChunk ResolveMultiMaterialChild(
             CgfFile parsedFile,
             CgfMaterialChunk rootMat,
@@ -443,6 +471,120 @@ namespace OpenFarCry.Importer.Cgf
                     return;
             }
         }
+
+        async UniTask PreloadTexturePathAsync(
+            string virtualPath,
+            string textureScopeId,
+            bool linearColorSpace,
+            CancellationToken cancellationToken)
+        {
+            await _textureRuntimeService.TryLoadWithInfoAsync(
+                virtualPath,
+                textureScopeId,
+                cancellationToken,
+                new TextureRuntimeImportOptions(
+                    useRuntimeMemoryCache: true,
+                    markNonReadable: true,
+                    linearColorSpace: linearColorSpace,
+                    generateMipmaps: true));
+        }
+
+        internal List<TexturePreloadRequest> CollectUniqueTexturePreloadRequests(
+            IReadOnlyList<CgfRuntimeImportResult> results)
+        {
+            var requests = new List<TexturePreloadRequest>();
+            if (results == null || results.Count == 0)
+                return requests;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < results.Count; i++)
+            {
+                var result = results[i];
+                if (result == null || !result.Success || result.ParsedFile == null)
+                    continue;
+
+                int subCount = result.Mesh != null ? result.Mesh.subMeshCount : 0;
+                if (subCount <= 0)
+                    continue;
+
+                var chunks = CollectMaterialChunks(
+                    result.ParsedFile,
+                    subCount,
+                    result.BuildResult?.SubmeshMaterialIds);
+
+                for (int c = 0; c < chunks.Count; c++)
+                {
+                    var chunk = chunks[c];
+                    if (chunk == null)
+                        continue;
+
+                    TryCollectTextureCandidate(
+                        result.ParsedFile,
+                        CgfTexturePathResolver.NormalizeTextureName(chunk.DiffuseTextureName),
+                        linearColorSpace: false,
+                        seen,
+                        requests);
+                    TryCollectTextureCandidate(
+                        result.ParsedFile,
+                        CgfTexturePathResolver.NormalizeTextureName(chunk.NormalTextureName),
+                        linearColorSpace: true,
+                        seen,
+                        requests);
+                    TryCollectTextureCandidate(
+                        result.ParsedFile,
+                        CgfTexturePathResolver.NormalizeTextureName(chunk.SpecularTextureName),
+                        linearColorSpace: true,
+                        seen,
+                        requests);
+                    TryCollectTextureCandidate(
+                        result.ParsedFile,
+                        CgfTexturePathResolver.NormalizeTextureName(chunk.OpacityTextureName),
+                        linearColorSpace: true,
+                        seen,
+                        requests);
+                }
+            }
+
+            return requests;
+        }
+
+        static void TryCollectTextureCandidate(
+            CgfFile parsedFile,
+            string normalizedTextureName,
+            bool linearColorSpace,
+            HashSet<string> seen,
+            List<TexturePreloadRequest> requests)
+        {
+            if (parsedFile == null || string.IsNullOrEmpty(normalizedTextureName))
+                return;
+
+            foreach (var candidate in CgfTexturePathResolver.BuildTexturePathCandidates(parsedFile, normalizedTextureName))
+            {
+                if (!TextureImportService.IsSupportedVirtualPath(candidate))
+                    continue;
+
+                string normalizedPath = ImportAssetPaths.NormalizeVirtualPath(candidate);
+                string key = $"{normalizedPath}|lin:{(linearColorSpace ? 1 : 0)}";
+                if (seen.Add(key))
+                    requests.Add(new TexturePreloadRequest(normalizedPath, linearColorSpace));
+
+                // Keep the first supported candidate semantics from PreloadTextureNameAsync.
+                return;
+            }
+        }
+
+        internal readonly struct TexturePreloadRequest
+        {
+            public readonly string VirtualPath;
+            public readonly bool LinearColorSpace;
+
+            public TexturePreloadRequest(string virtualPath, bool linearColorSpace)
+            {
+                VirtualPath = virtualPath;
+                LinearColorSpace = linearColorSpace;
+            }
+        }
+
         static Material[] BuildFallbackArray(int count, string reason)
         {
             var mats = new Material[count];

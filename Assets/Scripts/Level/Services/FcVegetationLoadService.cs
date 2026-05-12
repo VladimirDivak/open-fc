@@ -14,6 +14,8 @@ namespace OpenFarCry.Level.Services
 
         [SerializeField] int _maxConcurrent = 8;
         [SerializeField] int _loadsPerFrame  = 8;
+        [SerializeField] int _preloadedBuildsPerFrame = 512;
+        [SerializeField] int _distanceSortMaxPending = 5000;
 
         readonly HashSet<FcVegetationInstance> _pendingSet = new HashSet<FcVegetationInstance>();
         readonly List<FcVegetationInstance>    _pending    = new List<FcVegetationInstance>();
@@ -48,21 +50,57 @@ namespace OpenFarCry.Level.Services
 
         void Update()
         {
-            if (_pending.Count == 0 || _activeCount >= _maxConcurrent)
+            if (_pending.Count == 0)
                 return;
 
-            SortByDistance();
+            if (_pending.Count <= Mathf.Max(0, _distanceSortMaxPending))
+                SortByDistance();
 
-            int started = 0;
-            for (int i = 0; i < _pending.Count && started < _loadsPerFrame && _activeCount < _maxConcurrent; )
+            int preloadedBuilt = 0;
+            int importedStarted = 0;
+            int importBudgetPerFrame = Mathf.Max(0, _loadsPerFrame);
+            int preloadedBudgetPerFrame = Mathf.Max(0, _preloadedBuildsPerFrame);
+
+            for (int i = 0; i < _pending.Count; )
             {
+                if (preloadedBuilt >= preloadedBudgetPerFrame &&
+                    (importedStarted >= importBudgetPerFrame || _activeCount >= _maxConcurrent))
+                {
+                    break;
+                }
+
                 var veg = _pending[i];
+                if (veg == null)
+                {
+                    _pending.RemoveAt(i);
+                    _pendingSet.Remove(veg);
+                    continue;
+                }
+
+                if (TryGetPreloadedHandle(veg, out var preloadedHandle))
+                {
+                    _pending.RemoveAt(i);
+                    _pendingSet.Remove(veg);
+                    veg.ApplyLoadResult(
+                        preloadedHandle.BaseResult,
+                        preloadedHandle.LodResults,
+                        LevelScopeId,
+                        releaseImportResultsOnDestroy: false);
+                    preloadedBuilt++;
+                    continue;
+                }
+
+                if (importedStarted >= importBudgetPerFrame || _activeCount >= _maxConcurrent)
+                {
+                    i++;
+                    continue;
+                }
+
                 _pending.RemoveAt(i);
                 _pendingSet.Remove(veg);
-                if (veg == null) continue;
                 _activeCount++;
                 LoadOneAsync(veg).Forget();
-                started++;
+                importedStarted++;
             }
         }
 
@@ -84,40 +122,46 @@ namespace OpenFarCry.Level.Services
             var ct = veg.GetCancellationTokenOnDestroy();
             try
             {
-                var result = await CgfRuntimeImporter.ImportAsync(
-                    new CgfRuntimeImportRequest(
-                        virtualPath: veg.VirtualPath,
-                        importSkeleton: false,
-                        importAnimations: false,
-                        importScale: 0.01f,
-                        useRuntimeMemoryCache: true),
-                    LevelScopeId,
-                    ct);
-
-                if (ct.IsCancellationRequested) return;
-
-                if (!result.Success)
+                if (TryGetPreloadedHandle(veg, out var preloadedHandle))
                 {
-                    Debug.LogWarning($"[FcVegetationLoadService] '{veg.VirtualPath}': {result.ErrorMessage}", veg);
+                    await UniTask.SwitchToMainThread(ct);
+                    if (veg == null || ct.IsCancellationRequested) return;
+                    veg.ApplyLoadResult(
+                        preloadedHandle.BaseResult,
+                        preloadedHandle.LodResults,
+                        LevelScopeId,
+                        releaseImportResultsOnDestroy: false);
                     return;
                 }
 
-                await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                    result.ParsedFile,
-                    result.Mesh,
-                    result.BuildResult?.SubmeshMaterialIds,
+                var result = await FcLevelGeometryImportHelper.ImportStaticGeometryWithTexturePreloadAsync(
+                    veg.VirtualPath,
                     LevelScopeId,
                     ct);
 
                 if (ct.IsCancellationRequested) return;
 
-                var lodResults = await LoadLodResultsAsync(veg.VirtualPath, ct);
+                if (result == null || !result.Success)
+                {
+                    Debug.LogWarning(
+                        $"[FcVegetationLoadService] '{veg.VirtualPath}': {result?.ErrorMessage ?? "Import failed."}",
+                        veg);
+                    return;
+                }
+
+                if (ct.IsCancellationRequested) return;
+
+                var lodResults = await FcLevelGeometryImportHelper.ImportSiblingLodsWithTexturePreloadAsync(
+                    veg.VirtualPath,
+                    LevelScopeId,
+                    _lodService,
+                    ct);
 
                 if (ct.IsCancellationRequested) return;
                 await UniTask.SwitchToMainThread(ct);
 
                 if (veg == null || ct.IsCancellationRequested) return;
-                veg.ApplyLoadResult(result, lodResults, LevelScopeId);
+                veg.ApplyLoadResult(result, lodResults, LevelScopeId, releaseImportResultsOnDestroy: true);
             }
             catch (OperationCanceledException) { }
             finally
@@ -126,39 +170,17 @@ namespace OpenFarCry.Level.Services
             }
         }
 
-        async UniTask<List<CgfRuntimeImportResult>> LoadLodResultsAsync(
-            string baseVirtualPath, System.Threading.CancellationToken ct)
+        static bool TryGetPreloadedHandle(FcVegetationInstance veg, out FcLevelGeometryAssetHandle handle)
         {
-            var lodPaths = _lodService.FindSiblingLodPaths(baseVirtualPath);
-            var lodResults = new List<CgfRuntimeImportResult>(lodPaths.Count);
+            handle = null;
+            if (veg == null || string.IsNullOrWhiteSpace(veg.VirtualPath))
+                return false;
 
-            for (int i = 0; i < lodPaths.Count; i++)
-            {
-                if (ct.IsCancellationRequested) break;
+            var levelLoadService = FcLevelLoadService.Current;
+            if (levelLoadService == null)
+                return false;
 
-                var lodResult = await CgfRuntimeImporter.ImportAsync(
-                    new CgfRuntimeImportRequest(
-                        virtualPath: lodPaths[i],
-                        importSkeleton: false,
-                        importAnimations: false,
-                        importScale: 0.01f,
-                        useRuntimeMemoryCache: true),
-                    LevelScopeId,
-                    ct);
-
-                if (!lodResult.Success) continue;
-
-                await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                    lodResult.ParsedFile,
-                    lodResult.Mesh,
-                    lodResult.BuildResult?.SubmeshMaterialIds,
-                    LevelScopeId,
-                    ct);
-
-                lodResults.Add(lodResult);
-            }
-
-            return lodResults;
+            return levelLoadService.TryGetVegetationPreloadedHandle(veg.VirtualPath, out handle);
         }
     }
 }
