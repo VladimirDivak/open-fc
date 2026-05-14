@@ -371,6 +371,19 @@ namespace OpenFarCry.Level.Editor
             terrainGo.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             var terrain = terrainGo.GetComponent<Terrain>();
+            const string terrainMaterialPath = "Assets/Materials/FarCry Terrain Material.mat";
+            var terrainMaterial = AssetDatabase.LoadAssetAtPath<Material>(terrainMaterialPath);
+            if (terrainMaterial != null)
+            {
+                terrain.materialTemplate = terrainMaterial;
+                terrain.materialType = Terrain.MaterialType.Custom;
+            }
+            else
+            {
+                Debug.LogWarning(
+                    $"[FcLevelSceneBuilder] Terrain material not found at '{terrainMaterialPath}'. " +
+                    "Terrain will use the default Unity material.");
+            }
 
             // Attach runtime texture loader — populates TerrainLayer.diffuseTexture at Play Mode start.
             var texService = terrainGo.AddComponent<FcTerrainTextureService>();
@@ -380,6 +393,8 @@ namespace OpenFarCry.Level.Editor
                 TileSizeX = worldSize,
                 TileSizeY = worldSize,
             };
+            texService.CoverCtcPath = $"{basePath}/terrain/cover.ctc";
+            texService.CoverSectorCount = Mathf.Max(1, Mathf.RoundToInt((resolution * heightmapUnitSize) / 64f));
             texService.DetailLayers = new FcTerrainTextureService.LayerDef[surfaceLayers.Count];
             for (int i = 0; i < surfaceLayers.Count; i++)
             {
