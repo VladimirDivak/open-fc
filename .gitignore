@@ -51,6 +51,7 @@ Desktop.ini
 .agents/
 .codex/
 .claude/settings.local.json
+.memsearch/
 
 # OpenFarCry generated import cache from game PAK assets
 Assets/FCData/
