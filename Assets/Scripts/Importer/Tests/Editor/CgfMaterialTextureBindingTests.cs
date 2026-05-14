@@ -25,14 +25,17 @@ namespace OpenFarCry.Importer.Tests.Editor
                 normalTextureName: null,
                 specularTextureName: null,
                 opacityTextureName: null,
+                glossTextureName: null,
                 baseMapVirtualPath: "objects/props/crate_d.tga",
                 normalMapVirtualPath: null,
                 specularMapVirtualPath: null,
                 opacityMapVirtualPath: null,
+                glossMapVirtualPath: null,
                 baseMap: tex,
                 normalMap: null,
                 specularMap: null,
-                opacityMap: null);
+                opacityMap: null,
+                glossMap: null);
 
             var mat = CgfMaterialBuilder.Build(chunk, resolved);
             Assert.That(mat, Is.Not.Null);
@@ -61,14 +64,17 @@ namespace OpenFarCry.Importer.Tests.Editor
                 normalTextureName: "objects/props/crate_ddn.dds",
                 specularTextureName: null,
                 opacityTextureName: null,
+                glossTextureName: null,
                 baseMapVirtualPath: null,
                 normalMapVirtualPath: "objects/props/crate_ddn.dds",
                 specularMapVirtualPath: null,
                 opacityMapVirtualPath: null,
+                glossMapVirtualPath: null,
                 baseMap: null,
                 normalMap: normalTex,
                 specularMap: null,
-                opacityMap: null);
+                opacityMap: null,
+                glossMap: null);
 
             var mat = CgfMaterialBuilder.Build(chunk, resolved);
             Assert.That(mat, Is.Not.Null);
@@ -120,14 +126,17 @@ namespace OpenFarCry.Importer.Tests.Editor
                 normalTextureName: null,
                 specularTextureName: null,
                 opacityTextureName: null,
+                glossTextureName: null,
                 baseMapVirtualPath: "objects/indoor/boxes/barrel/barrel_oil_02.dds",
                 normalMapVirtualPath: null,
                 specularMapVirtualPath: null,
                 opacityMapVirtualPath: null,
+                glossMapVirtualPath: null,
                 baseMap: tex,
                 normalMap: null,
                 specularMap: null,
-                opacityMap: null);
+                opacityMap: null,
+                glossMap: null);
 
             CgfMaterialBuilder.ApplyResolvedTextures(mat, resolved);
 
@@ -301,6 +310,254 @@ namespace OpenFarCry.Importer.Tests.Editor
             Assert.That(mats[0].name, Does.Not.Contain("fallback"));
 
             service.ClearCache();
+            Object.DestroyImmediate(mesh);
+        }
+
+        [Test]
+        public void MaterialBuilder_UsesAlphaBlendState_ForTemplAlphaBlend()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "glass_alpha",
+                ShaderName = "templalphablend",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255),
+                Opacity = 0.25f
+            };
+
+            var mat = CgfMaterialBuilder.Build(chunk);
+
+            Assert.That(mat.GetFloat("_Surface"), Is.EqualTo(1f));
+            Assert.That(mat.GetFloat("_ZWrite"), Is.EqualTo(0f));
+            Assert.That(mat.GetFloat("_SrcBlend"), Is.EqualTo((float)UnityEngine.Rendering.BlendMode.SrcAlpha));
+            Assert.That(mat.GetFloat("_DstBlend"), Is.EqualTo((float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha));
+            Assert.That(mat.GetColor("_BaseColor").a, Is.EqualTo(0.25f).Within(0.001f));
+
+            Object.DestroyImmediate(mat);
+        }
+
+        [Test]
+        public void MaterialBuilder_UsesGlassPreset_ForTemplGlassCm()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "glass_cm",
+                ShaderName = "templglasscm",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255),
+                Opacity = 0.4f
+            };
+
+            var mat = CgfMaterialBuilder.Build(chunk);
+
+            Assert.That(mat.GetFloat("_Surface"), Is.EqualTo(1f));
+            Assert.That(mat.GetFloat("_ZWrite"), Is.EqualTo(0f));
+            Assert.That(mat.GetFloat("_Smoothness"), Is.EqualTo(1f));
+            Assert.That(mat.GetColor("_BaseColor").a, Is.EqualTo(0.4f).Within(0.001f));
+
+            if (mat.HasProperty("_EnvironmentReflections"))
+                Assert.That(mat.GetFloat("_EnvironmentReflections"), Is.EqualTo(1f));
+            if (mat.HasProperty("_SpecularHighlights"))
+                Assert.That(mat.GetFloat("_SpecularHighlights"), Is.EqualTo(1f));
+
+            Object.DestroyImmediate(mat);
+        }
+
+        [Test]
+        public void MaterialBuilder_UsesGlassFallbackAlpha_WhenOpacityMissing()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "glass_cm_fallback_alpha",
+                ShaderName = "templglasscm",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 0),
+                Opacity = 0f
+            };
+
+            var mat = CgfMaterialBuilder.Build(chunk);
+            Assert.That(mat.GetColor("_BaseColor").a, Is.EqualTo(0.35f).Within(0.001f));
+            Object.DestroyImmediate(mat);
+        }
+
+        [Test]
+        public void MaterialBuilder_UsesModulateState_ForDecalModulate()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "decal_mod",
+                ShaderName = "templdecalmodulate",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255)
+            };
+
+            var mat = CgfMaterialBuilder.Build(chunk);
+
+            Assert.That(mat.GetFloat("_SrcBlend"), Is.EqualTo((float)UnityEngine.Rendering.BlendMode.DstColor));
+            Assert.That(mat.GetFloat("_DstBlend"), Is.EqualTo((float)UnityEngine.Rendering.BlendMode.Zero));
+
+            Object.DestroyImmediate(mat);
+        }
+
+        [Test]
+        public void MaterialBuilder_EnablesSpecularWorkflow_ForBumpSpecShaders()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "spec_mat",
+                ShaderName = "templbumpspec_hp",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255),
+                SpecularColor = new Color32(200, 200, 200, 255),
+                SpecLevel = 0.8f,
+                SpecShininess = 0.49f
+            };
+
+            var mat = CgfMaterialBuilder.Build(chunk);
+            if (mat.HasProperty("_WorkflowMode"))
+                Assert.That(mat.GetFloat("_WorkflowMode"), Is.EqualTo(0f));
+            Assert.That(mat.GetFloat("_Smoothness"), Is.EqualTo(Mathf.Sqrt(0.49f)).Within(0.001f));
+
+            Object.DestroyImmediate(mat);
+        }
+
+        [Test]
+        public void MaterialBuilder_UsesCutoutAndTwoSided_ForPlantShadersWithoutAlphaTest()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "plant_mat",
+                ShaderName = "templplants1",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255),
+                AlphaTest = 0f
+            };
+
+            var mat = CgfMaterialBuilder.Build(chunk);
+
+            Assert.That(mat.GetFloat("_AlphaClip"), Is.EqualTo(1f));
+            Assert.That(mat.GetFloat("_Cutoff"), Is.EqualTo(0.3f).Within(0.001f));
+            Assert.That(mat.GetFloat("_Cull"), Is.EqualTo((float)UnityEngine.Rendering.CullMode.Off));
+
+            Object.DestroyImmediate(mat);
+        }
+
+        [Test]
+        public void MaterialBuilder_UsesEmissionMask_ForGlowShader_WhenBaseMapReadable()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                Name = "glow_decal",
+                ShaderName = "templdecalglowselfillum",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255)
+            };
+
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false, linear: false);
+            tex.SetPixels32(new[]
+            {
+                new Color32(10, 20, 30, 0),
+                new Color32(10, 20, 30, 64),
+                new Color32(10, 20, 30, 128),
+                new Color32(10, 20, 30, 255),
+            });
+            tex.Apply(updateMipmaps: false, makeNoLongerReadable: false);
+
+            var resolved = new CgfResolvedMaterialTextures(
+                diffuseTextureName: "objects/test/glow_d.dds",
+                normalTextureName: null,
+                specularTextureName: null,
+                opacityTextureName: null,
+                glossTextureName: null,
+                baseMapVirtualPath: "objects/test/glow_d.dds",
+                normalMapVirtualPath: null,
+                specularMapVirtualPath: null,
+                opacityMapVirtualPath: null,
+                glossMapVirtualPath: null,
+                baseMap: tex,
+                normalMap: null,
+                specularMap: null,
+                opacityMap: null,
+                glossMap: null);
+
+            var mat = CgfMaterialBuilder.Build(chunk, resolved);
+            var emission = mat.GetTexture("_EmissionMap");
+            Assert.That(emission, Is.Not.Null);
+            Assert.That(emission, Is.Not.SameAs(tex));
+
+            Object.DestroyImmediate(mat);
+            Object.DestroyImmediate(tex);
+            if (emission != null)
+                Object.DestroyImmediate(emission);
+        }
+
+        [Test]
+        public void GameObjectBuilder_AddsUvScrollRuntime_ForTextureShiftShader()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var chunk = new CgfMaterialChunk
+            {
+                ChunkID = 10,
+                TableIndex = 0,
+                Name = "water_shift",
+                ShaderName = "templtextureshiftt05",
+                MtlType = CgfMtlType.Standard,
+                DiffuseColor = new Color32(255, 255, 255, 255)
+            };
+
+            var parsed = new CgfFile
+            {
+                SourceVirtualPath = "objects/water/test.cgf",
+                SelectedMeshChunkID = 1
+            };
+            parsed.NodeChunks.Add(new CgfNodeChunk { ObjectID = 1, MatID = 10 });
+            parsed.MaterialChunks.Add(chunk);
+            parsed.MaterialByChunkID[10] = chunk;
+
+            var mesh = new Mesh { subMeshCount = 1 };
+            var buildResult = new BuildResult
+            {
+                Mesh = mesh,
+                HasSkeleton = false,
+                SubmeshMaterialIds = new[] { 0 },
+                NodeLocalOffset = Vector3.zero
+            };
+
+            var builder = new CgfGameObjectBuilder();
+            var output = builder.Build(new CgfGameObjectBuilder.BuildRequest(
+                result: buildResult,
+                parsedFile: parsed,
+                rigDefinition: null,
+                name: "uvscroll_test",
+                materialService: new CgfMaterialImportService(new CgfMaterialRuntimeCache()),
+                textureScopeId: null));
+
+            Assert.That(output.Root.GetComponent<CgfUvScrollRuntime>(), Is.Not.Null);
+
+            Object.DestroyImmediate(output.Root);
             Object.DestroyImmediate(mesh);
         }
     }

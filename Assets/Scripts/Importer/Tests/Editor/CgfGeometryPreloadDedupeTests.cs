@@ -59,7 +59,8 @@ namespace OpenFarCry.Importer.Tests.Editor
                 DiffuseTextureName = "terrain/rock/rock_d.dds",
                 NormalTextureName = "terrain/rock/rock_ddn.dds",
                 SpecularTextureName = "terrain/rock/rock_ddn.dds",
-                OpacityTextureName = "terrain/rock/rock_ddn.dds"
+                OpacityTextureName = "terrain/rock/rock_ddn.dds",
+                GlossTextureName = "terrain/rock/rock_gloss.dds"
             };
             var chunkB = new CgfMaterialChunk
             {
@@ -98,17 +99,98 @@ namespace OpenFarCry.Importer.Tests.Editor
 
             var requests = service.CollectUniqueTexturePreloadRequests(new[] { resultA, resultB });
 
-            Assert.That(requests.Count, Is.EqualTo(3));
+            Assert.That(requests.Count, Is.EqualTo(4));
             Assert.That(requests[0].VirtualPath, Is.EqualTo("terrain/rock/rock_d.dds"));
             Assert.That(requests[0].LinearColorSpace, Is.False);
+            Assert.That(requests[0].MarkNonReadable, Is.True);
             Assert.That(requests[1].VirtualPath, Is.EqualTo("terrain/rock/rock_ddn.dds"));
             Assert.That(requests[1].LinearColorSpace, Is.True);
-            Assert.That(requests[2].VirtualPath, Is.EqualTo("terrain/rock/rock_ddn.dds"));
-            Assert.That(requests[2].LinearColorSpace, Is.False);
+            Assert.That(requests[1].MarkNonReadable, Is.True);
+            Assert.That(ContainsRequest(requests, "terrain/rock/rock_ddn.dds", linearColorSpace: false, markNonReadable: true), Is.True);
+            Assert.That(ContainsRequest(requests, "terrain/rock/rock_gloss.dds", linearColorSpace: true, markNonReadable: true), Is.True);
 
             service.ClearCache();
             Object.DestroyImmediate(meshA);
             Object.DestroyImmediate(meshB);
+        }
+
+        [Test]
+        public void CollectUniqueTexturePreloadRequests_SeparatesReadableAndNonReadableVariants()
+        {
+            var service = new CgfMaterialImportService(cache: new CgfMaterialRuntimeCache());
+            var mesh = new Mesh { subMeshCount = 2 };
+
+            var glowChunk = new CgfMaterialChunk
+            {
+                ChunkID = 10,
+                Name = "mat_glow",
+                ShaderName = "templdecalglowselfillum",
+                MtlType = CgfMtlType.Standard,
+                DiffuseTextureName = "terrain/rock/rock_d.dds"
+            };
+            var normalChunk = new CgfMaterialChunk
+            {
+                ChunkID = 20,
+                Name = "mat_regular",
+                ShaderName = "templmodelcommon",
+                MtlType = CgfMtlType.Standard,
+                DiffuseTextureName = "terrain/rock/rock_d.dds"
+            };
+
+            var parsed = new CgfFile
+            {
+                SourceVirtualPath = "objects/props/rock_mix.cgf",
+                SelectedMeshChunkID = 1
+            };
+            parsed.NodeChunks.Add(new CgfNodeChunk { ObjectID = 1, MatID = 100 });
+            var root = new CgfMaterialChunk
+            {
+                ChunkID = 100,
+                TableIndex = 0,
+                Name = "Material #100",
+                MtlType = CgfMtlType.Multi,
+                ChildCount = 2
+            };
+            parsed.MaterialChunks.Add(root);
+            parsed.MaterialChunks.Add(glowChunk);
+            parsed.MaterialChunks.Add(normalChunk);
+            parsed.MaterialByChunkID[100] = root;
+            parsed.MaterialByChunkID[10] = glowChunk;
+            parsed.MaterialByChunkID[20] = normalChunk;
+            parsed.MaterialChildrenByParentChunkID[100] = new List<CgfMaterialChunk> { glowChunk, normalChunk };
+
+            var result = CgfRuntimeImportResult.Completed(
+                virtualPath: parsed.SourceVirtualPath,
+                parsedFile: parsed,
+                buildResult: new BuildResult { Mesh = mesh, SubmeshMaterialIds = new[] { 0, 1 } },
+                usedRuntimeMemoryCache: false,
+                parsedCacheKey: "mix|parsed",
+                modelCacheKey: "mix|model");
+
+            var requests = service.CollectUniqueTexturePreloadRequests(new[] { result });
+
+            Assert.That(ContainsRequest(requests, "terrain/rock/rock_d.dds", linearColorSpace: false, markNonReadable: false), Is.True);
+            Assert.That(ContainsRequest(requests, "terrain/rock/rock_d.dds", linearColorSpace: false, markNonReadable: true), Is.True);
+
+            service.ClearCache();
+            Object.DestroyImmediate(mesh);
+        }
+
+        static bool ContainsRequest(
+            List<CgfMaterialImportService.TexturePreloadRequest> requests,
+            string virtualPath,
+            bool linearColorSpace,
+            bool markNonReadable)
+        {
+            for (int i = 0; i < requests.Count; i++)
+            {
+                if (requests[i].VirtualPath == virtualPath &&
+                    requests[i].LinearColorSpace == linearColorSpace &&
+                    requests[i].MarkNonReadable == markNonReadable)
+                    return true;
+            }
+
+            return false;
         }
 
         static CgfFile BuildParsedWithSingleMaterial(

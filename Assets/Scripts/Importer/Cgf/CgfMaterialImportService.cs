@@ -13,41 +13,50 @@ namespace OpenFarCry.Importer.Cgf
         public readonly string NormalTextureName;
         public readonly string SpecularTextureName;
         public readonly string OpacityTextureName;
+        public readonly string GlossTextureName;
         public readonly string BaseMapVirtualPath;
         public readonly string NormalMapVirtualPath;
         public readonly string SpecularMapVirtualPath;
         public readonly string OpacityMapVirtualPath;
+        public readonly string GlossMapVirtualPath;
         public readonly Texture2D BaseMap;
         public readonly Texture2D NormalMap;
         public readonly Texture2D SpecularMap;
         public readonly Texture2D OpacityMap;
+        public readonly Texture2D GlossMap;
 
         public CgfResolvedMaterialTextures(
             string diffuseTextureName,
             string normalTextureName,
             string specularTextureName,
             string opacityTextureName,
+            string glossTextureName,
             string baseMapVirtualPath,
             string normalMapVirtualPath,
             string specularMapVirtualPath,
             string opacityMapVirtualPath,
+            string glossMapVirtualPath,
             Texture2D baseMap,
             Texture2D normalMap,
             Texture2D specularMap,
-            Texture2D opacityMap)
+            Texture2D opacityMap,
+            Texture2D glossMap)
         {
             DiffuseTextureName = diffuseTextureName;
             NormalTextureName = normalTextureName;
             SpecularTextureName = specularTextureName;
             OpacityTextureName = opacityTextureName;
+            GlossTextureName = glossTextureName;
             BaseMapVirtualPath = baseMapVirtualPath;
             NormalMapVirtualPath = normalMapVirtualPath;
             SpecularMapVirtualPath = specularMapVirtualPath;
             OpacityMapVirtualPath = opacityMapVirtualPath;
+            GlossMapVirtualPath = glossMapVirtualPath;
             BaseMap = baseMap;
             NormalMap = normalMap;
             SpecularMap = specularMap;
             OpacityMap = opacityMap;
+            GlossMap = glossMap;
         }
     }
 
@@ -129,6 +138,29 @@ namespace OpenFarCry.Importer.Cgf
         public void ClearCache() => _cache.Clear();
         public int CachedCount => _cache.Count;
 
+        public bool RequiresUvScroll(
+            CgfFile parsedFile,
+            Mesh mesh,
+            int[] submeshMaterialIds = null)
+        {
+            int subCount = mesh != null ? mesh.subMeshCount : 0;
+            if (parsedFile == null || subCount <= 0)
+                return false;
+
+            var chunks = CollectMaterialChunks(parsedFile, subCount, submeshMaterialIds);
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var chunk = chunks[i];
+                if (chunk == null)
+                    continue;
+
+                if (CgfMaterialClassifier.Analyze(chunk).UsesUvScroll)
+                    return true;
+            }
+
+            return false;
+        }
+
         public async UniTask PreloadTexturesAsync(
             CgfFile parsedFile,
             Mesh mesh,
@@ -146,25 +178,30 @@ namespace OpenFarCry.Importer.Cgf
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            var tasks = new System.Collections.Generic.List<UniTask>(chunks.Count * 4);
+            var tasks = new System.Collections.Generic.List<UniTask>(chunks.Count * 5);
             for (int i = 0; i < chunks.Count; i++)
             {
                 var chunk = chunks[i];
                 if (chunk == null)
                     continue;
+                var classification = CgfMaterialClassifier.Analyze(chunk);
+                bool keepBaseReadable = classification.UsesGlowFromDiffuseAlpha;
 
                 tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.DiffuseTextureName),
-                    textureScopeId, linearColorSpace: false, cancellationToken));
+                    textureScopeId, linearColorSpace: false, markNonReadable: !keepBaseReadable, cancellationToken));
                 tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.NormalTextureName),
-                    textureScopeId, linearColorSpace: true, cancellationToken));
+                    textureScopeId, linearColorSpace: true, markNonReadable: true, cancellationToken));
                 tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.SpecularTextureName),
-                    textureScopeId, linearColorSpace: true, cancellationToken));
+                    textureScopeId, linearColorSpace: true, markNonReadable: true, cancellationToken));
                 tasks.Add(PreloadTextureNameAsync(parsedFile,
                     CgfTexturePathResolver.NormalizeTextureName(chunk.OpacityTextureName),
-                    textureScopeId, linearColorSpace: true, cancellationToken));
+                    textureScopeId, linearColorSpace: true, markNonReadable: true, cancellationToken));
+                tasks.Add(PreloadTextureNameAsync(parsedFile,
+                    CgfTexturePathResolver.NormalizeTextureName(chunk.GlossTextureName),
+                    textureScopeId, linearColorSpace: true, markNonReadable: true, cancellationToken));
             }
 
             if (tasks.Count > 0)
@@ -188,6 +225,7 @@ namespace OpenFarCry.Importer.Cgf
                     request.VirtualPath,
                     textureScopeId,
                     request.LinearColorSpace,
+                    request.MarkNonReadable,
                     cancellationToken));
             }
 
@@ -365,9 +403,12 @@ namespace OpenFarCry.Importer.Cgf
             string opacityKey = string.IsNullOrEmpty(textures.OpacityMapVirtualPath)
                 ? (string.IsNullOrEmpty(textures.OpacityTextureName) ? "-" : textures.OpacityTextureName)
                 : textures.OpacityMapVirtualPath;
+            string glossKey = string.IsNullOrEmpty(textures.GlossMapVirtualPath)
+                ? (string.IsNullOrEmpty(textures.GlossTextureName) ? "-" : textures.GlossTextureName)
+                : textures.GlossMapVirtualPath;
             var dc = chunk.DiffuseColor;
             string colorKey = $"{dc.r:X2}{dc.g:X2}{dc.b:X2}";
-            string key = $"name:{name}|sh:{shader}|type:{(int)chunk.MtlType}|flags:{(int)chunk.Flags}|alpha:{chunk.AlphaTest:F3}|color:{colorKey}|d:{diffuseKey}|n:{normalKey}|s:{specularKey}|o:{opacityKey}";
+            string key = $"name:{name}|sh:{shader}|type:{(int)chunk.MtlType}|flags:{(int)chunk.Flags}|alpha:{chunk.AlphaTest:F3}|color:{colorKey}|d:{diffuseKey}|n:{normalKey}|s:{specularKey}|o:{opacityKey}|g:{glossKey}";
             var material = _cache.GetOrCreate(key, textureScopeId, () => CgfMaterialBuilder.Build(chunk, textures));
             CgfMaterialBuilder.ApplyResolvedTextures(material, textures);
             return material;
@@ -375,36 +416,70 @@ namespace OpenFarCry.Importer.Cgf
 
         CgfResolvedMaterialTextures ResolveTextures(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)
         {
+            var classification = CgfMaterialClassifier.Analyze(chunk);
+            bool keepBaseReadable = classification.UsesGlowFromDiffuseAlpha;
+
             string diffuseName = CgfTexturePathResolver.NormalizeTextureName(chunk?.DiffuseTextureName);
             string normalName = CgfTexturePathResolver.NormalizeTextureName(chunk?.NormalTextureName);
             string specularName = CgfTexturePathResolver.NormalizeTextureName(chunk?.SpecularTextureName);
             string opacityName = CgfTexturePathResolver.NormalizeTextureName(chunk?.OpacityTextureName);
+            string glossName = CgfTexturePathResolver.NormalizeTextureName(chunk?.GlossTextureName);
 
-            var baseMap = ResolveAndLoadTexture(parsedFile, diffuseName, textureScopeId, linearColorSpace: false);
-            var normalMap = ResolveAndLoadTexture(parsedFile, normalName, textureScopeId, linearColorSpace: true);
-            var specularMap = ResolveAndLoadTexture(parsedFile, specularName, textureScopeId, linearColorSpace: true);
-            var opacityMap = ResolveAndLoadTexture(parsedFile, opacityName, textureScopeId, linearColorSpace: true);
+            var baseMap = ResolveAndLoadTexture(
+                parsedFile,
+                diffuseName,
+                textureScopeId,
+                linearColorSpace: false,
+                markNonReadable: !keepBaseReadable);
+            var normalMap = ResolveAndLoadTexture(
+                parsedFile,
+                normalName,
+                textureScopeId,
+                linearColorSpace: true,
+                markNonReadable: true);
+            var specularMap = ResolveAndLoadTexture(
+                parsedFile,
+                specularName,
+                textureScopeId,
+                linearColorSpace: true,
+                markNonReadable: true);
+            var opacityMap = ResolveAndLoadTexture(
+                parsedFile,
+                opacityName,
+                textureScopeId,
+                linearColorSpace: true,
+                markNonReadable: true);
+            var glossMap = ResolveAndLoadTexture(
+                parsedFile,
+                glossName,
+                textureScopeId,
+                linearColorSpace: true,
+                markNonReadable: true);
 
             return new CgfResolvedMaterialTextures(
                 diffuseTextureName: diffuseName,
                 normalTextureName: normalName,
                 specularTextureName: specularName,
                 opacityTextureName: opacityName,
+                glossTextureName: glossName,
                 baseMapVirtualPath: baseMap.VirtualPath,
                 normalMapVirtualPath: normalMap.VirtualPath,
                 specularMapVirtualPath: specularMap.VirtualPath,
                 opacityMapVirtualPath: opacityMap.VirtualPath,
+                glossMapVirtualPath: glossMap.VirtualPath,
                 baseMap: baseMap.Texture,
                 normalMap: normalMap.Texture,
                 specularMap: specularMap.Texture,
-                opacityMap: opacityMap.Texture);
+                opacityMap: opacityMap.Texture,
+                glossMap: glossMap.Texture);
         }
 
         (string VirtualPath, Texture2D Texture, bool HasAlphaChannel, bool HasTransparentPixels) ResolveAndLoadTexture(
             CgfFile parsedFile,
             string normalizedTextureName,
             string textureScopeId,
-            bool linearColorSpace)
+            bool linearColorSpace,
+            bool markNonReadable)
         {
             if (string.IsNullOrEmpty(normalizedTextureName))
                 return (null, null, false, false);
@@ -424,7 +499,7 @@ namespace OpenFarCry.Importer.Cgf
                         textureScopeId,
                         new TextureRuntimeImportOptions(
                             useRuntimeMemoryCache: true,
-                            markNonReadable: true,
+                            markNonReadable: markNonReadable,
                             linearColorSpace: linearColorSpace,
                             generateMipmaps: true)))
                 {
@@ -447,6 +522,7 @@ namespace OpenFarCry.Importer.Cgf
             string normalizedTextureName,
             string textureScopeId,
             bool linearColorSpace,
+            bool markNonReadable,
             CancellationToken cancellationToken)
         {
             if (string.IsNullOrEmpty(normalizedTextureName))
@@ -464,7 +540,7 @@ namespace OpenFarCry.Importer.Cgf
                     cancellationToken,
                     new TextureRuntimeImportOptions(
                         useRuntimeMemoryCache: true,
-                        markNonReadable: true,
+                        markNonReadable: markNonReadable,
                         linearColorSpace: linearColorSpace,
                         generateMipmaps: true));
 
@@ -477,6 +553,7 @@ namespace OpenFarCry.Importer.Cgf
             string virtualPath,
             string textureScopeId,
             bool linearColorSpace,
+            bool markNonReadable,
             CancellationToken cancellationToken)
         {
             await _textureRuntimeService.TryLoadWithInfoAsync(
@@ -485,7 +562,7 @@ namespace OpenFarCry.Importer.Cgf
                 cancellationToken,
                 new TextureRuntimeImportOptions(
                     useRuntimeMemoryCache: true,
-                    markNonReadable: true,
+                    markNonReadable: markNonReadable,
                     linearColorSpace: linearColorSpace,
                     generateMipmaps: true));
         }
@@ -523,24 +600,35 @@ namespace OpenFarCry.Importer.Cgf
                         result.ParsedFile,
                         CgfTexturePathResolver.NormalizeTextureName(chunk.DiffuseTextureName),
                         linearColorSpace: false,
+                        markNonReadable: !CgfMaterialClassifier.Analyze(chunk).UsesGlowFromDiffuseAlpha,
                         seen,
                         requests);
                     TryCollectTextureCandidate(
                         result.ParsedFile,
                         CgfTexturePathResolver.NormalizeTextureName(chunk.NormalTextureName),
                         linearColorSpace: true,
+                        markNonReadable: true,
                         seen,
                         requests);
                     TryCollectTextureCandidate(
                         result.ParsedFile,
                         CgfTexturePathResolver.NormalizeTextureName(chunk.SpecularTextureName),
                         linearColorSpace: true,
+                        markNonReadable: true,
                         seen,
                         requests);
                     TryCollectTextureCandidate(
                         result.ParsedFile,
                         CgfTexturePathResolver.NormalizeTextureName(chunk.OpacityTextureName),
                         linearColorSpace: true,
+                        markNonReadable: true,
+                        seen,
+                        requests);
+                    TryCollectTextureCandidate(
+                        result.ParsedFile,
+                        CgfTexturePathResolver.NormalizeTextureName(chunk.GlossTextureName),
+                        linearColorSpace: true,
+                        markNonReadable: true,
                         seen,
                         requests);
                 }
@@ -553,6 +641,7 @@ namespace OpenFarCry.Importer.Cgf
             CgfFile parsedFile,
             string normalizedTextureName,
             bool linearColorSpace,
+            bool markNonReadable,
             HashSet<string> seen,
             List<TexturePreloadRequest> requests)
         {
@@ -565,9 +654,9 @@ namespace OpenFarCry.Importer.Cgf
                     continue;
 
                 string normalizedPath = ImportAssetPaths.NormalizeVirtualPath(candidate);
-                string key = $"{normalizedPath}|lin:{(linearColorSpace ? 1 : 0)}";
+                string key = $"{normalizedPath}|lin:{(linearColorSpace ? 1 : 0)}|nr:{(markNonReadable ? 1 : 0)}";
                 if (seen.Add(key))
-                    requests.Add(new TexturePreloadRequest(normalizedPath, linearColorSpace));
+                    requests.Add(new TexturePreloadRequest(normalizedPath, linearColorSpace, markNonReadable));
 
                 // Keep the first supported candidate semantics from PreloadTextureNameAsync.
                 return;
@@ -578,11 +667,13 @@ namespace OpenFarCry.Importer.Cgf
         {
             public readonly string VirtualPath;
             public readonly bool LinearColorSpace;
+            public readonly bool MarkNonReadable;
 
-            public TexturePreloadRequest(string virtualPath, bool linearColorSpace)
+            public TexturePreloadRequest(string virtualPath, bool linearColorSpace, bool markNonReadable)
             {
                 VirtualPath = virtualPath;
                 LinearColorSpace = linearColorSpace;
+                MarkNonReadable = markNonReadable;
             }
         }
 

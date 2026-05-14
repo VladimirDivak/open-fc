@@ -81,6 +81,15 @@ namespace OpenFarCry.Importer.Cgf
                         request.TextureScopeId)
                     : new Material[result.Mesh.subMeshCount];
 
+                if (request.MaterialService != null &&
+                    request.MaterialService.RequiresUvScroll(
+                        request.ParsedFile,
+                        result.Mesh,
+                        result.SubmeshMaterialIds))
+                {
+                    go.AddComponent<CgfUvScrollRuntime>();
+                }
+
                 return new BuildOutput(go, boneTransforms, smr, null);
             }
 
@@ -93,6 +102,15 @@ namespace OpenFarCry.Importer.Cgf
                     result.SubmeshMaterialIds,
                     request.TextureScopeId)
                 : new Material[result.Mesh.subMeshCount];
+
+            if (request.MaterialService != null &&
+                request.MaterialService.RequiresUvScroll(
+                    request.ParsedFile,
+                    result.Mesh,
+                    result.SubmeshMaterialIds))
+            {
+                go.AddComponent<CgfUvScrollRuntime>();
+            }
             return new BuildOutput(go, null, null, mr);
         }
     }
