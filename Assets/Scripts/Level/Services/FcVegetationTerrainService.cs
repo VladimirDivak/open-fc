@@ -7,15 +7,35 @@ using UnityEngine.Rendering;
 
 namespace OpenFarCry.Level.Services
 {
+    public enum FcVegetationCollisionMode
+    {
+        None = 0,
+        PrimitiveCapsule = 1,
+        PrimitiveBox = 2,
+        LowLodMesh = 3,
+        PhysicsProxy = 4,
+    }
+
     // Loads vegetation CGF at runtime from VFS and renders via GPU instancing with LOD.
     // No geometry is written to disk — all data stays in memory.
     public sealed class FcVegetationTerrainService : MonoBehaviour
     {
+        public const int DefaultCollisionLodIndex = -1;
+        public const float DefaultCollisionDistance = 30f;
+        public const int DefaultMaxActiveCollidersPerType = 64;
+
         [Serializable]
         public struct VegetationTypeEntry
         {
             public int TypeIndex;
             public string VirtualPath;
+            public FcVegetationCollisionMode CollisionMode;
+            public int CollisionLodIndex;
+            public float CollisionDistance;
+            public int MaxActiveCollidersPerType;
+            public float PrimitiveHeight;
+            public float PrimitiveRadius;
+            public Vector3 PrimitiveSize;
         }
 
         [Serializable]

@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using OpenFarCry.Importer;
+using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
@@ -214,6 +216,8 @@ namespace OpenFarCry.Level.Editor
             foreach (var inst in instances)
                 usedTypes.Add(inst.Type);
 
+            var lodService = new CgfLodImportService();
+
             // Collect VirtualPath per used vegetation type — no import, no disk write.
             var typeEntries = new List<FcVegetationTerrainService.VegetationTypeEntry>();
             foreach (var kv in typeByIndex)
@@ -222,10 +226,27 @@ namespace OpenFarCry.Level.Editor
                 var typeDef = kv.Value;
                 if (string.IsNullOrEmpty(typeDef.FileName)) continue;
 
+                string normalizedPath = NormalizeVegetationPath(typeDef.FileName);
+                bool hasSiblingLods = false;
+                if (!string.IsNullOrEmpty(normalizedPath))
+                    hasSiblingLods = lodService.FindSiblingLodPaths(normalizedPath).Count > 0;
+
+                var collisionMode = ResolveDefaultCollisionMode(typeDef.FileName, hasSiblingLods);
                 typeEntries.Add(new FcVegetationTerrainService.VegetationTypeEntry
                 {
-                    TypeIndex   = kv.Key,
+                    TypeIndex = kv.Key,
                     VirtualPath = typeDef.FileName,
+                    CollisionMode = collisionMode,
+                    CollisionLodIndex = FcVegetationTerrainService.DefaultCollisionLodIndex,
+                    CollisionDistance = collisionMode == FcVegetationCollisionMode.None
+                        ? 0f
+                        : FcVegetationTerrainService.DefaultCollisionDistance,
+                    MaxActiveCollidersPerType = collisionMode == FcVegetationCollisionMode.None
+                        ? 0
+                        : FcVegetationTerrainService.DefaultMaxActiveCollidersPerType,
+                    PrimitiveHeight = 0f,
+                    PrimitiveRadius = 0f,
+                    PrimitiveSize = Vector3.zero,
                 });
             }
 
@@ -252,8 +273,15 @@ namespace OpenFarCry.Level.Editor
             for (int i = 0; i < typeEntries.Count; i++)
             {
                 var elem = typesProp.GetArrayElementAtIndex(i);
-                elem.FindPropertyRelative("TypeIndex").intValue    = typeEntries[i].TypeIndex;
+                elem.FindPropertyRelative("TypeIndex").intValue = typeEntries[i].TypeIndex;
                 elem.FindPropertyRelative("VirtualPath").stringValue = typeEntries[i].VirtualPath;
+                elem.FindPropertyRelative("CollisionMode").intValue = (int)typeEntries[i].CollisionMode;
+                elem.FindPropertyRelative("CollisionLodIndex").intValue = typeEntries[i].CollisionLodIndex;
+                elem.FindPropertyRelative("CollisionDistance").floatValue = typeEntries[i].CollisionDistance;
+                elem.FindPropertyRelative("MaxActiveCollidersPerType").intValue = typeEntries[i].MaxActiveCollidersPerType;
+                elem.FindPropertyRelative("PrimitiveHeight").floatValue = typeEntries[i].PrimitiveHeight;
+                elem.FindPropertyRelative("PrimitiveRadius").floatValue = typeEntries[i].PrimitiveRadius;
+                elem.FindPropertyRelative("PrimitiveSize").vector3Value = typeEntries[i].PrimitiveSize;
             }
 
             var instProp = so.FindProperty("_instances");
@@ -270,6 +298,43 @@ namespace OpenFarCry.Level.Editor
             so.ApplyModifiedPropertiesWithoutUndo();
 
             return instances.Length;
+        }
+
+        static string NormalizeVegetationPath(string virtualPath)
+        {
+            if (string.IsNullOrWhiteSpace(virtualPath))
+                return null;
+
+            try
+            {
+                return ImportAssetPaths.NormalizeVirtualPath(virtualPath);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static FcVegetationCollisionMode ResolveDefaultCollisionMode(string virtualPath, bool hasSiblingLods)
+        {
+            if (!hasSiblingLods || string.IsNullOrWhiteSpace(virtualPath))
+                return FcVegetationCollisionMode.None;
+
+            string path = virtualPath.Replace('\\', '/').ToLowerInvariant();
+            if (path.Contains("tree") ||
+                path.Contains("trunk") ||
+                path.Contains("palm") ||
+                path.Contains("cedar") ||
+                path.Contains("pine") ||
+                path.Contains("oak") ||
+                path.Contains("cypress") ||
+                path.Contains("stump") ||
+                path.Contains("log"))
+            {
+                return FcVegetationCollisionMode.LowLodMesh;
+            }
+
+            return FcVegetationCollisionMode.None;
         }
 
         static Terrain BuildUnityTerrain(
