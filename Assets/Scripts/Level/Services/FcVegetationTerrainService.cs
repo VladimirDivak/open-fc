@@ -98,22 +98,15 @@ namespace OpenFarCry.Level.Services
             public int AssignedInstanceIndex = -1;
         }
 
-        struct ColliderCandidate
+        sealed class ColliderCandidateDistanceComparer : IComparer<FcVegetationColliderSelector.Candidate>
         {
-            public int InstanceIndex;
-            public int ProtoIndex;
-            public float SqrDistance;
-        }
-
-        sealed class ColliderCandidateDistanceComparer : IComparer<ColliderCandidate>
-        {
-            public int Compare(ColliderCandidate x, ColliderCandidate y)
+            public int Compare(FcVegetationColliderSelector.Candidate x, FcVegetationColliderSelector.Candidate y)
             {
                 return x.SqrDistance.CompareTo(y.SqrDistance);
             }
         }
 
-        static readonly IComparer<ColliderCandidate> s_colliderCandidateDistanceComparer =
+        static readonly IComparer<FcVegetationColliderSelector.Candidate> s_colliderCandidateDistanceComparer =
             new ColliderCandidateDistanceComparer();
         static readonly int PropBaseMap = Shader.PropertyToID("_BaseMap");
         static readonly int PropAlphaClip = Shader.PropertyToID("_AlphaClip");
@@ -124,6 +117,7 @@ namespace OpenFarCry.Level.Services
         RuntimeType[] _runtimeTypes;
         RuntimeCell[] _runtimeCells;
         RuntimeCollisionPolicy[] _runtimeCollisionPolicies;
+        int[] _perTypeBudgets;
         float _maxCullDistanceSqr;
 
         // Flat per-instance data (computed once at Start).
@@ -151,8 +145,7 @@ namespace OpenFarCry.Level.Services
         readonly Dictionary<int, int> _activeHostByInstance = new Dictionary<int, int>();
         readonly List<int> _activeInstancesScratch = new List<int>(256);
         readonly HashSet<int> _wantedInstancesScratch = new HashSet<int>();
-        readonly Dictionary<int, int> _wantedPerTypeCountsScratch = new Dictionary<int, int>();
-        readonly List<ColliderCandidate> _candidateScratch = new List<ColliderCandidate>(1024);
+        readonly List<FcVegetationColliderSelector.Candidate> _candidateScratch = new List<FcVegetationColliderSelector.Candidate>(1024);
         readonly List<Mesh> _ownedVisualMeshes = new List<Mesh>(128);
         readonly List<Mesh> _ownedColliderMeshes = new List<Mesh>(128);
         Transform _colliderRoot;
@@ -309,49 +302,17 @@ namespace OpenFarCry.Level.Services
             if (_positions == null || _positions.Length == 0)
                 return;
 
-            float size = Mathf.Max(8f, _cellSize);
-            var buckets = new Dictionary<Vector2Int, List<int>>();
-            for (int i = 0; i < _positions.Length; i++)
+            var partitioned = FcVegetationSpatialPartitioner.Partition(_positions, _cellSize);
+            _runtimeCells = new RuntimeCell[partitioned.Length];
+            for (int i = 0; i < partitioned.Length; i++)
             {
-                var pos = _positions[i];
-                int cx = Mathf.FloorToInt(pos.x / size);
-                int cz = Mathf.FloorToInt(pos.z / size);
-                var key = new Vector2Int(cx, cz);
-                if (!buckets.TryGetValue(key, out var list))
+                _runtimeCells[i] = new RuntimeCell
                 {
-                    list = new List<int>(64);
-                    buckets[key] = list;
-                }
-                list.Add(i);
-            }
-
-            var cells = new RuntimeCell[buckets.Count];
-            int cellIndex = 0;
-            foreach (var kv in buckets)
-            {
-                var list = kv.Value;
-                if (list == null || list.Count == 0)
-                    continue;
-
-                var firstPos = _positions[list[0]];
-                var bounds = new Bounds(firstPos, Vector3.zero);
-                for (int i = 1; i < list.Count; i++)
-                    bounds.Encapsulate(_positions[list[i]]);
-
-                // Expand thin bounds slightly to keep frustum checks stable.
-                bounds.Expand(new Vector3(1f, 4f, 1f));
-
-                cells[cellIndex++] = new RuntimeCell
-                {
-                    Bounds = bounds,
-                    InstanceIndices = list.ToArray(),
+                    Bounds = partitioned[i].Bounds,
+                    InstanceIndices = partitioned[i].InstanceIndices,
                 };
             }
 
-            if (cellIndex != cells.Length)
-                Array.Resize(ref cells, cellIndex);
-
-            _runtimeCells = cells;
             _totalCellCount = _runtimeCells.Length;
             _visibleCellScratch.Clear();
 
@@ -389,7 +350,9 @@ namespace OpenFarCry.Level.Services
                     _runtimeTypes[i].PhysicsProxyMesh != null;
                 int maxLodIndex = hasRuntimeLods ? _runtimeTypes[i].LodMeshes.Length - 1 : -1;
 
-                var mode = entry.CollisionMode;
+                var mode = entry.CollisionMode != FcVegetationCollisionMode.None
+                    ? entry.CollisionMode
+                    : FcVegetationDefaultPolicy.ResolveCollisionMode(entry.VirtualPath, hasRuntimeLods);
                 if (mode == FcVegetationCollisionMode.LowLodMesh && maxLodIndex < 0)
                     mode = FcVegetationCollisionMode.None;
                 if (mode == FcVegetationCollisionMode.PhysicsProxy && !hasPhysicsProxy)
@@ -438,6 +401,10 @@ namespace OpenFarCry.Level.Services
                         $"[FcVegetationTerrainService] Collision policy type={entry.TypeIndex} path='{entry.VirtualPath}' mode={mode} lod={collisionLodIndex} dist={collisionDistance:F1} budget={maxActiveCollidersPerType}");
                 }
             }
+
+            _perTypeBudgets = new int[_runtimeCollisionPolicies.Length];
+            for (int i = 0; i < _runtimeCollisionPolicies.Length; i++)
+                _perTypeBudgets[i] = _runtimeCollisionPolicies[i].MaxActiveCollidersPerType;
         }
 
         void InitializeScratchBuffers()
@@ -598,39 +565,15 @@ namespace OpenFarCry.Level.Services
             if (range <= 0f || sqr > range * range)
                 return;
 
-            _candidateScratch.Add(new ColliderCandidate
-            {
-                InstanceIndex = instanceIndex,
-                ProtoIndex = pi,
-                SqrDistance = sqr,
-            });
+            _candidateScratch.Add(new FcVegetationColliderSelector.Candidate(instanceIndex, pi, sqr));
         }
 
         void BuildWantedColliderSet()
         {
+            var wanted = FcVegetationColliderSelector.Select(_candidateScratch, _perTypeBudgets, _maxActiveCollidersGlobal);
             _wantedInstancesScratch.Clear();
-            _wantedPerTypeCountsScratch.Clear();
-
-            int maxGlobal = Mathf.Max(1, _maxActiveCollidersGlobal);
-            for (int i = 0; i < _candidateScratch.Count; i++)
-            {
-                if (_wantedInstancesScratch.Count >= maxGlobal)
-                    break;
-
-                var candidate = _candidateScratch[i];
-                int pi = candidate.ProtoIndex;
-                if (pi < 0 || pi >= _runtimeCollisionPolicies.Length)
-                    continue;
-
-                var policy = _runtimeCollisionPolicies[pi];
-                int perTypeBudget = Mathf.Max(1, policy.MaxActiveCollidersPerType);
-                _wantedPerTypeCountsScratch.TryGetValue(pi, out int currentCount);
-                if (currentCount >= perTypeBudget)
-                    continue;
-
-                if (_wantedInstancesScratch.Add(candidate.InstanceIndex))
-                    _wantedPerTypeCountsScratch[pi] = currentCount + 1;
-            }
+            foreach (int id in wanted)
+                _wantedInstancesScratch.Add(id);
         }
 
         void ApplyWantedColliderSet()
@@ -938,7 +881,6 @@ namespace OpenFarCry.Level.Services
             _activeHostByInstance.Clear();
             _activeInstancesScratch.Clear();
             _wantedInstancesScratch.Clear();
-            _wantedPerTypeCountsScratch.Clear();
             _candidateScratch.Clear();
 
             if (destroyRoot && _colliderRoot != null)
@@ -1416,56 +1358,17 @@ namespace OpenFarCry.Level.Services
                    n.Contains("proxy");
         }
 
-        static float BuildCullDistanceSqr(float lod0Distance, float cullDistance)
-        {
-            float lod0 = Mathf.Max(1f, lod0Distance);
-            float cull = Mathf.Max(lod0 + 0.01f, cullDistance);
-            return cull * cull;
-        }
+        static float BuildCullDistanceSqr(float lod0Distance, float cullDistance) =>
+            FcVegetationLodMath.BuildCullDistanceSqr(lod0Distance, cullDistance);
 
-        static float[] BuildLodThresholdsSqr(int lodCount, float lod0Distance, float cullDistance)
-        {
-            var thresholds = new float[Mathf.Max(1, lodCount)];
-            if (lodCount <= 1)
-            {
-                thresholds[0] = BuildCullDistanceSqr(lod0Distance, cullDistance);
-                return thresholds;
-            }
-
-            float lod0 = Mathf.Max(1f, lod0Distance);
-            float cull = Mathf.Max(lod0 + 0.01f, cullDistance);
-            float ratio = Mathf.Pow(cull / lod0, 1f / (lodCount - 1));
-
-            for (int i = 0; i < lodCount; i++)
-            {
-                float dist = i == lodCount - 1
-                    ? cull
-                    : lod0 * Mathf.Pow(ratio, i);
-                thresholds[i] = dist * dist;
-            }
-
-            return thresholds;
-        }
+        static float[] BuildLodThresholdsSqr(int lodCount, float lod0Distance, float cullDistance) =>
+            FcVegetationLodMath.BuildLodThresholdsSqr(lodCount, lod0Distance, cullDistance);
 
         static int FindLod(in RuntimeType rt, float sqrDist)
         {
             if (!rt.IsValid || rt.LodMeshes == null || rt.LodMeshes.Length == 0)
                 return -1;
-            if (sqrDist >= rt.CullDistanceSqr)
-                return -1;
-
-            var thresholds = rt.LodThresholdSqr;
-            if (thresholds == null || thresholds.Length == 0)
-                return 0;
-
-            int max = Mathf.Min(rt.LodMeshes.Length, thresholds.Length);
-            for (int li = 0; li < max; li++)
-            {
-                if (sqrDist < thresholds[li])
-                    return li;
-            }
-
-            return rt.LodMeshes.Length - 1;
+            return FcVegetationLodMath.FindLod(rt.LodThresholdSqr, rt.CullDistanceSqr, rt.LodMeshes.Length, sqrDist);
         }
 
         string ResolveLevelScopeId()
