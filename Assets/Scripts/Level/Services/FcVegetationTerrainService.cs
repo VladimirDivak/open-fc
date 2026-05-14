@@ -51,6 +51,13 @@ namespace OpenFarCry.Level.Services
         [SerializeField] VegetationInstanceData[] _instances;
         [SerializeField, Min(1f)] float _lod0Distance = 50f;
         [SerializeField, Min(2f)] float _cullDistance = 300f;
+        [SerializeField, Min(8f)] float _cellSize = 64f;
+        [SerializeField] bool _logResolvedCollisionPolicies;
+        [SerializeField, Min(1)] int _maxActiveCollidersGlobal = 256;
+        [SerializeField, Min(0.05f)] float _colliderUpdateInterval = 0.2f;
+        [SerializeField, Min(0f)] float _lowLodMeshMinHeightForCollider = 4f;
+        [SerializeField] bool _debugDrawCells;
+        [SerializeField] bool _debugDrawColliderHosts;
 
         const int BatchSize = 1023;
 
@@ -58,12 +65,66 @@ namespace OpenFarCry.Level.Services
         {
             public Mesh[] LodMeshes;          // [0]=base LOD, [1..n]=coarser LODs
             public Material[][] LodMaterials; // parallel to LodMeshes
+            public Bounds BaseBounds;
+            public Mesh PhysicsProxyMesh;
             public float[] LodThresholdSqr;   // transition distances per lod entry
             public float CullDistanceSqr;
             public bool IsValid;
         }
 
+        struct RuntimeCell
+        {
+            public Bounds Bounds;
+            public int[] InstanceIndices;
+        }
+
+        struct RuntimeCollisionPolicy
+        {
+            public FcVegetationCollisionMode Mode;
+            public int CollisionLodIndex;
+            public float CollisionDistance;
+            public int MaxActiveCollidersPerType;
+            public float PrimitiveHeight;
+            public float PrimitiveRadius;
+            public Vector3 PrimitiveSize;
+        }
+
+        sealed class ColliderHost
+        {
+            public GameObject GameObject;
+            public CapsuleCollider CapsuleCollider;
+            public BoxCollider BoxCollider;
+            public MeshCollider MeshCollider;
+            public int AssignedInstanceIndex = -1;
+        }
+
+        struct ColliderCandidate
+        {
+            public int InstanceIndex;
+            public int ProtoIndex;
+            public float SqrDistance;
+        }
+
+        sealed class ColliderCandidateDistanceComparer : IComparer<ColliderCandidate>
+        {
+            public int Compare(ColliderCandidate x, ColliderCandidate y)
+            {
+                return x.SqrDistance.CompareTo(y.SqrDistance);
+            }
+        }
+
+        static readonly IComparer<ColliderCandidate> s_colliderCandidateDistanceComparer =
+            new ColliderCandidateDistanceComparer();
+        static readonly int PropBaseMap = Shader.PropertyToID("_BaseMap");
+        static readonly int PropAlphaClip = Shader.PropertyToID("_AlphaClip");
+        static readonly int PropCutoff = Shader.PropertyToID("_Cutoff");
+        static readonly int PropSurface = Shader.PropertyToID("_Surface");
+        static readonly int PropZWrite = Shader.PropertyToID("_ZWrite");
+
         RuntimeType[] _runtimeTypes;
+        RuntimeCell[] _runtimeCells;
+        RuntimeCollisionPolicy[] _runtimeCollisionPolicies;
+        float _maxCullDistanceSqr;
 
         // Flat per-instance data (computed once at Start).
         Vector3[] _positions;   // world positions
@@ -74,25 +135,82 @@ namespace OpenFarCry.Level.Services
         // Pre-allocated to avoid GC each frame.
         List<Matrix4x4>[][] _scratch; // [proto][lod]
         readonly Matrix4x4[] _batchBuf = new Matrix4x4[BatchSize];
+        readonly List<int> _visibleCellScratch = new List<int>(256);
+        Plane[] _frustumPlanes;
 
         string _levelScopeId;
         bool _warnedMissingLevelPreloadService;
         bool _warnedFallbackImport;
 
+        // Runtime counters for profiling/debug UI.
+        int _totalCellCount;
+        int _visibleCellCount;
+        int _visibleInstanceCount;
+
+        readonly List<ColliderHost> _colliderHosts = new List<ColliderHost>(128);
+        readonly Dictionary<int, int> _activeHostByInstance = new Dictionary<int, int>();
+        readonly List<int> _activeInstancesScratch = new List<int>(256);
+        readonly HashSet<int> _wantedInstancesScratch = new HashSet<int>();
+        readonly Dictionary<int, int> _wantedPerTypeCountsScratch = new Dictionary<int, int>();
+        readonly List<ColliderCandidate> _candidateScratch = new List<ColliderCandidate>(1024);
+        readonly List<Mesh> _ownedVisualMeshes = new List<Mesh>(128);
+        readonly List<Mesh> _ownedColliderMeshes = new List<Mesh>(128);
+        Transform _colliderRoot;
+        float _nextColliderUpdateTime;
+
+        public int TotalCellCount => _totalCellCount;
+        public int VisibleCellCount => _visibleCellCount;
+        public int VisibleInstanceCount => _visibleInstanceCount;
+        public int ActiveColliderCount => _activeHostByInstance.Count;
+
         void Start()
         {
+            _levelScopeId = ResolveLevelScopeId();
             if (_vegetationTypes == null || _vegetationTypes.Length == 0)
                 return;
             if (_instances == null || _instances.Length == 0)
                 return;
 
-            var terrain = GetComponent<Terrain>();
-            float sizeX = terrain != null ? terrain.terrainData.size.x : 1f;
-            float sizeZ = terrain != null ? terrain.terrainData.size.z : 1f;
-            var origin = terrain != null ? terrain.transform.position : Vector3.zero;
-            _levelScopeId = ResolveLevelScopeId();
-
             var lodService = new CgfLodImportService();
+            var protoByType = BuildRuntimeTypes(lodService);
+            if (_runtimeTypes == null || _runtimeTypes.Length == 0 || protoByType.Count == 0)
+                return;
+
+            ResolveCollisionPolicies();
+            BuildRuntimeInstances(protoByType);
+            BuildSpatialCells();
+            InitializeScratchBuffers();
+        }
+
+        void OnEnable()
+        {
+            _nextColliderUpdateTime = 0f;
+        }
+
+        void Update()
+        {
+            if (_positions == null || _runtimeTypes == null || _scratch == null)
+                return;
+
+            var cam = Camera.main;
+            if (cam == null)
+                return;
+            var camPos = cam.transform.position;
+
+            ClearScratchBuckets();
+            CollectVisibleCells(cam, camPos);
+            CollectVisibleInstances(camPos);
+            SubmitInstancedDraws();
+
+            if (Time.unscaledTime >= _nextColliderUpdateTime)
+            {
+                UpdateNearbyColliders(camPos);
+                _nextColliderUpdateTime = Time.unscaledTime + Mathf.Max(0.05f, _colliderUpdateInterval);
+            }
+        }
+
+        Dictionary<int, int> BuildRuntimeTypes(CgfLodImportService lodService)
+        {
             var protoByType = new Dictionary<int, int>();
             _runtimeTypes = new RuntimeType[_vegetationTypes.Length];
 
@@ -136,7 +254,17 @@ namespace OpenFarCry.Level.Services
                 }
             }
 
-            // Build flat position/scale/proto arrays.
+            return protoByType;
+        }
+
+        void BuildRuntimeInstances(Dictionary<int, int> protoByType)
+        {
+            var terrain = GetComponent<Terrain>();
+            var terrainData = terrain != null ? terrain.terrainData : null;
+            float sizeX = terrainData != null ? terrainData.size.x : 1f;
+            float sizeZ = terrainData != null ? terrainData.size.z : 1f;
+            var origin = terrain != null ? terrain.transform.position : Vector3.zero;
+
             int total = _instances.Length;
             _positions = new Vector3[total];
             _scales = new float[total];
@@ -163,15 +291,157 @@ namespace OpenFarCry.Level.Services
                 count++;
             }
 
-            // Trim to actual count (some instances may have been skipped due to unknown/invalid type).
             if (count < total)
             {
                 Array.Resize(ref _positions, count);
                 Array.Resize(ref _scales, count);
                 Array.Resize(ref _protoIndices, count);
             }
+        }
 
-            // Pre-allocate scratch lists.
+        void BuildSpatialCells()
+        {
+            _runtimeCells = Array.Empty<RuntimeCell>();
+            _totalCellCount = 0;
+            _visibleCellCount = 0;
+            _visibleInstanceCount = 0;
+
+            if (_positions == null || _positions.Length == 0)
+                return;
+
+            float size = Mathf.Max(8f, _cellSize);
+            var buckets = new Dictionary<Vector2Int, List<int>>();
+            for (int i = 0; i < _positions.Length; i++)
+            {
+                var pos = _positions[i];
+                int cx = Mathf.FloorToInt(pos.x / size);
+                int cz = Mathf.FloorToInt(pos.z / size);
+                var key = new Vector2Int(cx, cz);
+                if (!buckets.TryGetValue(key, out var list))
+                {
+                    list = new List<int>(64);
+                    buckets[key] = list;
+                }
+                list.Add(i);
+            }
+
+            var cells = new RuntimeCell[buckets.Count];
+            int cellIndex = 0;
+            foreach (var kv in buckets)
+            {
+                var list = kv.Value;
+                if (list == null || list.Count == 0)
+                    continue;
+
+                var firstPos = _positions[list[0]];
+                var bounds = new Bounds(firstPos, Vector3.zero);
+                for (int i = 1; i < list.Count; i++)
+                    bounds.Encapsulate(_positions[list[i]]);
+
+                // Expand thin bounds slightly to keep frustum checks stable.
+                bounds.Expand(new Vector3(1f, 4f, 1f));
+
+                cells[cellIndex++] = new RuntimeCell
+                {
+                    Bounds = bounds,
+                    InstanceIndices = list.ToArray(),
+                };
+            }
+
+            if (cellIndex != cells.Length)
+                Array.Resize(ref cells, cellIndex);
+
+            _runtimeCells = cells;
+            _totalCellCount = _runtimeCells.Length;
+            _visibleCellScratch.Clear();
+
+            _maxCullDistanceSqr = 0f;
+            for (int i = 0; i < _runtimeTypes.Length; i++)
+            {
+                var rt = _runtimeTypes[i];
+                if (!rt.IsValid)
+                    continue;
+                if (rt.CullDistanceSqr > _maxCullDistanceSqr)
+                    _maxCullDistanceSqr = rt.CullDistanceSqr;
+            }
+        }
+
+        void ResolveCollisionPolicies()
+        {
+            if (_vegetationTypes == null || _vegetationTypes.Length == 0)
+            {
+                _runtimeCollisionPolicies = Array.Empty<RuntimeCollisionPolicy>();
+                return;
+            }
+
+            _runtimeCollisionPolicies = new RuntimeCollisionPolicy[_vegetationTypes.Length];
+            for (int i = 0; i < _vegetationTypes.Length; i++)
+            {
+                var entry = _vegetationTypes[i];
+                bool hasRuntimeLods = i >= 0 &&
+                    i < _runtimeTypes.Length &&
+                    _runtimeTypes[i].IsValid &&
+                    _runtimeTypes[i].LodMeshes != null &&
+                    _runtimeTypes[i].LodMeshes.Length > 0;
+                bool hasPhysicsProxy = i >= 0 &&
+                    i < _runtimeTypes.Length &&
+                    _runtimeTypes[i].IsValid &&
+                    _runtimeTypes[i].PhysicsProxyMesh != null;
+                int maxLodIndex = hasRuntimeLods ? _runtimeTypes[i].LodMeshes.Length - 1 : -1;
+
+                var mode = entry.CollisionMode;
+                if (mode == FcVegetationCollisionMode.LowLodMesh && maxLodIndex < 0)
+                    mode = FcVegetationCollisionMode.None;
+                if (mode == FcVegetationCollisionMode.PhysicsProxy && !hasPhysicsProxy)
+                    mode = FcVegetationCollisionMode.None;
+
+                float collisionDistance = mode == FcVegetationCollisionMode.None
+                    ? 0f
+                    : Mathf.Max(1f, entry.CollisionDistance > 0f
+                        ? entry.CollisionDistance
+                        : DefaultCollisionDistance);
+                int maxActiveCollidersPerType = mode == FcVegetationCollisionMode.None
+                    ? 0
+                    : Mathf.Max(1, entry.MaxActiveCollidersPerType > 0
+                        ? entry.MaxActiveCollidersPerType
+                        : DefaultMaxActiveCollidersPerType);
+
+                int collisionLodIndex = DefaultCollisionLodIndex;
+                if (mode == FcVegetationCollisionMode.LowLodMesh)
+                {
+                    collisionLodIndex = entry.CollisionLodIndex;
+                    if (collisionLodIndex < 0 || collisionLodIndex > maxLodIndex)
+                        collisionLodIndex = maxLodIndex;
+                }
+
+                float primitiveHeight = Mathf.Max(0f, entry.PrimitiveHeight);
+                float primitiveRadius = Mathf.Max(0f, entry.PrimitiveRadius);
+                var primitiveSize = new Vector3(
+                    Mathf.Max(0f, entry.PrimitiveSize.x),
+                    Mathf.Max(0f, entry.PrimitiveSize.y),
+                    Mathf.Max(0f, entry.PrimitiveSize.z));
+
+                _runtimeCollisionPolicies[i] = new RuntimeCollisionPolicy
+                {
+                    Mode = mode,
+                    CollisionLodIndex = collisionLodIndex,
+                    CollisionDistance = collisionDistance,
+                    MaxActiveCollidersPerType = maxActiveCollidersPerType,
+                    PrimitiveHeight = primitiveHeight,
+                    PrimitiveRadius = primitiveRadius,
+                    PrimitiveSize = primitiveSize,
+                };
+
+                if (_logResolvedCollisionPolicies)
+                {
+                    Debug.Log(
+                        $"[FcVegetationTerrainService] Collision policy type={entry.TypeIndex} path='{entry.VirtualPath}' mode={mode} lod={collisionLodIndex} dist={collisionDistance:F1} budget={maxActiveCollidersPerType}");
+                }
+            }
+        }
+
+        void InitializeScratchBuffers()
+        {
             int maxLods = 0;
             for (int i = 0; i < _runtimeTypes.Length; i++)
             {
@@ -190,43 +460,496 @@ namespace OpenFarCry.Level.Services
             }
         }
 
-        void Update()
+        void ClearScratchBuckets()
         {
-            if (_positions == null || _runtimeTypes == null || _scratch == null)
-                return;
-
-            var cam = Camera.main;
-            if (cam == null)
-                return;
-            var camPos = cam.transform.position;
-
-            // Clear scratch.
             for (int pi = 0; pi < _scratch.Length; pi++)
             {
                 var perProto = _scratch[pi];
                 for (int li = 0; li < perProto.Length; li++)
                     perProto[li].Clear();
             }
+        }
 
-            // Partition instances into (proto, lod) buckets.
-            for (int i = 0; i < _positions.Length; i++)
+        void CollectVisibleCells(Camera cam, Vector3 camPos)
+        {
+            _visibleCellScratch.Clear();
+            _visibleCellCount = 0;
+            _visibleInstanceCount = 0;
+
+            if (_runtimeCells == null || _runtimeCells.Length == 0)
+                return;
+
+            _frustumPlanes = GeometryUtility.CalculateFrustumPlanes(cam);
+            float maxCullSqr = _maxCullDistanceSqr > 0f
+                ? _maxCullDistanceSqr
+                : BuildCullDistanceSqr(_lod0Distance, _cullDistance);
+
+            for (int i = 0; i < _runtimeCells.Length; i++)
             {
-                var pos = _positions[i];
-                float sqr = (pos - camPos).sqrMagnitude;
-                int pi = _protoIndices[i];
-                var rt = _runtimeTypes[pi];
-
-                if (!rt.IsValid || rt.LodMeshes == null)
+                var cell = _runtimeCells[i];
+                var closest = cell.Bounds.ClosestPoint(camPos);
+                float sqr = (closest - camPos).sqrMagnitude;
+                if (sqr >= maxCullSqr)
+                    continue;
+                if (_frustumPlanes != null && !GeometryUtility.TestPlanesAABB(_frustumPlanes, cell.Bounds))
                     continue;
 
-                int lod = FindLod(rt, sqr);
-                if (lod < 0)
-                    continue; // beyond cull distance
+                _visibleCellScratch.Add(i);
+                _visibleCellCount++;
+                _visibleInstanceCount += cell.InstanceIndices != null ? cell.InstanceIndices.Length : 0;
+            }
+        }
 
-                _scratch[pi][lod].Add(Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one * _scales[i]));
+        void CollectVisibleInstances(Vector3 camPos)
+        {
+            if (_runtimeCells == null || _runtimeCells.Length == 0 || _visibleCellScratch.Count == 0)
+            {
+                // Fallback for old scenes/edge cases where cells are not available.
+                _visibleInstanceCount = _positions != null ? _positions.Length : 0;
+                for (int i = 0; i < _positions.Length; i++)
+                    AddVisibleInstance(i, camPos);
+                return;
             }
 
-            // Draw each (proto, lod, submesh) combination in batches of 1023.
+            for (int c = 0; c < _visibleCellScratch.Count; c++)
+            {
+                var cell = _runtimeCells[_visibleCellScratch[c]];
+                var indices = cell.InstanceIndices;
+                if (indices == null)
+                    continue;
+
+                for (int i = 0; i < indices.Length; i++)
+                    AddVisibleInstance(indices[i], camPos);
+            }
+        }
+
+        void AddVisibleInstance(int instanceIndex, Vector3 camPos)
+        {
+            var pos = _positions[instanceIndex];
+            float sqr = (pos - camPos).sqrMagnitude;
+            int pi = _protoIndices[instanceIndex];
+            var rt = _runtimeTypes[pi];
+
+            if (!rt.IsValid || rt.LodMeshes == null)
+                return;
+
+            int lod = FindLod(rt, sqr);
+            if (lod < 0)
+                return;
+
+            _scratch[pi][lod].Add(Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one * _scales[instanceIndex]));
+        }
+
+        void UpdateNearbyColliders(Vector3 camPos)
+        {
+            if (_runtimeCollisionPolicies == null || _runtimeCollisionPolicies.Length == 0)
+            {
+                ReleaseAllColliderHosts();
+                return;
+            }
+
+            _candidateScratch.Clear();
+            CollectColliderCandidates(camPos);
+            if (_candidateScratch.Count == 0)
+            {
+                ReleaseAllColliderHosts();
+                return;
+            }
+
+            _candidateScratch.Sort(s_colliderCandidateDistanceComparer);
+            BuildWantedColliderSet();
+            ApplyWantedColliderSet();
+        }
+
+        void CollectColliderCandidates(Vector3 camPos)
+        {
+            if (_runtimeCells == null || _runtimeCells.Length == 0 || _visibleCellScratch.Count == 0)
+            {
+                for (int i = 0; i < _positions.Length; i++)
+                    TryAddColliderCandidate(i, camPos);
+                return;
+            }
+
+            for (int c = 0; c < _visibleCellScratch.Count; c++)
+            {
+                var cell = _runtimeCells[_visibleCellScratch[c]];
+                var indices = cell.InstanceIndices;
+                if (indices == null)
+                    continue;
+
+                for (int i = 0; i < indices.Length; i++)
+                    TryAddColliderCandidate(indices[i], camPos);
+            }
+        }
+
+        void TryAddColliderCandidate(int instanceIndex, Vector3 camPos)
+        {
+            int pi = _protoIndices[instanceIndex];
+            if (pi < 0 || pi >= _runtimeCollisionPolicies.Length)
+                return;
+
+            var policy = _runtimeCollisionPolicies[pi];
+            if (policy.Mode == FcVegetationCollisionMode.None)
+                return;
+
+            var pos = _positions[instanceIndex];
+            float sqr = (pos - camPos).sqrMagnitude;
+            float range = policy.CollisionDistance;
+            if (range <= 0f || sqr > range * range)
+                return;
+
+            _candidateScratch.Add(new ColliderCandidate
+            {
+                InstanceIndex = instanceIndex,
+                ProtoIndex = pi,
+                SqrDistance = sqr,
+            });
+        }
+
+        void BuildWantedColliderSet()
+        {
+            _wantedInstancesScratch.Clear();
+            _wantedPerTypeCountsScratch.Clear();
+
+            int maxGlobal = Mathf.Max(1, _maxActiveCollidersGlobal);
+            for (int i = 0; i < _candidateScratch.Count; i++)
+            {
+                if (_wantedInstancesScratch.Count >= maxGlobal)
+                    break;
+
+                var candidate = _candidateScratch[i];
+                int pi = candidate.ProtoIndex;
+                if (pi < 0 || pi >= _runtimeCollisionPolicies.Length)
+                    continue;
+
+                var policy = _runtimeCollisionPolicies[pi];
+                int perTypeBudget = Mathf.Max(1, policy.MaxActiveCollidersPerType);
+                _wantedPerTypeCountsScratch.TryGetValue(pi, out int currentCount);
+                if (currentCount >= perTypeBudget)
+                    continue;
+
+                if (_wantedInstancesScratch.Add(candidate.InstanceIndex))
+                    _wantedPerTypeCountsScratch[pi] = currentCount + 1;
+            }
+        }
+
+        void ApplyWantedColliderSet()
+        {
+            _activeInstancesScratch.Clear();
+            foreach (var kv in _activeHostByInstance)
+                _activeInstancesScratch.Add(kv.Key);
+
+            for (int i = 0; i < _activeInstancesScratch.Count; i++)
+            {
+                int instanceIndex = _activeInstancesScratch[i];
+                if (_wantedInstancesScratch.Contains(instanceIndex))
+                    continue;
+                ReleaseColliderForInstance(instanceIndex);
+            }
+
+            foreach (int instanceIndex in _wantedInstancesScratch)
+                EnsureColliderForInstance(instanceIndex);
+        }
+
+        void EnsureColliderForInstance(int instanceIndex)
+        {
+            if (_activeHostByInstance.TryGetValue(instanceIndex, out int existingHostIndex))
+            {
+                if (existingHostIndex >= 0 &&
+                    existingHostIndex < _colliderHosts.Count &&
+                    _colliderHosts[existingHostIndex].AssignedInstanceIndex == instanceIndex)
+                {
+                    return;
+                }
+                _activeHostByInstance.Remove(instanceIndex);
+            }
+
+            int hostIndex = FindFreeColliderHostIndex();
+            if (hostIndex < 0)
+            {
+                hostIndex = _colliderHosts.Count;
+                if (hostIndex >= Mathf.Max(1, _maxActiveCollidersGlobal))
+                    return;
+                CreateColliderHost();
+            }
+
+            if (hostIndex < 0 || hostIndex >= _colliderHosts.Count)
+                return;
+
+            var host = _colliderHosts[hostIndex];
+            host.AssignedInstanceIndex = instanceIndex;
+            _activeHostByInstance[instanceIndex] = hostIndex;
+            ConfigureColliderHost(host, instanceIndex);
+        }
+
+        int FindFreeColliderHostIndex()
+        {
+            for (int i = 0; i < _colliderHosts.Count; i++)
+            {
+                if (_colliderHosts[i].AssignedInstanceIndex < 0)
+                    return i;
+            }
+            return -1;
+        }
+
+        void CreateColliderHost()
+        {
+            EnsureColliderRoot();
+            int index = _colliderHosts.Count;
+            var go = new GameObject($"VegetationCollider_{index}");
+            go.transform.SetParent(_colliderRoot, worldPositionStays: false);
+
+            var capsule = go.AddComponent<CapsuleCollider>();
+            var box = go.AddComponent<BoxCollider>();
+            var mesh = go.AddComponent<MeshCollider>();
+            capsule.enabled = false;
+            box.enabled = false;
+            mesh.enabled = false;
+
+            _colliderHosts.Add(new ColliderHost
+            {
+                GameObject = go,
+                CapsuleCollider = capsule,
+                BoxCollider = box,
+                MeshCollider = mesh,
+                AssignedInstanceIndex = -1,
+            });
+        }
+
+        void EnsureColliderRoot()
+        {
+            if (_colliderRoot != null)
+                return;
+
+            var root = new GameObject("VegetationColliders");
+            root.transform.SetParent(transform, worldPositionStays: false);
+            _colliderRoot = root.transform;
+        }
+
+        void ConfigureColliderHost(ColliderHost host, int instanceIndex)
+        {
+            if (host == null || host.GameObject == null)
+                return;
+            if (instanceIndex < 0 || instanceIndex >= _protoIndices.Length)
+                return;
+
+            int pi = _protoIndices[instanceIndex];
+            if (pi < 0 || pi >= _runtimeCollisionPolicies.Length || pi >= _runtimeTypes.Length)
+                return;
+
+            var policy = _runtimeCollisionPolicies[pi];
+            var rt = _runtimeTypes[pi];
+            float scale = _scales[instanceIndex];
+
+            host.GameObject.transform.position = _positions[instanceIndex];
+            host.GameObject.transform.rotation = Quaternion.identity;
+            host.GameObject.transform.localScale = Vector3.one;
+
+            DisableHostColliders(host);
+
+            var mode = policy.Mode;
+            if (mode == FcVegetationCollisionMode.PhysicsProxy &&
+                TryConfigurePhysicsProxyCollider(host, rt, scale))
+            {
+                return;
+            }
+
+            if (mode == FcVegetationCollisionMode.LowLodMesh &&
+                TryConfigureLowLodMeshCollider(
+                    host,
+                    rt,
+                    policy,
+                    scale,
+                    _lowLodMeshMinHeightForCollider))
+            {
+                return;
+            }
+
+            if (mode == FcVegetationCollisionMode.PrimitiveBox)
+            {
+                var box = host.BoxCollider;
+                box.enabled = true;
+                var size = policy.PrimitiveSize;
+                if (size.x <= 0f || size.y <= 0f || size.z <= 0f)
+                {
+                    var baseBounds = ResolveBaseBounds(rt);
+                    size = Vector3.Max(baseBounds.size * 0.6f, new Vector3(0.5f, 1f, 0.5f));
+                }
+                size *= scale;
+                box.size = size;
+                box.center = new Vector3(0f, size.y * 0.5f, 0f);
+                return;
+            }
+
+            var capsule = host.CapsuleCollider;
+            capsule.enabled = true;
+            capsule.direction = 1;
+
+            var bounds = ResolveBaseBounds(rt);
+            float radius = policy.PrimitiveRadius > 0f
+                ? policy.PrimitiveRadius * scale
+                : Mathf.Max(bounds.extents.x, bounds.extents.z) * Mathf.Max(0.1f, scale) * 0.4f;
+            float height = policy.PrimitiveHeight > 0f
+                ? policy.PrimitiveHeight * scale
+                : bounds.size.y * Mathf.Max(0.1f, scale) * 0.9f;
+
+            radius = Mathf.Max(0.1f, radius);
+            height = Mathf.Max(radius * 2f, height);
+            capsule.radius = radius;
+            capsule.height = height;
+            capsule.center = new Vector3(0f, height * 0.5f, 0f);
+        }
+
+        static bool TryConfigureLowLodMeshCollider(
+            ColliderHost host,
+            in RuntimeType runtimeType,
+            in RuntimeCollisionPolicy policy,
+            float scale,
+            float minHeight)
+        {
+            if (host == null || host.MeshCollider == null)
+                return false;
+            if (!runtimeType.IsValid || runtimeType.LodMeshes == null || runtimeType.LodMeshes.Length == 0)
+                return false;
+            if (runtimeType.BaseBounds.size.y * Mathf.Max(0.01f, scale) < Mathf.Max(0f, minHeight))
+                return false;
+
+            int lodIndex = policy.CollisionLodIndex;
+            if (lodIndex < 0 || lodIndex >= runtimeType.LodMeshes.Length)
+                return false;
+
+            var mesh = runtimeType.LodMeshes[lodIndex];
+            if (mesh == null)
+                return false;
+
+            try
+            {
+                host.GameObject.transform.localScale = Vector3.one * Mathf.Max(0.01f, scale);
+                var mc = host.MeshCollider;
+                mc.sharedMesh = mesh;
+                mc.convex = false;
+                mc.enabled = true;
+                return true;
+            }
+            catch (Exception)
+            {
+                host.MeshCollider.sharedMesh = null;
+                host.MeshCollider.enabled = false;
+                host.GameObject.transform.localScale = Vector3.one;
+                return false;
+            }
+        }
+
+        static bool TryConfigurePhysicsProxyCollider(
+            ColliderHost host,
+            in RuntimeType runtimeType,
+            float scale)
+        {
+            if (host == null || host.MeshCollider == null)
+                return false;
+            if (!runtimeType.IsValid || runtimeType.PhysicsProxyMesh == null)
+                return false;
+
+            try
+            {
+                host.GameObject.transform.localScale = Vector3.one * Mathf.Max(0.01f, scale);
+                var mc = host.MeshCollider;
+                mc.sharedMesh = runtimeType.PhysicsProxyMesh;
+                mc.convex = false;
+                mc.enabled = true;
+                return true;
+            }
+            catch (Exception)
+            {
+                host.MeshCollider.sharedMesh = null;
+                host.MeshCollider.enabled = false;
+                host.GameObject.transform.localScale = Vector3.one;
+                return false;
+            }
+        }
+
+        static Bounds ResolveBaseBounds(in RuntimeType rt)
+        {
+            if (!rt.IsValid)
+                return new Bounds(Vector3.zero, Vector3.one);
+            if (rt.BaseBounds.size.sqrMagnitude > 0f)
+                return rt.BaseBounds;
+            if (rt.LodMeshes == null || rt.LodMeshes.Length == 0 || rt.LodMeshes[0] == null)
+                return new Bounds(Vector3.zero, Vector3.one);
+            return rt.LodMeshes[0].bounds;
+        }
+
+        static void DisableHostColliders(ColliderHost host)
+        {
+            if (host == null)
+                return;
+            if (host.CapsuleCollider != null)
+                host.CapsuleCollider.enabled = false;
+            if (host.BoxCollider != null)
+                host.BoxCollider.enabled = false;
+            if (host.MeshCollider != null)
+            {
+                host.MeshCollider.sharedMesh = null;
+                host.MeshCollider.enabled = false;
+            }
+        }
+
+        void ReleaseColliderForInstance(int instanceIndex)
+        {
+            if (!_activeHostByInstance.TryGetValue(instanceIndex, out int hostIndex))
+                return;
+
+            _activeHostByInstance.Remove(instanceIndex);
+            if (hostIndex < 0 || hostIndex >= _colliderHosts.Count)
+                return;
+
+            var host = _colliderHosts[hostIndex];
+            host.AssignedInstanceIndex = -1;
+            DisableHostColliders(host);
+            if (host.GameObject != null)
+            {
+                host.GameObject.transform.position = Vector3.zero;
+                host.GameObject.transform.rotation = Quaternion.identity;
+                host.GameObject.transform.localScale = Vector3.one;
+            }
+        }
+
+        void ReleaseAllColliderHosts()
+        {
+            _activeHostByInstance.Clear();
+            for (int i = 0; i < _colliderHosts.Count; i++)
+            {
+                var host = _colliderHosts[i];
+                host.AssignedInstanceIndex = -1;
+                DisableHostColliders(host);
+                if (host.GameObject != null)
+                {
+                    host.GameObject.transform.position = Vector3.zero;
+                    host.GameObject.transform.rotation = Quaternion.identity;
+                    host.GameObject.transform.localScale = Vector3.one;
+                }
+            }
+        }
+
+        void TeardownColliderRuntime(bool destroyRoot)
+        {
+            ReleaseAllColliderHosts();
+            _colliderHosts.Clear();
+            _activeHostByInstance.Clear();
+            _activeInstancesScratch.Clear();
+            _wantedInstancesScratch.Clear();
+            _wantedPerTypeCountsScratch.Clear();
+            _candidateScratch.Clear();
+
+            if (destroyRoot && _colliderRoot != null)
+            {
+                Destroy(_colliderRoot.gameObject);
+                _colliderRoot = null;
+            }
+        }
+
+        void SubmitInstancedDraws()
+        {
             for (int pi = 0; pi < _runtimeTypes.Length; pi++)
             {
                 var rt = _runtimeTypes[pi];
@@ -351,11 +1074,32 @@ namespace OpenFarCry.Level.Services
             for (int i = 0; i < chain.Count; i++)
             {
                 var result = chain[i];
-                lodMeshes[i] = result.Mesh;
+                var visualMesh = result.Mesh;
+                var submeshMaterialIds = result.BuildResult?.SubmeshMaterialIds;
+
+                if (TryCreateProxyFilteredVisualMesh(
+                        result.ParsedFile,
+                        visualMesh,
+                        submeshMaterialIds,
+                        out var filteredMesh,
+                        out var filteredSubmeshMaterialIds))
+                {
+                    if (filteredMesh == null)
+                    {
+                        lodMeshes[i] = null;
+                        lodMaterials[i] = Array.Empty<Material>();
+                        continue;
+                    }
+
+                    visualMesh = RegisterOwnedVisualMesh(filteredMesh);
+                    submeshMaterialIds = filteredSubmeshMaterialIds;
+                }
+
+                lodMeshes[i] = visualMesh;
                 lodMaterials[i] = CgfRuntimeImporter.MaterialService.ResolveSubmeshMaterials(
                     result.ParsedFile,
-                    result.Mesh,
-                    result.BuildResult?.SubmeshMaterialIds,
+                    visualMesh,
+                    submeshMaterialIds,
                     textureScopeId);
 
                 var mats = lodMaterials[i];
@@ -366,7 +1110,10 @@ namespace OpenFarCry.Level.Services
                 {
                     var mat = mats[mi];
                     if (mat != null)
+                    {
                         mat.enableInstancing = true;
+                        TryForceVegetationFoliageCutout(mat);
+                    }
                 }
             }
 
@@ -374,6 +1121,10 @@ namespace OpenFarCry.Level.Services
             {
                 LodMeshes = lodMeshes,
                 LodMaterials = lodMaterials,
+                BaseBounds = ResolveFirstValidLodBounds(lodMeshes),
+                PhysicsProxyMesh = TryBuildPhysicsProxyMesh(baseResult, out var proxyMesh)
+                    ? RegisterOwnedColliderMesh(proxyMesh)
+                    : null,
                 LodThresholdSqr = BuildLodThresholdsSqr(chain.Count, _lod0Distance, _cullDistance),
                 CullDistanceSqr = BuildCullDistanceSqr(_lod0Distance, _cullDistance),
                 IsValid = true,
@@ -390,6 +1141,279 @@ namespace OpenFarCry.Level.Services
                 importAnimations: false,
                 importScale: 0.01f,
                 useRuntimeMemoryCache: true);
+        }
+
+        static void TryForceVegetationFoliageCutout(Material mat)
+        {
+            if (mat == null)
+                return;
+            if (!IsLikelyFoliageMaterial(mat.name))
+                return;
+            if (!mat.HasProperty(PropAlphaClip) || !mat.HasProperty(PropCutoff))
+                return;
+
+            // Skip transparent-blend materials; this path is only for foliage cards
+            // that should be alpha-clipped but arrived as opaque.
+            if (mat.HasProperty(PropSurface) && mat.GetFloat(PropSurface) > 0.5f)
+                return;
+
+            var baseMap = mat.HasProperty(PropBaseMap) ? mat.GetTexture(PropBaseMap) : null;
+            if (baseMap == null)
+                return;
+
+            float currentClip = mat.GetFloat(PropAlphaClip);
+            float currentCutoff = mat.GetFloat(PropCutoff);
+            if (currentClip > 0.5f && currentCutoff >= 0.1f)
+                return;
+
+            mat.SetFloat(PropSurface, 0f);
+            mat.SetFloat(PropAlphaClip, 1f);
+            mat.SetFloat(PropCutoff, Mathf.Max(0.1f, currentCutoff > 0f ? currentCutoff : 0.33f));
+            if (mat.HasProperty(PropZWrite))
+                mat.SetFloat(PropZWrite, 1f);
+            mat.SetOverrideTag("RenderType", "TransparentCutout");
+            mat.renderQueue = (int)RenderQueue.AlphaTest;
+            mat.EnableKeyword("_ALPHATEST_ON");
+            mat.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        }
+
+        static bool IsLikelyFoliageMaterial(string materialName)
+        {
+            if (string.IsNullOrWhiteSpace(materialName))
+                return false;
+            string n = materialName.ToLowerInvariant();
+            return n.Contains("plants") ||
+                   n.Contains("leaf") ||
+                   n.Contains("bush") ||
+                   n.Contains("grass") ||
+                   n.Contains("fern") ||
+                   n.Contains("weed") ||
+                   n.Contains("frond") ||
+                   n.Contains("branch");
+        }
+
+        Mesh RegisterOwnedColliderMesh(Mesh mesh)
+        {
+            if (mesh != null)
+                _ownedColliderMeshes.Add(mesh);
+            return mesh;
+        }
+
+        Mesh RegisterOwnedVisualMesh(Mesh mesh)
+        {
+            if (mesh != null)
+                _ownedVisualMeshes.Add(mesh);
+            return mesh;
+        }
+
+        static Bounds ResolveFirstValidLodBounds(IReadOnlyList<Mesh> lodMeshes)
+        {
+            if (lodMeshes == null || lodMeshes.Count == 0)
+                return new Bounds(Vector3.zero, Vector3.one);
+
+            for (int i = 0; i < lodMeshes.Count; i++)
+            {
+                var mesh = lodMeshes[i];
+                if (mesh != null)
+                    return mesh.bounds;
+            }
+
+            return new Bounds(Vector3.zero, Vector3.one);
+        }
+
+        static bool TryCreateProxyFilteredVisualMesh(
+            CgfFile parsedFile,
+            Mesh sourceMesh,
+            int[] sourceSubmeshMaterialIds,
+            out Mesh filteredMesh,
+            out int[] filteredSubmeshMaterialIds)
+        {
+            filteredMesh = null;
+            filteredSubmeshMaterialIds = sourceSubmeshMaterialIds;
+
+            if (parsedFile == null || sourceMesh == null)
+                return false;
+            if (sourceSubmeshMaterialIds == null || sourceSubmeshMaterialIds.Length != sourceMesh.subMeshCount)
+                return false;
+            if (!TryResolveRootMaterial(parsedFile, out var rootMat) || rootMat == null)
+                return false;
+
+            var proxyMatIds = BuildProxyMaterialIds(parsedFile, rootMat);
+            if (proxyMatIds == null || proxyMatIds.Count == 0)
+                return false;
+
+            var keepSubmeshIndices = new List<int>(sourceMesh.subMeshCount);
+            for (int i = 0; i < sourceSubmeshMaterialIds.Length; i++)
+            {
+                if (!proxyMatIds.Contains(sourceSubmeshMaterialIds[i]))
+                    keepSubmeshIndices.Add(i);
+            }
+
+            if (keepSubmeshIndices.Count == sourceMesh.subMeshCount)
+                return false;
+            if (keepSubmeshIndices.Count == 0)
+            {
+                filteredSubmeshMaterialIds = Array.Empty<int>();
+                return true;
+            }
+
+            filteredMesh = UnityEngine.Object.Instantiate(sourceMesh);
+            filteredMesh.name = sourceMesh.name + "_NoProxyVisual";
+            filteredMesh.subMeshCount = keepSubmeshIndices.Count;
+
+            filteredSubmeshMaterialIds = new int[keepSubmeshIndices.Count];
+            for (int i = 0; i < keepSubmeshIndices.Count; i++)
+            {
+                int srcSubmesh = keepSubmeshIndices[i];
+                filteredMesh.SetTriangles(sourceMesh.GetTriangles(srcSubmesh), i, true);
+                filteredSubmeshMaterialIds[i] = sourceSubmeshMaterialIds[srcSubmesh];
+            }
+            filteredMesh.RecalculateBounds();
+            return true;
+        }
+
+        static bool TryBuildPhysicsProxyMesh(CgfRuntimeImportResult baseResult, out Mesh mesh)
+        {
+            mesh = null;
+            var parsedFile = baseResult?.ParsedFile;
+            var source = parsedFile?.MeshChunk;
+            if (parsedFile == null || source == null || source.Vertices == null || source.Faces == null || source.Faces.Length == 0)
+                return false;
+
+            if (!TryResolveRootMaterial(parsedFile, out var rootMat) || rootMat == null)
+                return false;
+
+            var proxyMatIds = BuildProxyMaterialIds(parsedFile, rootMat);
+            if (proxyMatIds == null || proxyMatIds.Count == 0)
+                return false;
+
+            if (BuildColliderMeshFromFaces(parsedFile, source, importScale: 0.01f, proxyMatIds, "VegetationPhysicsProxy", out mesh))
+                return true;
+
+            var shifted = new HashSet<int>();
+            foreach (int id in proxyMatIds)
+                shifted.Add(id + 1);
+            return BuildColliderMeshFromFaces(parsedFile, source, importScale: 0.01f, shifted, "VegetationPhysicsProxy", out mesh);
+        }
+
+        static bool BuildColliderMeshFromFaces(
+            CgfFile parsedFile,
+            CgfMeshChunk source,
+            float importScale,
+            HashSet<int> allowedMatIds,
+            string meshName,
+            out Mesh mesh)
+        {
+            mesh = null;
+            if (source?.Vertices == null || source.Faces == null || source.Faces.Length == 0)
+                return false;
+
+            var nodeTransform = Matrix4x4.identity;
+            if (parsedFile != null && source == parsedFile.MeshChunk)
+            {
+                var rawNodeTransform = CgfMeshBuilder.BuildStaticNodeTransform(parsedFile, source.ChunkID);
+                nodeTransform = CryTransformConversion.NodeMatrixInImporterSpace(rawNodeTransform, importScale);
+            }
+
+            var vertices = new List<Vector3>(source.Vertices.Length);
+            for (int i = 0; i < source.Vertices.Length; i++)
+            {
+                var v = source.Vertices[i];
+                var pos = CryTransformConversion.PositionInImporterSpace(
+                    new Vector3(v.PX, v.PY, v.PZ),
+                    importScale);
+                vertices.Add(nodeTransform.MultiplyPoint3x4(pos));
+            }
+
+            var triangles = new List<int>(source.Faces.Length * 3);
+            for (int i = 0; i < source.Faces.Length; i++)
+            {
+                var f = source.Faces[i];
+                if (allowedMatIds != null && !allowedMatIds.Contains(f.MatID))
+                    continue;
+                if (f.V0 < 0 || f.V1 < 0 || f.V2 < 0 ||
+                    f.V0 >= vertices.Count || f.V1 >= vertices.Count || f.V2 >= vertices.Count)
+                    continue;
+                triangles.Add(f.V0);
+                triangles.Add(f.V1);
+                triangles.Add(f.V2);
+            }
+
+            if (triangles.Count < 3)
+                return false;
+
+            mesh = new Mesh { name = meshName };
+            if (vertices.Count > 65535)
+                mesh.indexFormat = IndexFormat.UInt32;
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(triangles, 0, true);
+            mesh.RecalculateBounds();
+            return true;
+        }
+
+        static bool TryResolveRootMaterial(CgfFile parsedFile, out CgfMaterialChunk rootMat)
+        {
+            rootMat = null;
+            if (parsedFile == null)
+                return false;
+
+            CgfNodeChunk primaryNode = null;
+            var nodes = parsedFile.NodeChunks;
+            if (nodes != null)
+            {
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    var node = nodes[i];
+                    if (node.ObjectID == parsedFile.SelectedMeshChunkID)
+                    {
+                        primaryNode = node;
+                        break;
+                    }
+                }
+            }
+
+            int matChunkId = primaryNode?.MatID ?? -1;
+            return matChunkId >= 0 && parsedFile.MaterialByChunkID.TryGetValue(matChunkId, out rootMat);
+        }
+
+        static HashSet<int> BuildProxyMaterialIds(CgfFile parsedFile, CgfMaterialChunk rootMat)
+        {
+            if (rootMat == null)
+                return new HashSet<int>();
+
+            if (rootMat.MtlType != CgfMtlType.Multi)
+            {
+                var singleMaterialIds = new HashSet<int>();
+                if (IsNoDrawProxyMaterial(rootMat.Name))
+                    singleMaterialIds.Add(rootMat.TableIndex);
+                return singleMaterialIds;
+            }
+
+            var ids = new HashSet<int>();
+            if (!parsedFile.MaterialChildrenByParentChunkID.TryGetValue(rootMat.ChunkID, out var children) || children == null)
+                return ids;
+
+            for (int i = 0; i < children.Count; i++)
+            {
+                if (IsNoDrawProxyMaterial(children[i]?.Name))
+                    ids.Add(i);
+            }
+
+            return ids;
+        }
+
+        static bool IsNoDrawProxyMaterial(string materialName)
+        {
+            if (string.IsNullOrWhiteSpace(materialName))
+                return false;
+
+            string n = materialName.ToLowerInvariant();
+            return n.Contains("nodraw") ||
+                   n.Contains("no_draw") ||
+                   n.Contains("physics_proxy") ||
+                   n.Contains("phys_proxy") ||
+                   n.Contains("$physics_proxy") ||
+                   n.Contains("proxy");
         }
 
         static float BuildCullDistanceSqr(float lod0Distance, float cullDistance)
@@ -478,9 +1502,74 @@ namespace OpenFarCry.Level.Services
             }
         }
 
+        void OnDisable()
+        {
+            // Make sure collider hosts do not hold mesh references while service is disabled/unloading.
+            ReleaseAllColliderHosts();
+            _nextColliderUpdateTime = 0f;
+        }
+
+        void OnDrawGizmosSelected()
+        {
+            if (!Application.isPlaying)
+                return;
+
+            if (_debugDrawCells && _runtimeCells != null)
+            {
+                Gizmos.color = new Color(0.55f, 0.55f, 0.55f, 1f);
+                for (int i = 0; i < _runtimeCells.Length; i++)
+                {
+                    var b = _runtimeCells[i].Bounds;
+                    Gizmos.DrawWireCube(b.center, b.size);
+                }
+
+                Gizmos.color = new Color(0.2f, 0.9f, 0.35f, 1f);
+                for (int i = 0; i < _visibleCellScratch.Count; i++)
+                {
+                    int idx = _visibleCellScratch[i];
+                    if (idx < 0 || idx >= _runtimeCells.Length)
+                        continue;
+                    var b = _runtimeCells[idx].Bounds;
+                    Gizmos.DrawWireCube(b.center, b.size);
+                }
+            }
+
+            if (_debugDrawColliderHosts && _colliderHosts != null)
+            {
+                for (int i = 0; i < _colliderHosts.Count; i++)
+                {
+                    var host = _colliderHosts[i];
+                    if (host == null || host.GameObject == null || host.AssignedInstanceIndex < 0)
+                        continue;
+
+                    var t = host.GameObject.transform;
+                    Gizmos.color = new Color(1f, 0.7f, 0.15f, 1f);
+                    Gizmos.DrawWireSphere(t.position, 0.3f);
+                }
+            }
+        }
+
         void OnDestroy()
         {
+            TeardownColliderRuntime(destroyRoot: true);
+            for (int i = 0; i < _ownedColliderMeshes.Count; i++)
+            {
+                var mesh = _ownedColliderMeshes[i];
+                if (mesh != null)
+                    Destroy(mesh);
+            }
+            _ownedColliderMeshes.Clear();
+            for (int i = 0; i < _ownedVisualMeshes.Count; i++)
+            {
+                var mesh = _ownedVisualMeshes[i];
+                if (mesh != null)
+                    Destroy(mesh);
+            }
+            _ownedVisualMeshes.Clear();
+
             _runtimeTypes = null;
+            _runtimeCells = null;
+            _runtimeCollisionPolicies = null;
             _scratch = null;
         }
     }
