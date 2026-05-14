@@ -150,6 +150,8 @@ namespace OpenFarCry.Level.Editor
                 var so = new SerializedObject(bi);
                 so.FindProperty("_virtualPath").stringValue = desc.VirtualPath;
                 so.FindProperty("_noPhysics").boolValue     = desc.NoPhysics;
+                so.FindProperty("_materialOverride").stringValue = desc.MaterialOverride ?? string.Empty;
+                so.FindProperty("_materialId").intValue          = desc.MaterialId;
                 so.ApplyModifiedPropertiesWithoutUndo();
             }
 
@@ -229,7 +231,9 @@ namespace OpenFarCry.Level.Editor
                 string normalizedPath = NormalizeVegetationPath(typeDef.FileName);
                 bool hasSiblingLods = false;
                 if (!string.IsNullOrEmpty(normalizedPath))
+                {
                     hasSiblingLods = lodService.FindSiblingLodPaths(normalizedPath).Count > 0;
+                }
 
                 var collisionMode = ResolveDefaultCollisionMode(typeDef.FileName, hasSiblingLods);
                 typeEntries.Add(new FcVegetationTerrainService.VegetationTypeEntry
@@ -664,6 +668,7 @@ namespace OpenFarCry.Level.Editor
             servicesGo.AddComponent<FcMeshLoadService>();
             servicesGo.AddComponent<FcEntityLoadService>();
             servicesGo.AddComponent<FcAnimationLoadService>();
+            servicesGo.AddComponent<FcLevelMaterialOverrideService>();
             servicesGo.AddComponent<FcLevelLoadService>();
 
             var environment = servicesGo.AddComponent<FcLevelEnvironment>();

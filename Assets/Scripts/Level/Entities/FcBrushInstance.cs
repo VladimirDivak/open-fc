@@ -14,9 +14,13 @@ namespace OpenFarCry.Level.Entities
     {
         [SerializeField] string _virtualPath;
         [SerializeField] bool _noPhysics;
+        [SerializeField] string _materialOverride;
+        [SerializeField] int _materialId = -1;
 
         public string VirtualPath => _virtualPath;
         public bool NoPhysics => _noPhysics;
+        public string MaterialOverride => _materialOverride;
+        public int MaterialId => _materialId;
 
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         CgfRuntimeImportResult _importResult;
@@ -74,6 +78,8 @@ namespace OpenFarCry.Level.Entities
                 lodResults,
                 levelScopeId);
 
+            ApplyMaterialOverride(output.Root, levelScopeId);
+
             // LOD children are attached after the base visual, so we ensure cull-off
             // once more after LOD assembly.
             FcBrushGeometryPostProcessor.DisableBackfaceCulling(output.Root);
@@ -114,6 +120,81 @@ namespace OpenFarCry.Level.Entities
                 return;
 
             ApplyLoadResult(result, lodResults, scopeId, releaseImportResultsOnDestroy: true);
+        }
+
+        void ApplyMaterialOverride(GameObject visualRoot, string levelScopeId)
+        {
+            if (visualRoot == null)
+                return;
+
+            var service = FcLevelMaterialOverrideService.Current;
+            if (service == null)
+                return;
+
+            bool hasMetadata = service.TryResolveBrushMaterialMetadata(
+                _materialOverride,
+                _materialId,
+                out var metadata);
+
+            if (hasMetadata)
+                ApplyMaterialMetadata(visualRoot, metadata);
+
+            if (string.IsNullOrWhiteSpace(_materialOverride) && _materialId < 0)
+                return;
+
+            if (!service.TryResolveBrushOverrideMaterial(
+                    _materialOverride,
+                    _materialId,
+                    levelScopeId,
+                    out var overrideMaterial,
+                    out _)
+                || overrideMaterial == null)
+            {
+                return;
+            }
+
+            var renderers = visualRoot.GetComponentsInChildren<Renderer>(includeInactive: true);
+            for (int r = 0; r < renderers.Length; r++)
+            {
+                var renderer = renderers[r];
+                if (renderer == null)
+                    continue;
+
+                var mats = renderer.sharedMaterials;
+                if (mats == null || mats.Length == 0)
+                    continue;
+
+                for (int i = 0; i < mats.Length; i++)
+                    mats[i] = overrideMaterial;
+                renderer.sharedMaterials = mats;
+            }
+        }
+
+        static void ApplyMaterialMetadata(
+            GameObject visualRoot,
+            FcLevelMaterialOverrideService.BrushMaterialMetadata metadata)
+        {
+            if (visualRoot == null)
+                return;
+
+            var rootMeta = visualRoot.GetComponent<FcLevelMaterialMetadata>();
+            if (rootMeta == null)
+                rootMeta = visualRoot.AddComponent<FcLevelMaterialMetadata>();
+            rootMeta.SetMetadata(metadata);
+
+            var colliders = visualRoot.GetComponentsInChildren<Collider>(includeInactive: true);
+            for (int i = 0; i < colliders.Length; i++)
+            {
+                var col = colliders[i];
+                if (col == null)
+                    continue;
+
+                var colGo = col.gameObject;
+                var colMeta = colGo.GetComponent<FcLevelMaterialMetadata>();
+                if (colMeta == null)
+                    colMeta = colGo.AddComponent<FcLevelMaterialMetadata>();
+                colMeta.SetMetadata(metadata);
+            }
         }
 
         void OnDestroy()

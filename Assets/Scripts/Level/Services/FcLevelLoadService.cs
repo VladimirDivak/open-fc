@@ -23,6 +23,7 @@ namespace OpenFarCry.Level.Services
 
         FcLevelCacheService _cacheService;
         FcEntityLoadService _entityLoadService;
+        FcLevelMaterialOverrideService _materialOverrideService;
         FcLevelLoadReport _report;
         readonly Dictionary<string, FcLevelGeometryAssetHandle> _brushPreloadedByPath =
             new Dictionary<string, FcLevelGeometryAssetHandle>(StringComparer.Ordinal);
@@ -37,6 +38,7 @@ namespace OpenFarCry.Level.Services
             Current = this;
             _cacheService = GetComponent<FcLevelCacheService>() ?? GetComponentInParent<FcLevelCacheService>();
             _entityLoadService = GetComponent<FcEntityLoadService>() ?? GetComponentInParent<FcEntityLoadService>();
+            _materialOverrideService = GetComponent<FcLevelMaterialOverrideService>() ?? GetComponentInParent<FcLevelMaterialOverrideService>();
             _report = FcLevelRuntimeReportRegistry.GetOrCreate(GetScopeId());
         }
 
@@ -90,6 +92,7 @@ namespace OpenFarCry.Level.Services
             var supplement = FcLevelSupplementLoader.Load(levelName);
             supplementSw.Stop();
             _report.RecordPhase("RuntimeLoadSupplement", supplementSw.Elapsed.TotalMilliseconds);
+            _materialOverrideService?.Configure(levelName, supplement);
 
             var planner = new FcLevelGeometryPreloadPlanner();
             var brushPlanSw = Stopwatch.StartNew();
@@ -219,6 +222,7 @@ namespace OpenFarCry.Level.Services
 
             _brushPreloadedByPath.Clear();
             _vegetationPreloadedByPath.Clear();
+            _materialOverrideService?.Clear();
             _report = FcLevelRuntimeReportRegistry.GetOrCreate(scopeId);
             _loadedLevelName = string.Empty;
             _loadedMissionName = string.Empty;
