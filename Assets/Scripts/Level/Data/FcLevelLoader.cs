@@ -83,10 +83,15 @@ namespace OpenFarCry.Level.Data
             return mission;
         }
 
-        public static bool TryLoadTerrainSettings(string levelName, out int heightmapSize, out int heightmapUnitSize)
+        public static bool TryLoadTerrainSettings(
+            string levelName,
+            out int heightmapSize,
+            out int heightmapUnitSize,
+            out List<FcTerrainLayerDesc> surfaceLayers)
         {
             heightmapSize = 1024;
             heightmapUnitSize = 2;
+            surfaceLayers = new List<FcTerrainLayerDesc>();
 
             EnsureLevelMounted(levelName);
 
@@ -98,6 +103,7 @@ namespace OpenFarCry.Level.Data
             {
                 byte[] bytes = FcFileSystem.ReadAllBytes(levelDataPath);
                 XmlDocument doc = LoadXml(bytes);
+
                 XmlNodeList infoNodes = doc.GetElementsByTagName("LevelInfo");
                 if (infoNodes.Count == 0)
                     return false;
@@ -105,12 +111,53 @@ namespace OpenFarCry.Level.Data
                 var attrs = infoNodes[0].Attributes;
                 heightmapSize = ParseInt(attrs?["HeightmapSize"]?.Value, heightmapSize);
                 heightmapUnitSize = ParseInt(attrs?["HeightmapUnitSize"]?.Value, heightmapUnitSize);
+
+                ParseSurfaceTypes(doc, levelName, surfaceLayers);
                 return true;
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"[FcLevelLoader] Failed to parse terrain settings from leveldata.xml for '{levelName}': {e.Message}");
                 return false;
+            }
+        }
+
+        // Backward-compat overload for callers that don't need surface layers.
+        public static bool TryLoadTerrainSettings(string levelName, out int heightmapSize, out int heightmapUnitSize)
+            => TryLoadTerrainSettings(levelName, out heightmapSize, out heightmapUnitSize, out _);
+
+        static void ParseSurfaceTypes(XmlDocument doc, string levelName, List<FcTerrainLayerDesc> result)
+        {
+            XmlNodeList surfaceTypeNodes = doc.GetElementsByTagName("SurfaceType");
+            byte id = 0;
+            foreach (XmlNode node in surfaceTypeNodes)
+            {
+                if (id >= 7) break; // STYPE_BIT_MASK covers 0-6; 7 = hole
+
+                string texAttr = node.Attributes?["DetailTexture"]?.Value;
+                if (string.IsNullOrEmpty(texAttr))
+                {
+                    id++;
+                    continue;
+                }
+
+                // DetailTexture paths in leveldata.xml are VFS-root-relative paths stored in
+                // FCData/*.pak (mounted with empty bindRoot), not in the level PAK.
+                string vfsPath = texAttr.ToLowerInvariant().Replace('\\', '/');
+
+                string scaleXStr = node.Attributes?["DetailScaleX"]?.Value;
+                string scaleYStr = node.Attributes?["DetailScaleY"]?.Value;
+                string projAxis  = node.Attributes?["ProjAxis"]?.Value;
+
+                result.Add(new FcTerrainLayerDesc
+                {
+                    SurfaceTypeId     = id,
+                    DetailTexturePath = vfsPath,
+                    ScaleX            = ParseFloat(scaleXStr, 8f),
+                    ScaleY            = ParseFloat(scaleYStr, 8f),
+                    ProjAxis          = string.IsNullOrEmpty(projAxis) ? 'Z' : projAxis[0],
+                });
+                id++;
             }
         }
 

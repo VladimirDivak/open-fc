@@ -66,6 +66,15 @@ namespace OpenFarCry.Level.Data
         public readonly List<Vector3> ShapePoints = new List<Vector3>();
     }
 
+    public sealed class FcTerrainLayerDesc
+    {
+        public byte   SurfaceTypeId;
+        public string DetailTexturePath; // VFS path, e.g. "terrain/detail0.dds"
+        public float  ScaleX = 8f;
+        public float  ScaleY = 8f;
+        public char   ProjAxis = 'Z';
+    }
+
     public sealed class FcLevelEnvironmentDesc
     {
         // <Lighting>

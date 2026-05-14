@@ -40,6 +40,9 @@ namespace OpenFarCry.Level.Services
             _entityLoadService = GetComponent<FcEntityLoadService>() ?? GetComponentInParent<FcEntityLoadService>();
             _materialOverrideService = GetComponent<FcLevelMaterialOverrideService>() ?? GetComponentInParent<FcLevelMaterialOverrideService>();
             _report = FcLevelRuntimeReportRegistry.GetOrCreate(GetScopeId());
+
+            if (!string.IsNullOrWhiteSpace(_loadedLevelName))
+                FcLevelLoader.EnsureLevelMounted(_loadedLevelName);
         }
 
         void OnDestroy()
