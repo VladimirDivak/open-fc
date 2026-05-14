@@ -21,6 +21,10 @@ namespace OpenFarCry.FileSystem
         private readonly Dictionary<string, int> _index =
             new Dictionary<string, int>(StringComparer.Ordinal);
 
+        // normalized dir → list of all virtual paths whose immediate parent is that dir
+        private readonly Dictionary<string, List<string>> _directoryIndex =
+            new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
         public PakArchive(string diskPath, string bindRoot = "")
         {
             DiskPath = diskPath;
@@ -63,12 +67,21 @@ namespace OpenFarCry.FileSystem
         public IEnumerable<string> GetEntriesInDirectory(string virtualDir)
         {
             EnsureOpen();
-            var prefix = NormalizePath(virtualDir);
-            if (prefix.Length > 0) prefix += "/";
-
-            foreach (var key in _index.Keys)
-                if (key.StartsWith(prefix, StringComparison.Ordinal))
-                    yield return key;
+            var dir = NormalizePath(virtualDir);
+            if (dir.Length == 0)
+            {
+                foreach (var list in _directoryIndex.Values)
+                    foreach (var entry in list)
+                        yield return entry;
+                yield break;
+            }
+            string prefix = dir + "/";
+            foreach (var kvp in _directoryIndex)
+            {
+                if (kvp.Key == dir || kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+                    foreach (var entry in kvp.Value)
+                        yield return entry;
+            }
         }
 
         public void Dispose()
@@ -95,7 +108,13 @@ namespace OpenFarCry.FileSystem
                 {
                     var entry = _zipFile[i];
                     if (!entry.IsFile) continue;
-                    _index[BuildVirtualPath(entry.Name)] = i;
+                    string vp = BuildVirtualPath(entry.Name);
+                    _index[vp] = i;
+                    int slash = vp.LastIndexOf('/');
+                    string dir = slash > 0 ? vp.Substring(0, slash) : string.Empty;
+                    if (!_directoryIndex.TryGetValue(dir, out var dirList))
+                        _directoryIndex[dir] = dirList = new List<string>();
+                    dirList.Add(vp);
                 }
             }
         }

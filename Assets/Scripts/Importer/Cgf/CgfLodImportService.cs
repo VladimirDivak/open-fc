@@ -31,9 +31,15 @@ namespace OpenFarCry.Importer.Cgf
 
         public List<string> FindSiblingLodPaths(string modelVirtualPath)
         {
-            var result = new List<(int lod, string path)>();
             string noExt = RemoveExtension(modelVirtualPath).Replace('\\', '/');
             string dir = GetVirtualDirectory(noExt);
+            return FindSiblingLodPaths(modelVirtualPath, OpenFarCry.FileSystem.FcFileSystem.GetEntries(dir));
+        }
+
+        public List<string> FindSiblingLodPaths(string modelVirtualPath, IEnumerable<string> dirEntries)
+        {
+            var result = new List<(int lod, string path)>();
+            string noExt = RemoveExtension(modelVirtualPath).Replace('\\', '/');
 
             string fileNoExt = Path.GetFileName(noExt);
             string baseName = StripLodSuffix(fileNoExt);
@@ -42,7 +48,7 @@ namespace OpenFarCry.Importer.Cgf
 
             var regex = GetSiblingLodRegex(baseName);
 
-            foreach (var path in OpenFarCry.FileSystem.FcFileSystem.GetEntries(dir))
+            foreach (var path in dirEntries)
             {
                 if (!CgfResourceImportService.Instance.IsSupportedVirtualPath(path))
                     continue;

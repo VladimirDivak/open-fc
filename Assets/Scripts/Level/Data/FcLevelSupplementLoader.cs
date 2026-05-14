@@ -27,8 +27,24 @@ namespace OpenFarCry.Level.Data
             FcLevelLoader.EnsureLevelMounted(levelName);
             string basePath = $"levels/{levelName.ToLowerInvariant()}";
             var issues = new List<FcLevelSupplementData.ParserIssue>();
+
+            // Phase 2: load leveldata.xml once; shared by surface-types, material-libraries, veg-types.
+            XmlDocument leveldataXml = Safe(
+                () => LoadXmlIfExists($"{basePath}/leveldata.xml"),
+                null, issues, "leveldata.xml");
+
+            // Phase 4: enumerate level directory once; shared by CollectEntries and CollectByPrefix callers.
+            List<string> baseEntriesList;
+            try { baseEntriesList = new List<string>(FcFileSystem.GetEntries(basePath)); }
+            catch (Exception e)
+            {
+                issues.Add(new FcLevelSupplementData.ParserIssue { Source = "package-index", Message = e.Message ?? string.Empty });
+                baseEntriesList = new List<string>();
+            }
+            IReadOnlyList<string> baseEntries = baseEntriesList;
+
             var parsedMaterialLibraries = Safe(
-                () => ParseMaterialLibraries(basePath),
+                () => ParseMaterialLibraries(leveldataXml),
                 new ParsedMaterialLibraries
                 {
                     Libraries = Array.Empty<string>(),
@@ -48,16 +64,16 @@ namespace OpenFarCry.Level.Data
 
             var data = new FcLevelSupplementData
             {
-                PackageEntries = Safe(() => CollectEntries(basePath), Array.Empty<string>(), issues, "package-index"),
+                PackageEntries = Safe(() => CollectEntries(baseEntries), Array.Empty<string>(), issues, "package-index"),
                 KnownFiles = Safe(() => CollectKnownFileStatus(basePath), Array.Empty<FcLevelSupplementData.KnownFileStatus>(), issues, "known-files"),
-                MissionXmlFiles = Safe(() => CollectByPrefix(basePath, "mission_", ".xml"), Array.Empty<string>(), issues, "mission-xml-index"),
+                MissionXmlFiles = Safe(() => CollectByPrefix(baseEntries, basePath, "mission_", ".xml"), Array.Empty<string>(), issues, "mission-xml-index"),
                 MusicXmlFiles = Safe(() => CollectMusicXmlFiles(basePath), Array.Empty<string>(), issues, "music-xml-index"),
                 MaterialLibraries = parsedMaterialLibraries.Libraries,
                 MaterialLibraryRawCount = parsedMaterialLibraries.RawCount,
-                NetBaiFiles = Safe(() => CollectByPrefix(basePath, "net", ".bai"), Array.Empty<string>(), issues, "net-bai-index"),
-                HideBaiFiles = Safe(() => CollectByPrefix(basePath, "hide", ".bai"), Array.Empty<string>(), issues, "hide-bai-index"),
-                SurfaceTypes = Safe(() => ParseSurfaceTypes(basePath), Array.Empty<FcLevelSupplementData.SurfaceTypeDesc>(), issues, "leveldata.xml/surface-types"),
-                VegetationTypes = Safe(() => ParseVegetationTypes(basePath), Array.Empty<FcLevelSupplementData.VegetationTypeDesc>(), issues, "leveldata.xml/vegetation-types"),
+                NetBaiFiles = Safe(() => CollectByPrefix(baseEntries, basePath, "net", ".bai"), Array.Empty<string>(), issues, "net-bai-index"),
+                HideBaiFiles = Safe(() => CollectByPrefix(baseEntries, basePath, "hide", ".bai"), Array.Empty<string>(), issues, "hide-bai-index"),
+                SurfaceTypes = Safe(() => ParseSurfaceTypes(leveldataXml), Array.Empty<FcLevelSupplementData.SurfaceTypeDesc>(), issues, "leveldata.xml/surface-types"),
+                VegetationTypes = Safe(() => ParseVegetationTypes(leveldataXml), Array.Empty<FcLevelSupplementData.VegetationTypeDesc>(), issues, "leveldata.xml/vegetation-types"),
                 Materials = Safe(() => ParseMaterials(basePath), Array.Empty<FcLevelSupplementData.MaterialDesc>(), issues, "materials.xml/materials"),
                 VegetationInstances = vegetationParsed.Instances,
                 VegetationInstancesParseMeta = vegetationParsed.Meta,
@@ -67,12 +83,9 @@ namespace OpenFarCry.Level.Data
             return data;
         }
 
-        static string[] CollectEntries(string basePath)
+        static string[] CollectEntries(IReadOnlyList<string> baseEntries)
         {
-            var entries = FcFileSystem.GetEntries(basePath);
-            var list = new List<string>();
-            foreach (var e in entries)
-                list.Add(e);
+            var list = new List<string>(baseEntries);
             list.Sort(StringComparer.Ordinal);
             return list.ToArray();
         }
@@ -92,13 +105,12 @@ namespace OpenFarCry.Level.Data
             return result;
         }
 
-        static string[] CollectByPrefix(string basePath, string filePrefix, string extension)
+        static string[] CollectByPrefix(IReadOnlyList<string> baseEntries, string basePath, string filePrefix, string extension)
         {
-            var entries = FcFileSystem.GetEntries(basePath);
             var list = new List<string>();
             string prefix = basePath + "/";
 
-            foreach (var path in entries)
+            foreach (var path in baseEntries)
             {
                 if (!path.StartsWith(prefix, StringComparison.Ordinal))
                     continue;
@@ -131,9 +143,8 @@ namespace OpenFarCry.Level.Data
             return list.ToArray();
         }
 
-        static FcLevelSupplementData.SurfaceTypeDesc[] ParseSurfaceTypes(string basePath)
+        static FcLevelSupplementData.SurfaceTypeDesc[] ParseSurfaceTypes(XmlDocument doc)
         {
-            var doc = LoadXmlIfExists($"{basePath}/leveldata.xml");
             if (doc == null) return Array.Empty<FcLevelSupplementData.SurfaceTypeDesc>();
 
             var list = new List<FcLevelSupplementData.SurfaceTypeDesc>();
@@ -159,9 +170,8 @@ namespace OpenFarCry.Level.Data
             public int RawCount;
         }
 
-        static ParsedMaterialLibraries ParseMaterialLibraries(string basePath)
+        static ParsedMaterialLibraries ParseMaterialLibraries(XmlDocument doc)
         {
-            var doc = LoadXmlIfExists($"{basePath}/leveldata.xml");
             if (doc == null)
             {
                 return new ParsedMaterialLibraries
@@ -207,9 +217,8 @@ namespace OpenFarCry.Level.Data
             };
         }
 
-        static FcLevelSupplementData.VegetationTypeDesc[] ParseVegetationTypes(string basePath)
+        static FcLevelSupplementData.VegetationTypeDesc[] ParseVegetationTypes(XmlDocument doc)
         {
-            var doc = LoadXmlIfExists($"{basePath}/leveldata.xml");
             if (doc == null) return Array.Empty<FcLevelSupplementData.VegetationTypeDesc>();
 
             var list = new List<FcLevelSupplementData.VegetationTypeDesc>();
