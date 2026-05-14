@@ -1,6 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -34,7 +38,7 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
-        internal sealed class MeshBuildData
+        internal sealed class MeshBuildData : IDisposable
         {
             public readonly List<Vector3> Positions = new List<Vector3>();
             public readonly List<Vector3> Normals = new List<Vector3>();
@@ -42,9 +46,36 @@ namespace OpenFarCry.Importer.Cgf
             public readonly Dictionary<int, List<int>> SubmeshMap = new Dictionary<int, List<int>>();
             public BoneWeight[] BoneWeights;
             public Matrix4x4[] BindPoses;
+
+            public bool HasNativeArrays;
+            public NativeArray<float3> NativePositions;
+            public NativeArray<float3> NativeNormals;
+            public NativeArray<float2> NativeUvs;
+
+            public void Dispose()
+            {
+                if (!HasNativeArrays) return;
+                if (NativePositions.IsCreated) NativePositions.Dispose();
+                if (NativeNormals.IsCreated)   NativeNormals.Dispose();
+                if (NativeUvs.IsCreated)       NativeUvs.Dispose();
+            }
         }
 
-        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v8";
+        internal readonly struct VertexRemappingResult
+        {
+            public readonly Dictionary<int, List<int>> SubmeshMap;
+            public readonly int[] UniquePosIdx;
+            public readonly int[] UniqueUvIdx;
+
+            public VertexRemappingResult(Dictionary<int, List<int>> submeshMap, int[] uniquePosIdx, int[] uniqueUvIdx)
+            {
+                SubmeshMap   = submeshMap;
+                UniquePosIdx = uniquePosIdx;
+                UniqueUvIdx  = uniqueUvIdx;
+            }
+        }
+
+        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v9";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -104,6 +135,7 @@ namespace OpenFarCry.Importer.Cgf
 
             prepared.Result.Mesh = CreateUnityMesh(prepared.Data, out var submeshMaterialIds);
             prepared.Result.SubmeshMaterialIds = submeshMaterialIds;
+            prepared.Data.Dispose();
             return prepared.Result;
         }
 
@@ -175,31 +207,21 @@ namespace OpenFarCry.Importer.Cgf
             float importScale)
         {
             bool hasBones = importSkeleton && chunk.HasBoneInfo && boneNames != null && boneNames.Names.Length > 0;
+
+            if (!hasBones)
+                return BuildStaticMeshData(chunk, nodeTransform, importScale);
+
             int[] boneIdToIndex = null;
             int[] boneIndexToId = null;
             string[] orderedBoneNames = null;
-            if (hasBones)
-            {
-                BuildBoneIndexMapsOrIdentity(boneAnim, boneNames.Names.Length, out boneIdToIndex, out boneIndexToId);
-                orderedBoneNames = BuildOrderedBoneNames(boneNames.Names, boneIndexToId);
-            }
+            BuildBoneIndexMapsOrIdentity(boneAnim, boneNames.Names.Length, out boneIdToIndex, out boneIndexToId);
+            orderedBoneNames = BuildOrderedBoneNames(boneNames.Names, boneIndexToId);
 
-            // Cry applies the object Node transform only to geometry that is not
-            // driven by bone links. Skinned geometry is already in skeleton space.
-            // Static Cry geometry is baked by NODE_CHUNK_DESC.tm using OLD Matrix44
-            // semantics: row-vector 3x3 plus translation in row 3.
-            var unityNodeTransform = hasBones
-                ? Matrix4x4.identity
-                : CryTransformConversion.NodeMatrixInImporterSpace(nodeTransform, importScale);
+            var bindGlobalsByBoneId = BuildBindPoseGlobalMatricesByBoneId(boneInitPos, boneNames.Names.Length, importScale);
 
-            var bindGlobalsByBoneId = hasBones
-                ? BuildBindPoseGlobalMatricesByBoneId(boneInitPos, boneNames.Names.Length, importScale)
-                : null;
-
-            // --- UV remapping ---
             var vertCache       = new Dictionary<(int pi, int ti), int>();
             var data = new MeshBuildData();
-            var boneWeightsList = hasBones ? new List<CryLink[]>() : null;
+            var boneWeightsList = new List<CryLink[]>();
 
             var faces    = chunk.Faces;
             var texFaces = chunk.TexFaces;
@@ -238,12 +260,12 @@ namespace OpenFarCry.Importer.Cgf
                         var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
                         var links = chunk.BoneLinks?[pi];
                         var sortedLinks = SortLinksByDescendingWeight(links);
-                        var pos = hasBones && TryBuildBindPositionFromLinks(sortedLinks, bindGlobalsByBoneId, importScale, out var linkedBindPos)
+                        var pos = TryBuildBindPositionFromLinks(sortedLinks, bindGlobalsByBoneId, importScale, out var linkedBindPos)
                             ? linkedBindPos
                             : rawPos;
                         var nrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
-                        data.Positions.Add(unityNodeTransform.MultiplyPoint3x4(pos));
-                        data.Normals.Add(unityNodeTransform.MultiplyVector(nrm).normalized);
+                        data.Positions.Add(pos);
+                        data.Normals.Add(nrm.normalized);
                         if (hasUvs && ti >= 0 && ti < rawUVs.Length)
                         {
                             var uv = rawUVs[ti];
@@ -253,25 +275,45 @@ namespace OpenFarCry.Importer.Cgf
                         {
                             data.Uvs.Add(Vector2.zero);
                         }
-                        boneWeightsList?.Add(sortedLinks);
+                        boneWeightsList.Add(sortedLinks);
                         vertCache[key] = idx;
                     }
                     triangles.Add(idx);
                 }
             }
 
-            // --- Skeleton ---
-            if (hasBones)
-            {
-                data.BoneWeights = BuildBoneWeights(boneWeightsList, boneNames.Names.Length, boneIdToIndex);
-                result.HasSkeleton = true;
-                result.BoneNames   = orderedBoneNames;
-                result.BoneIdToIndex = boneIdToIndex;
-                result.BoneIndexToId = boneIndexToId;
-                result.BindPoses   = BuildBindPoses(boneInitPos, boneIndexToId, importScale);
-                data.BindPoses = result.BindPoses;
-            }
+            data.BoneWeights = BuildBoneWeights(boneWeightsList, boneNames.Names.Length, boneIdToIndex);
+            result.HasSkeleton = true;
+            result.BoneNames   = orderedBoneNames;
+            result.BoneIdToIndex = boneIdToIndex;
+            result.BoneIndexToId = boneIndexToId;
+            result.BindPoses   = BuildBindPoses(boneInitPos, boneIndexToId, importScale);
+            data.BindPoses = result.BindPoses;
 
+            return data;
+        }
+
+        static MeshBuildData BuildStaticMeshData(CgfMeshChunk chunk, Matrix4x4 nodeTransform, float importScale)
+        {
+            var data = new MeshBuildData();
+            var unityNodeTransform = CryTransformConversion.NodeMatrixInImporterSpace(nodeTransform, importScale);
+
+            bool hasUvs = chunk.UVs != null && chunk.UVs.Length > 0 &&
+                          chunk.TexFaces != null && chunk.TexFaces.Length == chunk.Faces.Length;
+            var remap = BuildVertexRemapping(chunk.Faces, chunk.TexFaces, chunk.Vertices.Length,
+                hasUvs ? chunk.UVs.Length : 0);
+            int n = remap.UniquePosIdx.Length;
+
+            data.NativePositions = new NativeArray<float3>(n, Allocator.Persistent);
+            data.NativeNormals   = new NativeArray<float3>(n, Allocator.Persistent);
+            data.NativeUvs       = new NativeArray<float2>(n, Allocator.Persistent);
+            data.HasNativeArrays = true;
+
+            RunStaticVertexTransformJob(remap, chunk.Vertices, hasUvs ? chunk.UVs : null,
+                unityNodeTransform, importScale,
+                data.NativePositions, data.NativeNormals, data.NativeUvs);
+
+            MergeSubmeshMap(data.SubmeshMap, remap.SubmeshMap, 0);
             return data;
         }
 
@@ -279,82 +321,182 @@ namespace OpenFarCry.Importer.Cgf
         {
             var data = new MeshBuildData();
 
-            for (int partIndex = 0; partIndex < parts.Count; partIndex++)
+            // Pass 1: compute remapping for every part and total vert count
+            var remaps          = new VertexRemappingResult[parts.Count];
+            var unityTransforms = new Matrix4x4[parts.Count];
+            var partHasUvs      = new bool[parts.Count];
+            int totalVerts      = 0;
+
+            for (int i = 0; i < parts.Count; i++)
             {
-                var part = parts[partIndex];
-                var chunk = part.Chunk;
-                var unityNodeTransform = CryTransformConversion.NodeMatrixInImporterSpace(part.NodeTransform, importScale);
-                var vertCache = new Dictionary<(int pi, int ti), int>();
+                var chunk = parts[i].Chunk;
+                unityTransforms[i] = CryTransformConversion.NodeMatrixInImporterSpace(parts[i].NodeTransform, importScale);
+                bool hasUvs = chunk.UVs != null && chunk.UVs.Length > 0 &&
+                              chunk.TexFaces != null && chunk.TexFaces.Length == chunk.Faces.Length;
+                partHasUvs[i] = hasUvs;
+                remaps[i] = BuildVertexRemapping(chunk.Faces, chunk.TexFaces, chunk.Vertices.Length,
+                    hasUvs ? chunk.UVs.Length : 0);
+                totalVerts += remaps[i].UniquePosIdx.Length;
+            }
 
-                var faces = chunk.Faces;
-                var texFaces = chunk.TexFaces;
-                var verts = chunk.Vertices;
-                var rawUVs = chunk.UVs;
-                bool hasTexFaces = texFaces != null && texFaces.Length == faces.Length;
-                bool hasUvs = rawUVs != null && rawUVs.Length > 0 && hasTexFaces;
+            data.NativePositions = new NativeArray<float3>(totalVerts, Allocator.Persistent);
+            data.NativeNormals   = new NativeArray<float3>(totalVerts, Allocator.Persistent);
+            data.NativeUvs       = new NativeArray<float2>(totalVerts, Allocator.Persistent);
+            data.HasNativeArrays = true;
 
-                for (int fi = 0; fi < faces.Length; fi++)
-                {
-                    var face = faces[fi];
-                    if (!data.SubmeshMap.TryGetValue(face.MatID, out var triList))
-                    {
-                        triList = new List<int>();
-                        data.SubmeshMap[face.MatID] = triList;
-                    }
+            // Pass 2: per-part Burst jobs into output slices; merge submesh maps with offset
+            int vertexOffset = 0;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var chunk = parts[i].Chunk;
+                var remap = remaps[i];
+                int partVerts = remap.UniquePosIdx.Length;
 
-                    int t0 = hasTexFaces ? texFaces[fi].T0 : 0;
-                    int t1 = hasTexFaces ? texFaces[fi].T1 : 0;
-                    int t2 = hasTexFaces ? texFaces[fi].T2 : 0;
+                RunStaticVertexTransformJob(remap, chunk.Vertices, partHasUvs[i] ? chunk.UVs : null,
+                    unityTransforms[i], importScale,
+                    data.NativePositions.GetSubArray(vertexOffset, partVerts),
+                    data.NativeNormals.GetSubArray(vertexOffset, partVerts),
+                    data.NativeUvs.GetSubArray(vertexOffset, partVerts));
 
-                    ProcessCorner(face.V0, t0, triList);
-                    ProcessCorner(face.V1, t1, triList);
-                    ProcessCorner(face.V2, t2, triList);
-                }
-
-                void ProcessCorner(int pi, int ti, List<int> triangles)
-                {
-                    if (pi < 0 || pi >= verts.Length)
-                        return;
-
-                    var key = (pi, ti);
-                    if (!vertCache.TryGetValue(key, out int idx))
-                    {
-                        idx = data.Positions.Count;
-                        var v = verts[pi];
-                        var rawPos = CryTransformConversion.PositionInImporterSpace(new Vector3(v.PX, v.PY, v.PZ), importScale);
-                        var rawNrm = CryTransformConversion.DirectionInImporterSpace(new Vector3(v.NX, v.NY, v.NZ));
-                        data.Positions.Add(unityNodeTransform.MultiplyPoint3x4(rawPos));
-                        data.Normals.Add(unityNodeTransform.MultiplyVector(rawNrm).normalized);
-
-                        if (hasUvs && ti >= 0 && ti < rawUVs.Length)
-                        {
-                            var uv = rawUVs[ti];
-                            data.Uvs.Add(new Vector2(uv.U, 1f - uv.V));
-                        }
-                        else
-                        {
-                            data.Uvs.Add(Vector2.zero);
-                        }
-
-                        vertCache[key] = idx;
-                    }
-
-                    triangles.Add(idx);
-                }
+                MergeSubmeshMap(data.SubmeshMap, remap.SubmeshMap, vertexOffset);
+                vertexOffset += partVerts;
             }
 
             return data;
         }
 
+        internal static VertexRemappingResult BuildVertexRemapping(
+            CryFace[] faces, CryTexFace[] texFaces, int vertCount, int uvCount)
+        {
+            var submeshMap   = new Dictionary<int, List<int>>();
+            var uniquePosIdx = new List<int>();
+            var uniqueUvIdx  = new List<int>();
+            var vertCache    = new Dictionary<(int pi, int ti), int>();
+
+            bool hasTexFaces = texFaces != null && texFaces.Length == faces.Length;
+
+            for (int fi = 0; fi < faces.Length; fi++)
+            {
+                int matID = faces[fi].MatID;
+                if (!submeshMap.TryGetValue(matID, out var triList))
+                {
+                    triList = new List<int>();
+                    submeshMap[matID] = triList;
+                }
+
+                int t0 = hasTexFaces ? texFaces[fi].T0 : 0;
+                int t1 = hasTexFaces ? texFaces[fi].T1 : 0;
+                int t2 = hasTexFaces ? texFaces[fi].T2 : 0;
+
+                Remap(faces[fi].V0, t0, triList);
+                Remap(faces[fi].V1, t1, triList);
+                Remap(faces[fi].V2, t2, triList);
+            }
+
+            void Remap(int pi, int ti, List<int> tris)
+            {
+                if (pi < 0 || pi >= vertCount) return;
+                var key = (pi, ti);
+                if (!vertCache.TryGetValue(key, out int idx))
+                {
+                    idx = uniquePosIdx.Count;
+                    uniquePosIdx.Add(pi);
+                    uniqueUvIdx.Add(uvCount > 0 && ti >= 0 && ti < uvCount ? ti : -1);
+                    vertCache[key] = idx;
+                }
+                tris.Add(idx);
+            }
+
+            return new VertexRemappingResult(submeshMap, uniquePosIdx.ToArray(), uniqueUvIdx.ToArray());
+        }
+
+        static void MergeSubmeshMap(Dictionary<int, List<int>> target, Dictionary<int, List<int>> source, int vertexOffset)
+        {
+            foreach (var kv in source)
+            {
+                if (!target.TryGetValue(kv.Key, out var targetList))
+                {
+                    targetList = new List<int>(kv.Value.Count);
+                    target[kv.Key] = targetList;
+                }
+                foreach (int idx in kv.Value)
+                    targetList.Add(idx + vertexOffset);
+            }
+        }
+
+        static unsafe void RunStaticVertexTransformJob(
+            VertexRemappingResult remap,
+            CryVertex[] verts, CryUV[] rawUVs,
+            Matrix4x4 unityNodeTransform, float importScale,
+            NativeArray<float3> outPositions,
+            NativeArray<float3> outNormals,
+            NativeArray<float2> outUvs)
+        {
+            int uvCount = rawUVs?.Length ?? 0;
+
+            var nativePosIdx = new NativeArray<int>(remap.UniquePosIdx, Allocator.TempJob);
+            var nativeUvIdx  = new NativeArray<int>(remap.UniqueUvIdx,  Allocator.TempJob);
+
+            var nativeVerts = new NativeArray<CryVertexBlittable>(verts.Length, Allocator.TempJob,
+                NativeArrayOptions.UninitializedMemory);
+            fixed (CryVertex* src = verts)
+                UnsafeUtility.MemCpy(nativeVerts.GetUnsafePtr(), src,
+                    verts.Length * UnsafeUtility.SizeOf<CryVertexBlittable>());
+
+            NativeArray<CryUvBlittable> nativeUvs;
+            if (uvCount > 0)
+            {
+                nativeUvs = new NativeArray<CryUvBlittable>(uvCount, Allocator.TempJob,
+                    NativeArrayOptions.UninitializedMemory);
+                fixed (CryUV* src = rawUVs)
+                    UnsafeUtility.MemCpy(nativeUvs.GetUnsafePtr(), src,
+                        uvCount * UnsafeUtility.SizeOf<CryUvBlittable>());
+            }
+            else
+            {
+                nativeUvs = new NativeArray<CryUvBlittable>(0, Allocator.TempJob);
+            }
+
+            new StaticVertexTransformJob
+            {
+                UniquePosIdx = nativePosIdx,
+                UniqueUvIdx  = nativeUvIdx,
+                RawVertices  = nativeVerts,
+                RawUVs       = nativeUvs,
+                NodeMatrix   = (float4x4)unityNodeTransform,
+                ImportScale  = importScale,
+                UvCount      = uvCount,
+                OutPositions = outPositions,
+                OutNormals   = outNormals,
+                OutUvs       = outUvs,
+            }.Schedule(remap.UniquePosIdx.Length, 64).Complete();
+
+            nativePosIdx.Dispose();
+            nativeUvIdx.Dispose();
+            nativeVerts.Dispose();
+            nativeUvs.Dispose();
+        }
+
         static Mesh CreateUnityMesh(MeshBuildData data, out int[] submeshMaterialIds)
         {
             var mesh = new Mesh { name = MeshCacheVersionName };
-            if (data.Positions.Count > 65535)
+
+            int vertCount = data.HasNativeArrays ? data.NativePositions.Length : data.Positions.Count;
+            if (vertCount > 65535)
                 mesh.indexFormat = IndexFormat.UInt32;
 
-            mesh.SetVertices(data.Positions);
-            mesh.SetNormals(data.Normals);
-            mesh.SetUVs(0, data.Uvs);
+            if (data.HasNativeArrays)
+            {
+                mesh.SetVertices(data.NativePositions.Reinterpret<Vector3>(UnsafeUtility.SizeOf<float3>()));
+                mesh.SetNormals(data.NativeNormals.Reinterpret<Vector3>(UnsafeUtility.SizeOf<float3>()));
+                mesh.SetUVs(0, data.NativeUvs.Reinterpret<Vector2>(UnsafeUtility.SizeOf<float2>()));
+            }
+            else
+            {
+                mesh.SetVertices(data.Positions);
+                mesh.SetNormals(data.Normals);
+                mesh.SetUVs(0, data.Uvs);
+            }
 
             var sortedMatIDs = data.SubmeshMap.Keys.OrderBy(k => k).ToList();
             mesh.subMeshCount = sortedMatIDs.Count;

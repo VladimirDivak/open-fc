@@ -6,6 +6,7 @@ using OpenFarCry.Importer.Editor;
 using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
+using OpenFarCry.Level.Services;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -191,12 +192,16 @@ namespace OpenFarCry.Level.Editor
             Scene target = EnsureLevelScene(levelName);
             if (!target.IsValid()) { _lastError = "Failed to open/create level scene."; return; }
 
+            GeometryCacheContext cacheContext = null;
+            if (_cacheGeometryInEditMode)
+                cacheContext = BuildDataDrivenCacheContext(levelName);
+
             FcLevelSceneBuilder.ClearScene(target);
             var stats = FcLevelSceneBuilder.BuildScene(
                 levelName, missionName, _registry, target, _skipHidden, _buildBrushes);
 
             GeometryCacheStats cacheStats = _cacheGeometryInEditMode
-                ? CacheSceneGeometryToProject(target)
+                ? CacheSceneGeometryToProject(target, cacheContext)
                 : default;
 
             _lastBuildStats = _cacheGeometryInEditMode
@@ -213,16 +218,36 @@ namespace OpenFarCry.Level.Editor
             _lastError = null;
         }
 
+        [System.Flags]
+        enum GeometryUsageFlags
+        {
+            None = 0,
+            Brush = 1 << 0,
+            Vegetation = 1 << 1,
+            MeshEntity = 1 << 2,
+        }
+
         readonly struct GeometryImportProfile
         {
             public readonly bool ImportSkeleton;
             public readonly float ImportScale;
+            public readonly GeometryUsageFlags UsageFlags;
+            public readonly bool RequiresPhysicsCollider;
 
-            public GeometryImportProfile(bool importSkeleton, float importScale)
+            public GeometryImportProfile(
+                bool importSkeleton,
+                float importScale,
+                GeometryUsageFlags usageFlags,
+                bool requiresPhysicsCollider)
             {
                 ImportSkeleton = importSkeleton;
                 ImportScale = importScale;
+                UsageFlags = usageFlags;
+                RequiresPhysicsCollider = requiresPhysicsCollider;
             }
+
+            public bool IsBrush => (UsageFlags & GeometryUsageFlags.Brush) != 0;
+            public bool IsBrushOnly => UsageFlags == GeometryUsageFlags.Brush;
         }
 
         struct GeometryCacheStats
@@ -231,6 +256,7 @@ namespace OpenFarCry.Level.Editor
             public int UniquePaths;
             public int ImportedPrefabs;
             public int ReusedPrefabs;
+            public int RebuiltPrefabs;
             public int FailedImports;
             public int AttachedInstances;
             public int DisabledLoaderComponents;
@@ -242,31 +268,82 @@ namespace OpenFarCry.Level.Editor
                     $"Unique CGF paths: {UniquePaths}\n" +
                     $"Imported prefabs: {ImportedPrefabs}\n" +
                     $"Reused prefabs: {ReusedPrefabs}\n" +
+                    $"Rebuilt prefabs: {RebuiltPrefabs}\n" +
                     $"Failed imports: {FailedImports}\n" +
                     $"Attached instances: {AttachedInstances}\n" +
                     $"Disabled loaders: {DisabledLoaderComponents}";
             }
         }
 
-        GeometryCacheStats CacheSceneGeometryToProject(Scene scene)
+        sealed class GeometryCacheContext
         {
-            var stats = new GeometryCacheStats();
+            public readonly Dictionary<string, GeometryImportProfile> ProfilesByPath =
+                new Dictionary<string, GeometryImportProfile>(System.StringComparer.Ordinal);
+            public readonly Dictionary<string, GameObject> CachedPrefabsByPath =
+                new Dictionary<string, GameObject>(System.StringComparer.Ordinal);
+            public GeometryCacheStats Stats;
+        }
+
+        GeometryCacheContext BuildDataDrivenCacheContext(string levelName)
+        {
+            var context = new GeometryCacheContext();
+            if (_buildBrushes)
+                RegisterBrushProfilesFromLevelData(levelName, context.ProfilesByPath, ref context.Stats);
+            RegisterVegetationProfilesFromLevelData(levelName, context.ProfilesByPath, ref context.Stats);
+            context.Stats.UniquePaths = context.ProfilesByPath.Count;
+            EnsureCachedPrefabsForProfiles(context.ProfilesByPath, context.CachedPrefabsByPath, ref context.Stats);
+            return context;
+        }
+
+        GeometryCacheStats CacheSceneGeometryToProject(Scene scene, GeometryCacheContext preCacheContext)
+        {
+            var context = preCacheContext ?? new GeometryCacheContext();
             var brushes = CollectComponentsInScene<FcBrushInstance>(scene);
             var vegetation = CollectComponentsInScene<FcVegetationInstance>(scene);
             var meshEntities = CollectComponentsInScene<FcMeshEntity>(scene);
 
-            stats.SourceInstances = brushes.Count + vegetation.Count + meshEntities.Count;
+            context.Stats.SourceInstances = brushes.Count + vegetation.Count + meshEntities.Count;
 
-            var profilesByPath = new Dictionary<string, GeometryImportProfile>(System.StringComparer.Ordinal);
-            RegisterBrushAndVegetationProfiles(brushes, vegetation, profilesByPath);
-            RegisterMeshEntityProfiles(meshEntities, profilesByPath);
+            RegisterBrushAndVegetationProfiles(brushes, vegetation, context.ProfilesByPath);
+            RegisterMeshEntityProfiles(meshEntities, context.ProfilesByPath);
+            context.Stats.UniquePaths = context.ProfilesByPath.Count;
 
-            stats.UniquePaths = profilesByPath.Count;
+            EnsureCachedPrefabsForProfiles(
+                context.ProfilesByPath,
+                context.CachedPrefabsByPath,
+                ref context.Stats);
+
+            if (_attachCachedPrefabsToScene)
+            {
+                context.Stats.AttachedInstances += AttachCachedPrefabsToScene(brushes, context.CachedPrefabsByPath);
+                context.Stats.AttachedInstances += AttachCachedPrefabsToScene(vegetation, context.CachedPrefabsByPath);
+                context.Stats.AttachedInstances += AttachCachedPrefabsToScene(meshEntities, context.CachedPrefabsByPath);
+            }
+
+            if (_disableRuntimeLoaders)
+            {
+                context.Stats.DisabledLoaderComponents += DisableLoadedComponents(brushes, context.CachedPrefabsByPath);
+                context.Stats.DisabledLoaderComponents += DisableLoadedComponents(vegetation, context.CachedPrefabsByPath);
+                context.Stats.DisabledLoaderComponents += DisableLoadedComponents(meshEntities, context.CachedPrefabsByPath);
+            }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+            EditorSceneManager.MarkSceneDirty(scene);
+            return context.Stats;
+        }
+
+        void EnsureCachedPrefabsForProfiles(
+            IReadOnlyDictionary<string, GeometryImportProfile> profilesByPath,
+            IDictionary<string, GameObject> cachedPrefabsByPath,
+            ref GeometryCacheStats stats)
+        {
+            if (profilesByPath == null || profilesByPath.Count == 0)
+                return;
 
             var importService = new CgfImportEditorService();
             var cacheService = new CgfAssetCacheService();
             var lodService = new CgfLodImportService();
-            var cachedPrefabsByPath = new Dictionary<string, GameObject>(System.StringComparer.Ordinal);
 
             try
             {
@@ -281,16 +358,42 @@ namespace OpenFarCry.Level.Editor
                         $"{index}/{profilesByPath.Count}: {virtualPath}",
                         profilesByPath.Count > 0 ? (float)index / profilesByPath.Count : 1f);
 
-                    var cachePaths = cacheService.GetCachePaths(virtualPath);
-                    var existingPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(cachePaths.PrefabPath);
-                    if (existingPrefab != null)
+                    if (cachedPrefabsByPath.TryGetValue(virtualPath, out var knownPrefab) && knownPrefab != null)
+                        continue;
+
+                    GameObject incompatiblePrefab;
+                    if (!TryLoadParsedFile(virtualPath, out var parsedFile))
+                    {
+                        stats.FailedImports++;
+                        continue;
+                    }
+
+                    bool hasCompatibleCache = cacheService.TryLoadCompatibleCachedPrefab(
+                        virtualPath,
+                        parsedFile,
+                        out var existingPrefab);
+                    bool isBrushParityCompatible = !profile.IsBrushOnly ||
+                                                   FcBrushGeometryPostProcessor.IsBrushRuntimeParityCompatible(existingPrefab);
+
+                    if (hasCompatibleCache && isBrushParityCompatible)
                     {
                         cachedPrefabsByPath[virtualPath] = existingPrefab;
                         stats.ReusedPrefabs++;
                         continue;
                     }
 
-                    if (!TryImportAndCachePrefab(virtualPath, profile, importService, cacheService, lodService, out var importedPrefab))
+                    var cachePaths = cacheService.GetCachePaths(virtualPath);
+                    incompatiblePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(cachePaths.PrefabPath);
+                    bool hadIncompatibleCache = incompatiblePrefab != null;
+
+                    if (!TryImportAndCachePrefab(
+                            virtualPath,
+                            parsedFile,
+                            profile,
+                            importService,
+                            cacheService,
+                            lodService,
+                            out var importedPrefab))
                     {
                         stats.FailedImports++;
                         continue;
@@ -298,31 +401,99 @@ namespace OpenFarCry.Level.Editor
 
                     cachedPrefabsByPath[virtualPath] = importedPrefab;
                     stats.ImportedPrefabs++;
+                    if (hadIncompatibleCache)
+                        stats.RebuiltPrefabs++;
                 }
             }
             finally
             {
                 EditorUtility.ClearProgressBar();
             }
+        }
 
-            if (_attachCachedPrefabsToScene)
+        static bool TryLoadParsedFile(string virtualPath, out CgfFile parsedFile)
+        {
+            parsedFile = null;
+            try
             {
-                stats.AttachedInstances += AttachCachedPrefabsToScene(brushes, cachedPrefabsByPath);
-                stats.AttachedInstances += AttachCachedPrefabsToScene(vegetation, cachedPrefabsByPath);
-                stats.AttachedInstances += AttachCachedPrefabsToScene(meshEntities, cachedPrefabsByPath);
+                var sourceBytes = CgfResourceImportService.Instance.LoadRuntimeResourceBytes(virtualPath);
+                parsedFile = CgfParser.Parse(sourceBytes);
+                parsedFile.SourceVirtualPath = virtualPath;
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[FcLevelBuilder] Failed to parse '{virtualPath}' for cache validation: {e.Message}");
+                return false;
+            }
+        }
+
+        static void RegisterBrushProfilesFromLevelData(
+            string levelName,
+            Dictionary<string, GeometryImportProfile> profilesByPath,
+            ref GeometryCacheStats stats)
+        {
+            var brushes = FcBrushLoader.LoadBrushes(levelName);
+            if (brushes == null || brushes.Count == 0)
+                return;
+
+            for (int i = 0; i < brushes.Count; i++)
+            {
+                var brush = brushes[i];
+                if (brush == null)
+                    continue;
+
+                stats.SourceInstances++;
+                RegisterImportProfile(
+                    brush.VirtualPath,
+                    importSkeleton: false,
+                    importScale: 0.01f,
+                    usageFlags: GeometryUsageFlags.Brush,
+                    requiresPhysicsCollider: !brush.NoPhysics,
+                    profilesByPath: profilesByPath);
+            }
+        }
+
+        static void RegisterVegetationProfilesFromLevelData(
+            string levelName,
+            Dictionary<string, GeometryImportProfile> profilesByPath,
+            ref GeometryCacheStats stats)
+        {
+            var supplement = FcLevelSupplementLoader.Load(levelName);
+            if (supplement?.VegetationTypes == null || supplement.VegetationTypes.Length == 0 ||
+                supplement.VegetationInstances == null || supplement.VegetationInstances.Length == 0)
+                return;
+
+            var usedTypeIndices = new HashSet<int>();
+            for (int i = 0; i < supplement.VegetationInstances.Length; i++)
+                usedTypeIndices.Add(supplement.VegetationInstances[i].Type);
+
+            var pathByType = new Dictionary<int, string>();
+            for (int i = 0; i < supplement.VegetationTypes.Length; i++)
+            {
+                var type = supplement.VegetationTypes[i];
+                if (type.Index < 0 || string.IsNullOrWhiteSpace(type.FileName))
+                    continue;
+                pathByType[type.Index] = type.FileName;
             }
 
-            if (_disableRuntimeLoaders)
+            for (int i = 0; i < supplement.VegetationInstances.Length; i++)
             {
-                stats.DisabledLoaderComponents += DisableLoadedComponents(brushes, cachedPrefabsByPath);
-                stats.DisabledLoaderComponents += DisableLoadedComponents(vegetation, cachedPrefabsByPath);
-                stats.DisabledLoaderComponents += DisableLoadedComponents(meshEntities, cachedPrefabsByPath);
-            }
+                int typeIndex = supplement.VegetationInstances[i].Type;
+                if (!usedTypeIndices.Contains(typeIndex))
+                    continue;
+                if (!pathByType.TryGetValue(typeIndex, out var virtualPath))
+                    continue;
 
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-            EditorSceneManager.MarkSceneDirty(scene);
-            return stats;
+                stats.SourceInstances++;
+                RegisterImportProfile(
+                    virtualPath,
+                    importSkeleton: false,
+                    importScale: 0.01f,
+                    usageFlags: GeometryUsageFlags.Vegetation,
+                    requiresPhysicsCollider: false,
+                    profilesByPath: profilesByPath);
+            }
         }
 
         static void RegisterBrushAndVegetationProfiles(
@@ -331,9 +502,27 @@ namespace OpenFarCry.Level.Editor
             Dictionary<string, GeometryImportProfile> profilesByPath)
         {
             for (int i = 0; i < brushes.Count; i++)
-                RegisterImportProfile(brushes[i] != null ? brushes[i].VirtualPath : null, false, 0.01f, profilesByPath);
+            {
+                var brush = brushes[i];
+                RegisterImportProfile(
+                    brush != null ? brush.VirtualPath : null,
+                    importSkeleton: false,
+                    importScale: 0.01f,
+                    usageFlags: GeometryUsageFlags.Brush,
+                    requiresPhysicsCollider: brush != null && !brush.NoPhysics,
+                    profilesByPath: profilesByPath);
+            }
+
             for (int i = 0; i < vegetation.Count; i++)
-                RegisterImportProfile(vegetation[i] != null ? vegetation[i].VirtualPath : null, false, 0.01f, profilesByPath);
+            {
+                RegisterImportProfile(
+                    vegetation[i] != null ? vegetation[i].VirtualPath : null,
+                    importSkeleton: false,
+                    importScale: 0.01f,
+                    usageFlags: GeometryUsageFlags.Vegetation,
+                    requiresPhysicsCollider: false,
+                    profilesByPath: profilesByPath);
+            }
         }
 
         static void RegisterMeshEntityProfiles(
@@ -352,7 +541,13 @@ namespace OpenFarCry.Level.Editor
                 if (importScale <= 0f)
                     importScale = 0.01f;
 
-                RegisterImportProfile(entity.VirtualPath, importSkeleton, importScale, profilesByPath);
+                RegisterImportProfile(
+                    entity.VirtualPath,
+                    importSkeleton,
+                    importScale,
+                    usageFlags: GeometryUsageFlags.MeshEntity,
+                    requiresPhysicsCollider: false,
+                    profilesByPath: profilesByPath);
             }
         }
 
@@ -360,6 +555,8 @@ namespace OpenFarCry.Level.Editor
             string virtualPath,
             bool importSkeleton,
             float importScale,
+            GeometryUsageFlags usageFlags,
+            bool requiresPhysicsCollider,
             Dictionary<string, GeometryImportProfile> profilesByPath)
         {
             if (string.IsNullOrWhiteSpace(virtualPath))
@@ -381,16 +578,27 @@ namespace OpenFarCry.Level.Editor
                 float mergedScale = existing.ImportScale;
                 if (importScale > 0f && System.Math.Abs(importScale - 0.01f) > 1e-6f)
                     mergedScale = importScale;
+                var mergedUsage = existing.UsageFlags | usageFlags;
+                bool mergedRequiresCollider = existing.RequiresPhysicsCollider || requiresPhysicsCollider;
 
-                profilesByPath[normalized] = new GeometryImportProfile(mergedSkeleton, mergedScale);
+                profilesByPath[normalized] = new GeometryImportProfile(
+                    mergedSkeleton,
+                    mergedScale,
+                    mergedUsage,
+                    mergedRequiresCollider);
                 return;
             }
 
-            profilesByPath[normalized] = new GeometryImportProfile(importSkeleton, importScale);
+            profilesByPath[normalized] = new GeometryImportProfile(
+                importSkeleton,
+                importScale,
+                usageFlags,
+                requiresPhysicsCollider);
         }
 
         static bool TryImportAndCachePrefab(
             string virtualPath,
+            CgfFile parsedFile,
             GeometryImportProfile profile,
             CgfImportEditorService importService,
             CgfAssetCacheService cacheService,
@@ -400,10 +608,6 @@ namespace OpenFarCry.Level.Editor
             cachedPrefab = null;
             try
             {
-                var sourceBytes = CgfResourceImportService.Instance.LoadRuntimeResourceBytes(virtualPath);
-                var parsedFile = CgfParser.Parse(sourceBytes);
-                parsedFile.SourceVirtualPath = virtualPath;
-
                 var siblingLods = lodService.FindSiblingLodPaths(virtualPath);
                 var request = new CgfImportRequest(
                     parsedPath: virtualPath,
@@ -417,7 +621,8 @@ namespace OpenFarCry.Level.Editor
                     importScale: profile.ImportScale,
                     rigCachePolicy: default,
                     tryInstantiateCachedPrefab: TryInstantiateNever,
-                    buildGameObject: BuildStaticGameObject,
+                    buildGameObject: (result, parsed, rigDef, name, importPhysicsBoxColliders, importRagdollBodies, importScale) =>
+                        BuildStaticGameObject(result, parsed, rigDef, name, importPhysicsBoxColliders, importRagdollBodies, importScale, profile),
                     configureLodGroup: (root, hasSkeleton, importScale, saveToProject) =>
                         lodService.ConfigureLodGroup(
                             root,
@@ -427,7 +632,7 @@ namespace OpenFarCry.Level.Editor
                             persistMesh: cacheService.PersistMeshAssetForVirtualPath,
                             materialService: CgfRuntimeImporter.MaterialService),
                     attachAnimations: null,
-                    applyPostTransform: ResetTransform,
+                    applyPostTransform: go => ApplyPostImportTransform(go, profile),
                     saveAssets: (mesh, go, clips) => cacheService.SaveAssets(virtualPath, mesh, go, clips),
                     useRuntimeImportService: true,
                     useRuntimeMemoryCache: true,
@@ -469,15 +674,28 @@ namespace OpenFarCry.Level.Editor
             string name,
             bool importPhysicsBoxColliders,
             bool importRagdollBodies,
-            float importScale)
+            float importScale,
+            GeometryImportProfile profile)
         {
             var builder = new CgfGameObjectBuilder();
-            return builder.Build(new CgfGameObjectBuilder.BuildRequest(
+            var root = builder.Build(new CgfGameObjectBuilder.BuildRequest(
                 result,
                 parsedFile,
                 rigDefinition,
                 name,
                 materialService: CgfRuntimeImporter.MaterialService)).Root;
+
+            if (profile.IsBrushOnly)
+            {
+                FcBrushGeometryPostProcessor.ApplyRuntimeParity(
+                    root,
+                    result,
+                    parsedFile,
+                    addPhysicsCollider: profile.RequiresPhysicsCollider,
+                    importScale: importScale);
+            }
+
+            return root;
         }
 
         static bool TryInstantiateNever(out GameObject go)
@@ -486,7 +704,7 @@ namespace OpenFarCry.Level.Editor
             return false;
         }
 
-        static void ResetTransform(GameObject go)
+        static void ApplyPostImportTransform(GameObject go, GeometryImportProfile profile)
         {
             if (go == null)
                 return;
@@ -494,6 +712,11 @@ namespace OpenFarCry.Level.Editor
             go.transform.localPosition = Vector3.zero;
             go.transform.localRotation = Quaternion.identity;
             go.transform.localScale = Vector3.one;
+
+            if (profile.IsBrushOnly)
+                FcBrushGeometryPostProcessor.DisableBackfaceCulling(go);
+
+            FcBrushGeometryPostProcessor.StampCacheMetadata(go, profile.IsBrushOnly);
         }
 
         static int AttachCachedPrefabsToScene<T>(
@@ -522,10 +745,25 @@ namespace OpenFarCry.Level.Editor
                 instance.transform.localPosition = Vector3.zero;
                 instance.transform.localRotation = Quaternion.identity;
                 instance.transform.localScale = Vector3.one;
+                ConfigureAttachedCachedInstance(component, instance);
                 attached++;
             }
 
             return attached;
+        }
+
+        static void ConfigureAttachedCachedInstance(Component owner, GameObject cachedChild)
+        {
+            if (owner == null || cachedChild == null)
+                return;
+
+            if (owner is FcBrushInstance brush)
+            {
+                bool enablePhysics = !brush.NoPhysics;
+                var colliders = cachedChild.GetComponentsInChildren<Collider>(includeInactive: true);
+                for (int i = 0; i < colliders.Length; i++)
+                    colliders[i].enabled = enablePhysics;
+            }
         }
 
         static int DisableLoadedComponents<T>(

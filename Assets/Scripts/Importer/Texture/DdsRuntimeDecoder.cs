@@ -1,4 +1,7 @@
 using System;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
 using UnityEngine;
 
 namespace OpenFarCry.Importer.Texture
@@ -877,7 +880,7 @@ namespace OpenFarCry.Importer.Texture
             return true;
         }
 
-        static bool TryDecodeBc4(
+        static unsafe bool TryDecodeBc4(
             byte[] bytes,
             int offset,
             int width,
@@ -885,34 +888,37 @@ namespace OpenFarCry.Importer.Texture
             bool signedNormalized,
             out Color32[] pixels)
         {
-            pixels = new Color32[width * height];
+            pixels = null;
             int blocksX = (width + 3) / 4;
             int blocksY = (height + 3) / 4;
-            int blockSize = 8;
-            int required = blocksX * blocksY * blockSize;
-            if (!CanRead(bytes, offset, required))
+            int numBlocks = blocksX * blocksY;
+            int sliceLen = numBlocks * 8;
+            if (!CanRead(bytes, offset, sliceLen))
                 return false;
 
-            int src = offset;
-            var values = new byte[16];
-            for (int by = 0; by < blocksY; by++)
+            var source = new NativeArray<byte>(sliceLen, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            fixed (byte* src = bytes)
+                UnsafeUtility.MemCpy(source.GetUnsafePtr(), src + offset, sliceLen);
+
+            var output = new NativeArray<Color32>(width * height, Allocator.TempJob);
+
+            new Bc4DecompressJob
             {
-                for (int bx = 0; bx < blocksX; bx++)
-                {
-                    if (signedNormalized)
-                        DecodeBc4SNormBlock(bytes, src, values);
-                    else
-                        DecodeBc4UNormBlock(bytes, src, values);
-                    src += blockSize;
+                Source           = source,
+                BlocksX          = blocksX,
+                Width            = width,
+                Height           = height,
+                SignedNormalized = signedNormalized,
+                Output           = output,
+            }.Schedule(numBlocks, 32).Complete();
 
-                    WriteSingleChannelBlock(pixels, width, height, bx, by, values, channel: 0);
-                }
-            }
-
+            pixels = output.ToArray();
+            source.Dispose();
+            output.Dispose();
             return true;
         }
 
-        static bool TryDecodeBc5(
+        static unsafe bool TryDecodeBc5(
             byte[] bytes,
             int offset,
             int width,
@@ -920,37 +926,33 @@ namespace OpenFarCry.Importer.Texture
             bool signedNormalized,
             out Color32[] pixels)
         {
-            pixels = new Color32[width * height];
+            pixels = null;
             int blocksX = (width + 3) / 4;
             int blocksY = (height + 3) / 4;
-            int blockSize = 16;
-            int required = blocksX * blocksY * blockSize;
-            if (!CanRead(bytes, offset, required))
+            int numBlocks = blocksX * blocksY;
+            int sliceLen = numBlocks * 16;
+            if (!CanRead(bytes, offset, sliceLen))
                 return false;
 
-            int src = offset;
-            var reds = new byte[16];
-            var greens = new byte[16];
-            for (int by = 0; by < blocksY; by++)
+            var source = new NativeArray<byte>(sliceLen, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            fixed (byte* src = bytes)
+                UnsafeUtility.MemCpy(source.GetUnsafePtr(), src + offset, sliceLen);
+
+            var output = new NativeArray<Color32>(width * height, Allocator.TempJob);
+
+            new Bc5DecompressJob
             {
-                for (int bx = 0; bx < blocksX; bx++)
-                {
-                    if (signedNormalized)
-                    {
-                        DecodeBc4SNormBlock(bytes, src + 0, reds);
-                        DecodeBc4SNormBlock(bytes, src + 8, greens);
-                    }
-                    else
-                    {
-                        DecodeBc4UNormBlock(bytes, src + 0, reds);
-                        DecodeBc4UNormBlock(bytes, src + 8, greens);
-                    }
+                Source           = source,
+                BlocksX          = blocksX,
+                Width            = width,
+                Height           = height,
+                SignedNormalized = signedNormalized,
+                Output           = output,
+            }.Schedule(numBlocks, 32).Complete();
 
-                    src += blockSize;
-                    WriteRgBlock(pixels, width, height, bx, by, reds, greens);
-                }
-            }
-
+            pixels = output.ToArray();
+            source.Dispose();
+            output.Dispose();
             return true;
         }
 

@@ -136,10 +136,11 @@ namespace OpenFarCry.Importer.Cgf
             string textureScopeId = null,
             CancellationToken cancellationToken = default)
         {
-            if (parsedFile == null || mesh == null || mesh.subMeshCount <= 0)
+            int subCount = submeshMaterialIds?.Length ?? 0;
+            if (parsedFile == null || mesh == null || subCount <= 0)
                 return;
 
-            var chunks = CollectMaterialChunks(parsedFile, mesh.subMeshCount, submeshMaterialIds);
+            var chunks = CollectMaterialChunks(parsedFile, subCount, submeshMaterialIds);
             if (chunks.Count == 0)
                 return;
 

@@ -36,6 +36,24 @@ namespace OpenFarCry.Importer.Editor
             return new CachePaths(paths.meshPath, paths.prefabPath);
         }
 
+        public bool TryLoadCompatibleCachedPrefab(
+            string virtualPath,
+            CgfFile parsedFile,
+            out GameObject prefabAsset)
+        {
+            prefabAsset = null;
+            if (string.IsNullOrWhiteSpace(virtualPath) || parsedFile == null)
+                return false;
+
+            var paths = GetCachePaths(virtualPath);
+            var candidate = AssetDatabase.LoadAssetAtPath<GameObject>(paths.PrefabPath);
+            if (candidate == null || !IsCachedPrefabCompatible(candidate, parsedFile))
+                return false;
+
+            prefabAsset = candidate;
+            return true;
+        }
+
         public bool TryInstantiateCachedPrefab(
             string virtualPath,
             CgfFile parsedFile,

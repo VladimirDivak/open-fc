@@ -3,11 +3,14 @@
     "rootNamespace": "OpenFarCry.Importer",
     "references": [
         "OpenFarCry.FileSystem",
-        "UniTask"
+        "UniTask",
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Mathematics"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
-    "allowUnsafeCode": false,
+    "allowUnsafeCode": true,
     "overrideReferences": false,
     "autoReferenced": true,
     "noEngineReferences": false

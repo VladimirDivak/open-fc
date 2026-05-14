@@ -3,13 +3,16 @@
     "rootNamespace": "OpenFarCry.Importer.Tests",
     "references": [
         "OpenFarCry.Importer",
-        "OpenFarCry.FileSystem"
+        "OpenFarCry.FileSystem",
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Mathematics"
     ],
     "includePlatforms": [
         "Editor"
     ],
     "excludePlatforms": [],
-    "allowUnsafeCode": false,
+    "allowUnsafeCode": true,
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": false,

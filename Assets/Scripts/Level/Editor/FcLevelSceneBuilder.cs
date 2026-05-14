@@ -60,7 +60,8 @@ namespace OpenFarCry.Level.Editor
 
             // Services
             InstantiateServices(levelRoot, levelName, mission.Environment);
-            BuildTerrainSkeleton(levelRoot, levelName, mission.Environment);
+            FcLevelLoader.TryLoadTerrainSettings(levelName, out int terrainRes, out int terrainUnit);
+            var levelTerrain = BuildUnityTerrain(levelRoot, levelName, mission.Environment, terrainRes, terrainUnit);
 
             // Entity + object containers
             var entityRoot = new GameObject("Entities");
@@ -74,8 +75,7 @@ namespace OpenFarCry.Level.Editor
 
             // Vegetation
             sw.Restart();
-            FcLevelLoader.TryLoadTerrainSettings(levelName, out int terrainRes, out int terrainUnit);
-            stats.Vegetation = BuildVegetationInstances(supplement, levelName, terrainRes, terrainUnit, levelRoot);
+            stats.Vegetation = BuildVegetationInstances(supplement, levelName, terrainRes, terrainUnit, levelRoot, levelTerrain);
             report.RecordPhase("BuildVegetation", sw.Elapsed.TotalMilliseconds);
 
             // ── Brush geometry ──────────────────────────────────────────────────
@@ -111,7 +111,8 @@ namespace OpenFarCry.Level.Editor
             SceneManager.MoveGameObjectToScene(levelRoot, targetScene);
 
             InstantiateServices(levelRoot, layoutData.LevelName, mission.Environment);
-            BuildTerrainSkeleton(levelRoot, layoutData.LevelName, mission.Environment);
+            FcLevelLoader.TryLoadTerrainSettings(layoutData.LevelName, out int terrainRes, out int terrainUnit);
+            var levelTerrain = BuildUnityTerrain(levelRoot, layoutData.LevelName, mission.Environment, terrainRes, terrainUnit);
 
             var entityRoot = new GameObject("Entities");
             entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
@@ -120,8 +121,7 @@ namespace OpenFarCry.Level.Editor
 
             var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
 
-            FcLevelLoader.TryLoadTerrainSettings(layoutData.LevelName, out int terrainRes, out int terrainUnit);
-            stats.Vegetation = BuildVegetationInstancesFromLayout(layoutData, terrainRes, terrainUnit, levelRoot);
+            stats.Vegetation = BuildVegetationInstancesFromLayout(layoutData, terrainRes, terrainUnit, levelRoot, levelTerrain);
 
             stats.Brushes = BuildBrushesFromList(brushList, levelRoot);
 
@@ -161,7 +161,8 @@ namespace OpenFarCry.Level.Editor
             string levelName,
             int terrainResolution,
             int heightmapUnitSize,
-            GameObject levelRoot)
+            GameObject levelRoot,
+            Terrain terrain)
         {
             if (supplement == null ||
                 supplement.VegetationInstances == null || supplement.VegetationInstances.Length == 0 ||
@@ -175,17 +176,15 @@ namespace OpenFarCry.Level.Editor
                     typeByIndex[t.Index] = t;
             }
 
-            var heightSamples = LoadTerrainHeightSamples(levelName, terrainResolution);
-            return PlaceVegetationInstances(
-                supplement.VegetationInstances, typeByIndex,
-                terrainResolution, heightmapUnitSize, heightSamples, levelRoot);
+            return PlaceVegetationAsTreeInstances(supplement.VegetationInstances, typeByIndex, terrain);
         }
 
         static int BuildVegetationInstancesFromLayout(
             FcLevelLayoutDataV2 layoutData,
             int terrainResolution,
             int heightmapUnitSize,
-            GameObject levelRoot)
+            GameObject levelRoot,
+            Terrain terrain)
         {
             if (layoutData.VegetationInstances == null || layoutData.VegetationInstances.Length == 0 ||
                 layoutData.VegetationTypes == null || layoutData.VegetationTypes.Length == 0)
@@ -198,293 +197,150 @@ namespace OpenFarCry.Level.Editor
                     typeByIndex[t.Index] = t;
             }
 
-            var heightSamples = LoadTerrainHeightSamples(layoutData.LevelName, terrainResolution);
-            return PlaceVegetationInstances(
-                layoutData.VegetationInstances, typeByIndex,
-                terrainResolution, heightmapUnitSize, heightSamples, levelRoot);
+            return PlaceVegetationAsTreeInstances(layoutData.VegetationInstances, typeByIndex, terrain);
         }
 
-        // CryEngine stores vegetation Z=0 in objects.lst; actual height sampled from terrain at runtime.
-        static ushort[] LoadTerrainHeightSamples(string levelName, int terrainResolution)
-        {
-            string h16Path = $"levels/{levelName.ToLowerInvariant()}/terrain/land_map.h16";
-            if (!FcFileSystem.Exists(h16Path)) return null;
-            byte[] bytes = FcFileSystem.ReadAllBytes(h16Path);
-            FcTerrainHeightmapDecoder.TryDecodeH16(bytes, terrainResolution, out var samples);
-            return samples;
-        }
-
-        static float SampleTerrainHeight(ushort[] samples, int resolution, int unitSize, float worldX, float worldZ)
-        {
-            const float heightScale = 1f / 256f;
-            int hx = Mathf.RoundToInt(worldX / unitSize);
-            int hz = Mathf.RoundToInt(worldZ / unitSize);
-            hx = Mathf.Clamp(hx, 1, resolution - 1);
-            hz = Mathf.Clamp(hz, 1, resolution - 1);
-            int idx = hx * resolution + hz; // transposed: world x -> first index (matches SampleCryHeightRaw)
-            ushort raw = (uint)idx < (uint)samples.Length ? samples[idx] : (ushort)0;
-            return (raw & 0xFFE0) * heightScale;
-        }
-
-        static int PlaceVegetationInstances(
+        // Attaches FcVegetationTerrainService to the terrain GO with serialized VirtualPaths + instance data.
+        // No geometry is written to disk — runtime component loads CGF from VFS at Play mode Start.
+        static int PlaceVegetationAsTreeInstances(
             FcLevelSupplementData.VegetationInstanceDesc[] instances,
             Dictionary<int, FcLevelSupplementData.VegetationTypeDesc> typeByIndex,
-            int terrainResolution,
-            int heightmapUnitSize,
-            ushort[] heightSamples,
-            GameObject levelRoot)
+            Terrain terrain)
         {
-            const float coordMax = 65535f;
-            float terrainWorldSize = (terrainResolution - 1) * heightmapUnitSize;
+            if (terrain == null) return 0;
+            if (instances == null || instances.Length == 0) return 0;
 
-            var vegRoot = new GameObject("Vegetation");
-            vegRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+            var usedTypes = new HashSet<int>();
+            foreach (var inst in instances)
+                usedTypes.Add(inst.Type);
 
-            int placed = 0;
+            // Collect VirtualPath per used vegetation type — no import, no disk write.
+            var typeEntries = new List<FcVegetationTerrainService.VegetationTypeEntry>();
+            foreach (var kv in typeByIndex)
+            {
+                if (!usedTypes.Contains(kv.Key)) continue;
+                var typeDef = kv.Value;
+                if (string.IsNullOrEmpty(typeDef.FileName)) continue;
+
+                typeEntries.Add(new FcVegetationTerrainService.VegetationTypeEntry
+                {
+                    TypeIndex   = kv.Key,
+                    VirtualPath = typeDef.FileName,
+                });
+            }
+
+            // Pre-normalize instance positions (float) to avoid ushort arithmetic at runtime.
+            var instanceData = new FcVegetationTerrainService.VegetationInstanceData[instances.Length];
             for (int i = 0; i < instances.Length; i++)
             {
                 var inst = instances[i];
-                if (!typeByIndex.TryGetValue(inst.Type, out var typeDef))
-                    continue;
-
-                // Cry XY (0..65535) -> Unity XZ scene space.
-                float worldX = inst.X * terrainWorldSize / coordMax;
-                float worldZ = inst.Y * terrainWorldSize / coordMax;
-                // Z in file is 0; sample actual height from terrain heightmap.
-                float worldY = heightSamples != null
-                    ? SampleTerrainHeight(heightSamples, terrainResolution, heightmapUnitSize, worldX, worldZ)
-                    : inst.Z / 256f;
-
-                float scale = inst.Scale > 0f ? inst.Scale : 1f;
-
-                var go = new GameObject($"Veg_{typeDef.Index}_{i}");
-                go.transform.SetParent(vegRoot.transform, worldPositionStays: false);
-                go.transform.position = new Vector3(worldX, worldY, worldZ);
-                go.transform.localScale = new Vector3(scale, scale, scale);
-
-                var veg = go.AddComponent<FcVegetationInstance>();
-                var so = new SerializedObject(veg);
-                so.FindProperty("_virtualPath").stringValue  = typeDef.FileName;
-                so.FindProperty("_typeIndex").intValue       = typeDef.Index;
-                so.FindProperty("_instanceScale").floatValue = scale;
-                so.FindProperty("_brightness").intValue      = inst.Brightness;
-                so.ApplyModifiedPropertiesWithoutUndo();
-
-                placed++;
+                instanceData[i] = new FcVegetationTerrainService.VegetationInstanceData
+                {
+                    TypeIndex = inst.Type,
+                    PosX      = inst.X / 65535f,
+                    PosZ      = inst.Y / 65535f,
+                    Scale     = inst.Scale > 0f ? inst.Scale : 1f,
+                };
             }
 
-            if (placed == 0)
-                Object.DestroyImmediate(vegRoot);
+            // Attach the runtime service; populate via SerializedObject so data persists in scene.
+            var vegService = terrain.gameObject.AddComponent<FcVegetationTerrainService>();
+            var so = new SerializedObject(vegService);
 
-            return placed;
+            var typesProp = so.FindProperty("_vegetationTypes");
+            typesProp.arraySize = typeEntries.Count;
+            for (int i = 0; i < typeEntries.Count; i++)
+            {
+                var elem = typesProp.GetArrayElementAtIndex(i);
+                elem.FindPropertyRelative("TypeIndex").intValue    = typeEntries[i].TypeIndex;
+                elem.FindPropertyRelative("VirtualPath").stringValue = typeEntries[i].VirtualPath;
+            }
+
+            var instProp = so.FindProperty("_instances");
+            instProp.arraySize = instanceData.Length;
+            for (int i = 0; i < instanceData.Length; i++)
+            {
+                var elem = instProp.GetArrayElementAtIndex(i);
+                elem.FindPropertyRelative("TypeIndex").intValue  = instanceData[i].TypeIndex;
+                elem.FindPropertyRelative("PosX").floatValue     = instanceData[i].PosX;
+                elem.FindPropertyRelative("PosZ").floatValue     = instanceData[i].PosZ;
+                elem.FindPropertyRelative("Scale").floatValue    = instanceData[i].Scale;
+            }
+
+            so.ApplyModifiedPropertiesWithoutUndo();
+
+            return instances.Length;
         }
 
-        static void BuildTerrainSkeleton(GameObject levelRoot, string levelName, FcLevelEnvironmentDesc environment)
+        static Terrain BuildUnityTerrain(
+            GameObject levelRoot,
+            string levelName,
+            FcLevelEnvironmentDesc environment,
+            int resolution,
+            int heightmapUnitSize)
         {
-            const float terrainVerticalSceneScale = 1f;
             string basePath = $"levels/{levelName.ToLowerInvariant()}";
             string h16Path = $"{basePath}/terrain/land_map.h16";
             if (!FcFileSystem.Exists(h16Path))
-                return;
+                return null;
 
             byte[] bytes = FcFileSystem.ReadAllBytes(h16Path);
-            int resolution = FcTerrainHeightmapDecoder.DefaultResolution;
-            int heightmapUnitSize = 2;
-            FcLevelLoader.TryLoadTerrainSettings(levelName, out resolution, out heightmapUnitSize);
-            if (!FcTerrainHeightmapDecoder.TryDecodeH16(bytes, resolution, out var samples))
+            if (!FcTerrainHeightmapDecoder.TryDecodeToUnityHeights(bytes, resolution, out var heights))
             {
-                Debug.LogWarning($"[FcLevelSceneBuilder] Could not decode terrain heightmap '{h16Path}' ({bytes?.Length ?? 0} bytes).");
-                return;
+                Debug.LogWarning($"[FcLevelSceneBuilder] Could not decode terrain heightmap '{h16Path}'.");
+                return null;
             }
 
-            const int quadsPerChunk = 63;
-            float heightScale = (1f / 256f) * terrainVerticalSceneScale;      // CryEngine TERRAIN_Z_RATIO
-            float metersPerSample = heightmapUnitSize;
+            int hmRes = resolution + 1; // e.g. 1025
+            float worldSize = (resolution - 1) * heightmapUnitSize;
 
-            ushort minMasked = ushort.MaxValue;
-            ushort maxMasked = 0;
-            for (int hz = 1; hz < resolution; hz++)
+            var terrainData = new TerrainData();
+            terrainData.heightmapResolution = hmRes;
+            terrainData.size = new Vector3(worldSize, FcTerrainHeightmapDecoder.MaxWorldHeight, worldSize);
+            terrainData.SetHeights(0, 0, heights);
+
+            // Persist TerrainData as Unity asset so scene retains heightmap after reload.
+            const string fcDataDir = "Assets/FCData/Levels";
+            string levelDir = $"{fcDataDir}/{levelName}";
+            EnsureDir(fcDataDir);
+            EnsureDir(levelDir);
+            string tdPath = $"{levelDir}/TerrainData.asset";
+            if (AssetDatabase.LoadAssetAtPath<TerrainData>(tdPath) != null)
+                AssetDatabase.DeleteAsset(tdPath);
+            AssetDatabase.CreateAsset(terrainData, tdPath);
+            AssetDatabase.SaveAssets();
+            terrainData = AssetDatabase.LoadAssetAtPath<TerrainData>(tdPath);
+
+            // Apply cover_low.dds as megatexture TerrainLayer.
+            string coverPath = $"{basePath}/terrain/cover_low.dds";
+            if (TextureImportService.TryLoadRuntimeTexture(coverPath, out var coverTex))
             {
-                for (int hx = 1; hx < resolution; hx++)
+                coverTex.wrapMode = TextureWrapMode.Clamp;
+                var layer = new TerrainLayer
                 {
-                    ushort raw = SampleCryHeightRaw(samples, resolution, hx, hz);
-                    ushort masked = (ushort)(raw & 0xFFE0);
-                    if (masked < minMasked) minMasked = masked;
-                    if (masked > maxMasked) maxMasked = masked;
-                }
+                    diffuseTexture = coverTex,
+                    tileSize = new Vector2(worldSize, worldSize),
+                    tileOffset = Vector2.zero,
+                };
+                string layerPath = $"{levelDir}/TerrainLayer_Cover.terrainlayer";
+                if (AssetDatabase.LoadAssetAtPath<TerrainLayer>(layerPath) != null)
+                    AssetDatabase.DeleteAsset(layerPath);
+                AssetDatabase.CreateAsset(layer, layerPath);
+                AssetDatabase.SaveAssets();
+                terrainData.terrainLayers = new[] { AssetDatabase.LoadAssetAtPath<TerrainLayer>(layerPath) };
             }
-            Debug.Log(
-                $"[FcLevelSceneBuilder] Terrain '{levelName}': size={resolution}, unit={heightmapUnitSize}, " +
-                $"heightRaw=[{minMasked}..{maxMasked}], worldY=[{minMasked * heightScale:F3}..{maxMasked * heightScale:F3}]");
 
-            var terrainRoot = new GameObject("Terrain");
-            terrainRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+            var terrainGo = Terrain.CreateTerrainGameObject(terrainData);
+            terrainGo.name = "Terrain";
+            terrainGo.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
-            Material terrainMat = BuildTerrainFallbackMaterial(basePath);
-
-            int chunksPerAxis = (resolution - 1 + quadsPerChunk - 1) / quadsPerChunk;
-            for (int cz = 0; cz < chunksPerAxis; cz++)
-            {
-                for (int cx = 0; cx < chunksPerAxis; cx++)
-                {
-                    int startX = cx * quadsPerChunk;
-                    int startZ = cz * quadsPerChunk;
-                    int quadCountX = Mathf.Min(quadsPerChunk, resolution - 1 - startX);
-                    int quadCountZ = Mathf.Min(quadsPerChunk, resolution - 1 - startZ);
-                    if (quadCountX <= 0 || quadCountZ <= 0)
-                        continue;
-
-                    var mesh = BuildTerrainChunkMesh(
-                        samples,
-                        resolution,
-                        startX,
-                        startZ,
-                        quadCountX,
-                        quadCountZ,
-                        metersPerSample,
-                        heightScale);
-
-                    var chunk = new GameObject($"Chunk_{cx}_{cz}");
-                    chunk.transform.SetParent(terrainRoot.transform, worldPositionStays: false);
-                    chunk.transform.localPosition = new Vector3(
-                        startX * metersPerSample,
-                        0f,
-                        startZ * metersPerSample);
-
-                    var mf = chunk.AddComponent<MeshFilter>();
-                    mf.sharedMesh = mesh;
-                    var mr = chunk.AddComponent<MeshRenderer>();
-                    mr.sharedMaterial = terrainMat;
-                    var mc = chunk.AddComponent<MeshCollider>();
-                    mc.sharedMesh = mesh;
-                }
-            }
+            var terrain = terrainGo.GetComponent<Terrain>();
 
             if (environment != null)
-                BuildWaterPlane(terrainRoot.transform, resolution, metersPerSample, environment.WaterLevel * terrainVerticalSceneScale);
-        }
+                BuildWaterPlane(terrainGo.transform, resolution, heightmapUnitSize,
+                    environment.WaterLevel * terrainData.size.y / FcTerrainHeightmapDecoder.MaxWorldHeight);
 
-        static Mesh BuildTerrainChunkMesh(
-            ushort[] samples,
-            int resolution,
-            int startX,
-            int startZ,
-            int quadsX,
-            int quadsZ,
-            float metersPerSample,
-            float heightScale)
-        {
-            int vertsX = quadsX + 1;
-            int vertsZ = quadsZ + 1;
-            int vertexCount = vertsX * vertsZ;
-
-            var vertices = new Vector3[vertexCount];
-            var uvs = new Vector2[vertexCount];
-            var triangles = new int[quadsX * quadsZ * 6];
-
-            int vi = 0;
-            for (int z = 0; z < vertsZ; z++)
-            {
-                int hz = startZ + z;
-                for (int x = 0; x < vertsX; x++)
-                {
-                    int hx = startX + x;
-                    // Match Cry terrain loader/read path:
-                    // - exported h16 is transposed relative to world X/Y;
-                    // - low border row/column are treated as empty (index 0 remains default).
-                    ushort raw = SampleCryHeightRaw(samples, resolution, hx, hz);
-                    ushort h = (ushort)(raw & 0xFFE0);
-                    float worldX = x * metersPerSample;
-                    float worldZ = z * metersPerSample;
-                    float worldY = h * heightScale;
-
-                    vertices[vi] = new Vector3(worldX, worldY, worldZ);
-                    uvs[vi] = new Vector2(
-                        (float)hz / (resolution - 1),
-                        (float)hx / (resolution - 1));
-                    vi++;
-                }
-            }
-
-            int ti = 0;
-            for (int z = 0; z < quadsZ; z++)
-            {
-                int row = z * vertsX;
-                int next = (z + 1) * vertsX;
-                for (int x = 0; x < quadsX; x++)
-                {
-                    int i0 = row + x;
-                    int i1 = i0 + 1;
-                    int i2 = next + x;
-                    int i3 = i2 + 1;
-
-                    triangles[ti++] = i0;
-                    triangles[ti++] = i2;
-                    triangles[ti++] = i1;
-                    triangles[ti++] = i1;
-                    triangles[ti++] = i2;
-                    triangles[ti++] = i3;
-                }
-            }
-
-            var mesh = new Mesh
-            {
-                indexFormat = UnityEngine.Rendering.IndexFormat.UInt32,
-                vertices = vertices,
-                uv = uvs,
-                triangles = triangles,
-                name = $"Terrain_{startX}_{startZ}",
-            };
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-            return mesh;
-        }
-
-        static ushort SampleCryHeightRaw(ushort[] samples, int resolution, int hx, int hz)
-        {
-            if (samples == null || resolution <= 0)
-                return 0;
-
-            // Cry LoadHighMap fills [1..size-1] from file and leaves [0,*]/[*,0] as default.
-            if (hx <= 0 || hz <= 0 || hx >= resolution || hz >= resolution)
-                return 0;
-
-            int index = (hx * resolution) + hz; // transposed mapping (world x -> first index)
-            if ((uint)index >= (uint)samples.Length)
-                return 0;
-            return samples[index];
-        }
-
-        static Material BuildTerrainFallbackMaterial(string basePath)
-        {
-            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null)
-                shader = Shader.Find("Standard");
-            if (shader == null)
-                shader = Shader.Find("Sprites/Default");
-            if (shader == null)
-                shader = Shader.Find("Unlit/Color");
-            if (shader == null)
-                shader = Shader.Find("Hidden/InternalErrorShader");
-
-            var material = new Material(shader) { name = "TerrainFallback" };
-            string coverPath = $"{basePath}/terrain/cover_low.dds";
-            if (TextureImportService.TryLoadRuntimeTexture(coverPath, out var tex))
-            {
-                if (material.HasProperty("_BaseMap"))
-                    material.SetTexture("_BaseMap", tex);
-                if (material.HasProperty("_MainTex"))
-                    material.SetTexture("_MainTex", tex);
-            }
-            else
-            {
-                if (material.HasProperty("_BaseColor"))
-                    material.SetColor("_BaseColor", new Color(0.34f, 0.42f, 0.24f, 1f));
-                if (material.HasProperty("_Color"))
-                    material.SetColor("_Color", new Color(0.34f, 0.42f, 0.24f, 1f));
-            }
-
-            return material;
+            return terrain;
         }
 
         static void BuildWaterPlane(Transform terrainRoot, int resolution, float metersPerSample, float waterLevel)

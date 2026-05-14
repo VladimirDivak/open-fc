@@ -1,6 +1,6 @@
 # Level Content Import Refactor Plan
 
-Snapshot: 2026-05-12. Scope: level filling only. No gameplay/AI/scripting.
+Snapshot: 2026-05-13. Scope: runtime level loading into scene first. No gameplay/AI/scripting.
 
 ## Goal
 
@@ -11,16 +11,16 @@ Non-goal: NPC AI, weapon gameplay, mission scripts, save/load, network, exact Cr
 
 ## TODO Board
 
-- [x] Phase 1: Inventory + lossless parse (FcLevelLayoutDataV2, supplement payload, validation/import report)
-- [x] Phase 2: Terrain skeleton (land_map.h16, collider, water level, cover_low.dds fallback, alignment)
-- [ ] Phase 3: Materials + surface base
-- [ ] Phase 4: Brush completion
-- [x] Phase 5: Vegetation / static objects
+- [x] Phase 1: Inventory + lossless parse
+- [~] Phase 2: Terrain skeleton
+- [~] Phase 3: Materials + surface base
+- [~] Phase 4: Brush completion
+- [~] Phase 5: Vegetation / static objects
 - [ ] Phase 6: Structural objects + volumes
 - [ ] Phase 7: Entity content classes
 - [ ] Phase 8: Static lights + lightmap hooks
 - [ ] Phase 9: Particles, music, movie placeholders
-- [ ] Phase 10: Validation + tooling
+- [~] Phase 10: Validation + tooling
 
 ## Source Map
 
@@ -49,28 +49,34 @@ Cry source refs:
 
 ## Current State
 
-Done:
-- VFS mounts FCData + level PAK
-- Mission XML parses Entity + basic Object
-- Environment parses sun/fog/ambient subset
-- brush.lst parses enough for placeholders; runtime CGF load works
-- DynamicLight → Unity Light; SoundSpot → Unity AudioSource (editor build time)
-- Entity prefab registry/stubs exist
-- Layout asset stores mission + brush subset
-- Vegetation: FcVegetationInstance + FcVegetationLoadService (bounded concurrency, distance sort, O(1) dedup via HashSet)
-- Vegetation LOD: FindSiblingLodPaths → ImportAsync (cached) per LOD → LODGroup built on ApplyLoadResult
+Runtime path that actually exists now:
+- `FcLevelLoadService.LoadLevelAsync()` loads `mission_<name>.xml`, `brush.lst`, and `FcLevelSupplementLoader` payload at runtime.
+- Runtime builds a geometry preload plan for brushes + vegetation, dedupes base/LOD requests, preloads CGF models, and preloads their textures before live component loads start.
+- Runtime keeps preloaded geometry handles keyed by normalized virtual path so `FcBrushLoadService` and `FcVegetationLoadService` can reuse already-imported assets.
+- `FcEntityLoadService` already has queueing, deferred/background split, near-camera promotion, scoped cancellation, unload draining, and runtime reporting.
+- Brush runtime parity work is in progress and already partially wired through shared `FcBrushGeometryPostProcessor`.
 
-Big gaps:
-- no terrain mesh/import; no terrain tex/surface
-- no leveldata.xml vegetation type/surface/material import
-- no vis/portal/occluder/fog/water volume builders
-- no materials.xml level material library pipeline
-- no particles.lst import
-- no generic entity property-preserving typed placeholders
-- no full object type coverage
-- no static light/lightmap data model
-- no moviedata.xml camera/sequence placeholder import
-- layout cache drops many object attributes
+What is still editor-built or scene-authored rather than runtime-built-from-source:
+- Terrain mesh/water plane generation exists in `FcLevelSceneBuilder`, not in `FcLevelLoadService`.
+- Mission objects/entities are still instantiated by editor scene build / prefab placement; runtime currently enqueues already-existing `FcMeshEntity` components from the scene instead of constructing scene content from parsed source data.
+- `DynamicLight` and `SoundSpot` source-to-Unity mapping exists in `FcLevelSceneBuilder`, not in runtime source build.
+- Vegetation source parsing exists, and runtime can preload/reuse vegetation geometry, but scene instance creation still comes from editor-built `FcVegetationInstance` components.
+
+Data/model work already in place:
+- `FcLevelLayoutDataV2` is the active cache format.
+- `FcLevelSupplementLoader` indexes package entries and parses known-file presence, surface types, material library refs, `materials.xml`, vegetation types, and `objects.lst` vegetation instances.
+- Mission parsing preserves generic root/object attributes and carries `LevelObjects`.
+- Brush parsing preserves `MaterialId`, `Flags`, `MergeId`, `ViewDistRatio`.
+- Import/validation counters are stored in V2 data instead of being emitted as early logs.
+
+Big runtime gaps:
+- no runtime scene builder that instantiates terrain, brushes, vegetation, objects, and entities directly from parsed records
+- no runtime terrain construction from `land_map.h16` / water level / cover fallback
+- no runtime object/volume builders for `VisArea`, `Portal`, `OccluderArea`, `FogVolume`, `WaterVolume`, `Shape`, `AreaBox`, etc.
+- no runtime application of parsed level material library / surface types to spawned content
+- no runtime source-driven creation for top entity classes beyond whatever was baked into the scene
+- no static light/lightmap source model in runtime path
+- no runtime placeholder import for `particles.lst`, `moviedata.xml`, `music/*.xml`
 
 ## Coverage Numbers
 
@@ -113,20 +119,38 @@ Add/expand:
 ### [x] Phase 1. Inventory + Lossless Parse
 List known level files from mounted PAK. Parse mission XML + generic root attrs. Parse all Object types → FcLevelObjectDesc. Parse leveldata.xml surface types + vegetation defs. Parse materials.xml (name/link). Parse objects.lst (CStatObjInstForLoading: ushort x/y/z, byte type/brightness, float scale). FcLevelLayoutDataV2 preserving full records. Per-level counts preserved. V2 supplement payload captures leveldata/materials/objects.lst. Coverage+validation metrics in V2 ImportReport.
 
-### [x] Phase 2. Terrain Skeleton
+Status:
+- Done for data/cache side.
+- Runtime scene consumption not started.
+
+### [~] Phase 2. Terrain Skeleton
 Decode 1024×1024 ushort heights from land_map.h16. Cry level coords (x,y,z)→Unity (x,z,y). Chunked terrain meshes or Unity TerrainData. Water level from environment/leveldata. Collider attached. cover_low.dds as first visual fallback.
 Deferred: exact cover.ctc tile decode; detail material splats.
 Success: terrain aligns with brushes/entities; water plane at correct height; height samples match Cry vegetation positions.
 
-### [ ] Phase 3. Materials + Surface Base
+Status:
+- Editor scene builder has terrain skeleton, collider, fallback material, and water plane.
+- Runtime source load only parses terrain settings/supplement; it does not build terrain into the scene.
+
+### [~] Phase 3. Materials + Surface Base
 Load materials.xml + mission/level MaterialsLibrary. Map Cry mat names → Unity materials. Resolve terrain/brush/entity mat overrides. Preserve surface type id/name for colliders/audio.
 Success: brush mat overrides work by name/id; unknown shader diagnostics deferred to audit stage.
 
-### [ ] Phase 4. Brush Completion
+Status:
+- Parsed/material data exists in supplement + V2 report.
+- Runtime texture preload for CGF results exists.
+- Missing: runtime application of level material library / surface types to spawned terrain, brushes, and entities.
+
+### [~] Phase 4. Brush Completion
 Preserve all brush.lst fields: id, matrix, flags, view ratio, LOD ratio, merge id, material id. Add lightmap flag model (ERF_USELIGHTMAPS marker, optional future LM_EXPORT_FILE_NAME). Add merge group metadata (no actual merge until validated). Keep proxy/no-draw visual strip + collider extraction.
 Success: brush count/model refs/mat refs match Cry load; visual/collider alignment validated with terrain.
 
-### [x] Phase 5. Vegetation / Static Objects
+Status:
+- Metadata preservation is largely in place.
+- Runtime brush loading, runtime LOD preload, texture preload reuse, and shared post-processing exist.
+- Missing: runtime construction of brush instances directly from parsed `brush.lst`; current runtime path still expects scene-authored `FcBrushInstance` components.
+
+### [~] Phase 5. Vegetation / Static Objects
 - FcVegetationInstance (path, typeIndex, instanceScale, brightness)
 - FcVegetationLoadService (bounded concurrency _maxConcurrent=8, distance sort, HashSet O(1) dedup)
 - BuildVegetationInstances() in FcLevelSceneBuilder; called from BuildScene() + RebuildFromLayoutData()
@@ -137,6 +161,11 @@ Success: brush count/model refs/mat refs match Cry load; visual/collider alignme
 - BuildStats.Vegetation counter + BuildVegetation phase in load report
 
 Deferred: batching/GPU instancing.
+
+Status:
+- Parsing/model side is done.
+- Runtime preload/reuse side is done.
+- Runtime spawning from source records is not done; editor scene builder still creates the actual `FcVegetationInstance` GameObjects.
 
 ### [ ] Phase 6. Structural Objects + Volumes
 Markers: TagPoint, AIAnchor, AIPath, Respawn, Group. Areas: Shape, AreaBox, AreaSphere, ForbiddenArea, AINavigationModifier. Visibility: VisArea, Portal, OccluderArea. Atmosphere: FogVolume, WaterVolume. Debug geometry optional; components always store data.
@@ -154,9 +183,14 @@ Success: static vs realtime diagnostics deferred to audit; baked lights visible 
 particles.lst: parse/index, map to particle entity names. moviedata.xml: sequence/camera/event placeholders. music/*.xml: music region/theme metadata, no playback.
 Success: scene shows cameras + sequence anchors; missing runtime impl explicit.
 
-### [ ] Phase 10. Validation + Tooling
+### [~] Phase 10. Validation + Tooling
 OpenFarCry/Level/Audit Current Level menu item. Reports: counts by file/object type/entity class/missing assets/unknown attrs/parser errors. Golden tests using small synthetic XML/binary fixtures. Visual checklist per level.
 Success: Training, Fort, Pier, one indoor-heavy, one MP level pass count audit.
+
+Status:
+- V2 import report and validation counters exist.
+- Targeted EditMode tests exist for terrain height decode and geometry preload dedupe/planning.
+- Missing: dedicated runtime content audit workflow and level-by-level source-vs-runtime verification.
 
 ## Refactor Files
 
@@ -166,12 +200,15 @@ Modify: FcLevelLoader (→ mission parser facade or split) · FcLevelSceneBuilde
 
 ## Priority
 
-- [x] Lossless parse + audit
-- [x] Terrain skeleton
-- [x] Vegetation (base load + LOD)
-- [ ] Volumes
-- [ ] Entity content mapping
-- [ ] Materials refinement
+- [x] Lossless parse + supplement model
+- [x] Runtime geometry preload foundation (brushes + vegetation)
+- [ ] Runtime scene builder from parsed records
+- [ ] Runtime terrain construction
+- [ ] Runtime brush instantiation from `brush.lst`
+- [ ] Runtime vegetation instantiation from supplement records
+- [ ] Runtime objects/volumes instantiation
+- [ ] Runtime entity content mapping
+- [ ] Materials/surface application
 - [ ] Static light markers
 - [ ] Movie/music/particle metadata
 
@@ -186,13 +223,13 @@ Modify: FcLevelLoader (→ mission parser facade or split) · FcLevelSceneBuilde
 
 ## Done Definition
 
-Full content import v1:
+Full runtime content import v1:
 - [x] all known level package files indexed
-- [x] terrain visible/collidable
-- [x] vegetation visible (LOD, cached, bounded async load)
-- [ ] brushes visible (material overrides, LOD, collider)
-- [ ] all mission objects represented
-- [ ] top stock entity classes → content components/stubs
-- [ ] lights/sounds/particles/cameras represented
-- [ ] audit counts match source for selected levels
-- [ ] no source attrs dropped without report
+- [ ] runtime can build terrain visible/collidable from source data
+- [ ] runtime can instantiate vegetation from parsed records (not only from prebuilt scene)
+- [ ] runtime can instantiate brushes from parsed records with material overrides, LOD, collider, and parity post-process
+- [ ] runtime can instantiate mission objects/volumes from parsed records
+- [ ] runtime can instantiate top stock entity classes as content components/stubs from parsed records
+- [ ] runtime represents lights/sounds/particles/cameras from source data
+- [ ] runtime audit counts match source for selected levels
+- [x] no source attrs dropped without report in the parse/cache layer

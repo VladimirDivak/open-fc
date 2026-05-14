@@ -702,6 +702,7 @@ MonoBehaviour:
   _useRuntimeMemoryCache: 1
   _clearAnimationRuntimeCacheBeforeRun: 1
   _logPerAssetTiming: 1
+  _logTextureRuntimeReport: 1
   _clearAnimationAttachDiagnosticsBeforeRun: 1
   _logAnimationCompatibilityDiagnostics: 1
   _maxAnimationDiagnosticsInReport: 64

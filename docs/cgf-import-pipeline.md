@@ -19,15 +19,18 @@ CgfRuntimeImporter.ImportAsync
   └─ CgfRuntimeImportService.ImportAsync
        1. model cache hit? → return CgfRuntimeImportResult (refcount++)
        2. parsed cache hit? → skip I/O, go to step 5
-       3. in-flight coalescing (UniTaskCompletionSource per path)
+       3. parsed in-flight coalescing (UniTaskCompletionSource per path)
             owner: ReadAllBytes + CgfParser.Parse on thread pool
             waiter: await same TCS
        4. store parsed in CgfRuntimeAssetCache (parsed slot)
        5. CreateSelectedMeshView (filter by SelectedMeshChunkId if set)
-       6. CgfMeshBuilder.PrepareBuild on thread pool → PreparedBuild
-       7. CgfMeshBuilder.FinalizeBuild on main thread → BuildResult (Mesh)
-       8. store model in CgfRuntimeAssetCache (model slot)
-       9. return CgfRuntimeImportResult { ParsedFile, BuildResult, Mesh }
+       6. model in-flight coalescing (UniTaskCompletionSource per modelCacheKey)
+            owner: PrepareBuild + FinalizeBuild
+            waiter: await same TCS
+       7. CgfMeshBuilder.PrepareBuild on thread pool → PreparedBuild
+       8. CgfMeshBuilder.FinalizeBuild on main thread → BuildResult (Mesh)
+       9. store model in CgfRuntimeAssetCache (model slot)
+      10. return CgfRuntimeImportResult { ParsedFile, BuildResult, Mesh }
 ```
 
 ### CgfRuntimeImportRequest fields
@@ -92,7 +95,7 @@ Reads chunk table, dispatches by `ChunkType`:
 
 ## Material layer (`CgfMaterialImportService`)
 
-After `ImportAsync` completes, caller preloads textures:
+Per-asset preload API (still used in migration fallback paths):
 
 ```csharp
 await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
@@ -102,6 +105,17 @@ await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
 
 `PreloadTexturesAsync` — runs per-material texture loads with `UniTask.WhenAll` (parallel).
 Texture types: diffuse, normal, specular, opacity.
+
+Level-driven bulk preload API (primary runtime path):
+
+```csharp
+await CgfRuntimeImporter.MaterialService.PreloadTexturesForResultsAsync(
+    successfulResults,
+    levelScopeId,
+    ct);
+```
+
+`PreloadTexturesForResultsAsync` dedupes by normalized texture path + linear/sRGB mode across all base+LOD results.
 
 `ResolveSubmeshMaterials(parsedFile, mesh, submeshMaterialIds, scopeId)` — assigns loaded textures to URP materials per submesh. Called at GO build time.
 
@@ -120,7 +134,8 @@ Skinned: `Root` GO gets `SkinnedMeshRenderer`.
 
 `FindSiblingLodPaths(baseVirtualPath)` → scans VFS dir for `<base>_lod1.cgf`, `_lod2.cgf`, etc.
 
-**Runtime path (vegetation/brushes):** LOD paths fed back into `ImportAsync` → cached same as base.
+**Runtime import path (vegetation/brushes):** LOD paths fed back into `ImportAsync` → cached same as base.
+Runtime `LODGroup` assembly is now shared via `FcLevelRuntimeLodGroupBuilder`.
 
 **Editor path (smoke test / source browser):** `ConfigureLodGroup` reads bytes directly (no cache) — do not use for runtime; each call re-parses from VFS.
 
@@ -175,4 +190,44 @@ Assets/Scripts/Importer/Cgf/
   CgfLodImportService.cs         — sibling LOD discovery + LODGroup setup
   CgfAnimationRuntimeImportService.cs
   CgfRagdollBuilder.cs
+
+Assets/Scripts/Level/Services/
+  FcLevelLoadService.cs                — level-driven preload orchestration
+  FcLevelGeometryPreloadPlanner.cs     — unique base/LOD request planning
+  FcLevelGeometryPreloadPlan.cs        — request/result mapping and handle build
+  FcLevelGeometryAssetHandle.cs        — shared base+LOD runtime handle
+  FcLevelGeometryImportHelper.cs       — migration fallback import helper
+  FcLevelGeometryResultOwnershipHelper.cs — shared release helper for owned import results
+  FcLevelRuntimeLodGroupBuilder.cs     — shared runtime LODGroup assembly
 ```
+
+---
+
+## Current level runtime usage
+
+Primary runtime path:
+
+```
+FcLevelLoadService.LoadLevelAsync
+  1. load mission + brush list + supplement
+  2. build brush and vegetation preload plans
+  3. merge unique base+LOD requests by model key
+  4. CgfRuntimeImporter.PreloadAsync(unique requests)
+  5. CgfMaterialImportService.PreloadTexturesForResultsAsync(successful results)
+  6. publish preloaded handles:
+       - _brushPreloadedByPath
+       - _vegetationPreloadedByPath
+
+FcBrushLoadService / FcVegetationLoadService
+  1. keep distance-based queueing
+  2. try handle from FcLevelLoadService
+  3. if found: only GO build/collider/LOD assembly on main thread
+  4. if missing: migration fallback import path via FcLevelGeometryImportHelper
+```
+
+Current properties:
+- dependency discovery and preload are level-driven
+- geometry preload is deduped by normalized model cache key
+- texture preload is deduped across all successful base+LOD results
+- brush and vegetation runtime LOD assembly use the same builder
+- fallback paths remain for compatibility when preloaded handles are absent
