@@ -158,12 +158,29 @@ namespace OpenFarCry.Level.Data
             public int BrushMaterialOverrideCount;
             public int BrushMaterialOverrideMatchedCount;
             public int BrushMaterialOverrideMissingCount;
+            public int BrushMaterialOverrideMatchedByNameCount;
+            public int BrushMaterialOverrideMatchedByFullNameCount;
+            public int BrushMaterialOverrideMatchedByMaterialIdCount;
+            public int BrushMaterialOverrideMissingWithMaterialIdCount;
+            public int BrushMaterialSlotDiagnosticCount;
+            public int BrushMaterialSlotAppliedCount;
+            public int BrushMaterialSlotTargetedMissCount;
+            public int BrushMaterialSlotUnresolvedCount;
+            public int BrushMaterialInstanceDiagnosticCount;
+            public int BrushMaterialInstanceOverrideAppliedCount;
+            public int BrushMaterialInstanceFallbackCount;
+            public int BrushMaterialInstanceTargetedMissCount;
+            public int BrushMaterialInstanceUnresolvedCount;
             public int EntityModelPathCount;
             public int EntityModelPathMatchedCount;
             public int EntityModelPathMissingCount;
             public int ObjectModelPathCount;
             public int ObjectModelPathMatchedCount;
             public int ObjectModelPathMissingCount;
+            public CountEntry[] BrushMaterialOverrideMissingCounts;
+            public CountEntry[] BrushMaterialSlotOutcomeCounts;
+            public CountEntry[] BrushMaterialSlotUnresolvedSamples;
+            public CountEntry[] BrushMaterialResolutionSourceCounts;
             public CountEntry[] EntityClassCounts;
             public CountEntry[] ObjectTypeCounts;
             public CountEntry[] VegetationInstanceTypeCounts;
@@ -505,6 +522,7 @@ namespace OpenFarCry.Level.Data
             int objectAttrCount = 0;
             int entityUnknownAttrCount = 0;
             int objectUnknownAttrCount = 0;
+            var brushMaterialStats = BuildBrushMaterialOverrideStats(data.Brushes, data.Materials);
 
             if (data.Entities != null)
             {
@@ -612,11 +630,13 @@ namespace OpenFarCry.Level.Data
                 VegetationTypeMissingFileNameCount = CountVegetationTypesMissingFileName(data.VegetationTypes),
                 VegetationTypeDuplicateIndexCount = CountVegetationTypeDuplicateIndexes(data.VegetationTypes),
                 VegetationTypeInvalidIndexCount = CountVegetationTypeInvalidIndexes(data.VegetationTypes),
-                BrushMaterialOverrideCount = CountBrushMaterialOverrides(data.Brushes),
-                BrushMaterialOverrideMatchedCount = CountBrushMaterialOverrideMatches(
-                    data.Brushes, data.Materials, matched: true),
-                BrushMaterialOverrideMissingCount = CountBrushMaterialOverrideMatches(
-                    data.Brushes, data.Materials, matched: false),
+                BrushMaterialOverrideCount = brushMaterialStats.OverrideCount,
+                BrushMaterialOverrideMatchedCount = brushMaterialStats.MatchedCount,
+                BrushMaterialOverrideMissingCount = brushMaterialStats.MissingCount,
+                BrushMaterialOverrideMatchedByNameCount = brushMaterialStats.MatchedByNameCount,
+                BrushMaterialOverrideMatchedByFullNameCount = brushMaterialStats.MatchedByFullNameCount,
+                BrushMaterialOverrideMatchedByMaterialIdCount = brushMaterialStats.MatchedByMaterialIdCount,
+                BrushMaterialOverrideMissingWithMaterialIdCount = brushMaterialStats.MissingWithMaterialIdCount,
                 EntityModelPathCount = CountEntityModelPaths(data.Entities),
                 EntityModelPathMatchedCount = CountEntityModelPathMatches(
                     data.Entities, data.PackageEntries, matched: true),
@@ -627,6 +647,10 @@ namespace OpenFarCry.Level.Data
                     data.LevelObjects, data.PackageEntries, matched: true),
                 ObjectModelPathMissingCount = CountObjectModelPathMatches(
                     data.LevelObjects, data.PackageEntries, matched: false),
+                BrushMaterialOverrideMissingCounts = brushMaterialStats.MissingOverrideCounts,
+                BrushMaterialSlotOutcomeCounts = Array.Empty<ImportReportData.CountEntry>(),
+                BrushMaterialSlotUnresolvedSamples = Array.Empty<ImportReportData.CountEntry>(),
+                BrushMaterialResolutionSourceCounts = Array.Empty<ImportReportData.CountEntry>(),
                 EntityClassCounts = BuildEntityClassCounts(data.Entities),
                 ObjectTypeCounts = BuildObjectTypeCounts(data.LevelObjects, data.Objects),
                 VegetationInstanceTypeCounts = BuildVegetationInstanceTypeCounts(data.VegetationInstances),
@@ -1350,6 +1374,158 @@ namespace OpenFarCry.Level.Data
             return count;
         }
 
+        readonly struct BrushMaterialOverrideStats
+        {
+            public readonly int OverrideCount;
+            public readonly int MatchedCount;
+            public readonly int MissingCount;
+            public readonly int MatchedByNameCount;
+            public readonly int MatchedByFullNameCount;
+            public readonly int MatchedByMaterialIdCount;
+            public readonly int MissingWithMaterialIdCount;
+            public readonly ImportReportData.CountEntry[] MissingOverrideCounts;
+
+            public BrushMaterialOverrideStats(
+                int overrideCount,
+                int matchedCount,
+                int missingCount,
+                int matchedByNameCount,
+                int matchedByFullNameCount,
+                int matchedByMaterialIdCount,
+                int missingWithMaterialIdCount,
+                ImportReportData.CountEntry[] missingOverrideCounts)
+            {
+                OverrideCount = overrideCount;
+                MatchedCount = matchedCount;
+                MissingCount = missingCount;
+                MatchedByNameCount = matchedByNameCount;
+                MatchedByFullNameCount = matchedByFullNameCount;
+                MatchedByMaterialIdCount = matchedByMaterialIdCount;
+                MissingWithMaterialIdCount = missingWithMaterialIdCount;
+                MissingOverrideCounts = missingOverrideCounts ?? Array.Empty<ImportReportData.CountEntry>();
+            }
+        }
+
+        static BrushMaterialOverrideStats BuildBrushMaterialOverrideStats(
+            BrushEntry[] brushes,
+            FcLevelSupplementData.MaterialDesc[] materials)
+        {
+            if (brushes == null || brushes.Length == 0)
+            {
+                return new BrushMaterialOverrideStats(
+                    overrideCount: 0,
+                    matchedCount: 0,
+                    missingCount: 0,
+                    matchedByNameCount: 0,
+                    matchedByFullNameCount: 0,
+                    matchedByMaterialIdCount: 0,
+                    missingWithMaterialIdCount: 0,
+                    missingOverrideCounts: Array.Empty<ImportReportData.CountEntry>());
+            }
+
+            var knownByName = new HashSet<string>(StringComparer.Ordinal);
+            var knownByFullName = new HashSet<string>(StringComparer.Ordinal);
+            if (materials != null)
+            {
+                for (int i = 0; i < materials.Length; i++)
+                {
+                    string name = NormalizeMaterialKey(materials[i].Name);
+                    if (!string.IsNullOrEmpty(name))
+                        knownByName.Add(name);
+
+                    string fullName = NormalizeMaterialKey(materials[i].FullName);
+                    if (!string.IsNullOrEmpty(fullName))
+                        knownByFullName.Add(fullName);
+                }
+            }
+
+            int overrideCount = 0;
+            int matchedCount = 0;
+            int missingCount = 0;
+            int matchedByNameCount = 0;
+            int matchedByFullNameCount = 0;
+            int matchedByMaterialIdCount = 0;
+            int missingWithMaterialIdCount = 0;
+            var missingCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            for (int i = 0; i < brushes.Length; i++)
+            {
+                var brush = brushes[i];
+                string normalizedToken = NormalizeMaterialKey(brush.MaterialOverride);
+                bool hasToken = !string.IsNullOrEmpty(normalizedToken);
+                bool hasValidMaterialId = materials != null &&
+                                          brush.MaterialId >= 0 &&
+                                          brush.MaterialId < materials.Length;
+
+                if (!hasToken && !hasValidMaterialId)
+                    continue;
+
+                overrideCount++;
+
+                bool resolved = false;
+                if (hasToken)
+                {
+                    if (knownByName.Contains(normalizedToken))
+                    {
+                        resolved = true;
+                        matchedByNameCount++;
+                    }
+                    else if (knownByFullName.Contains(normalizedToken))
+                    {
+                        resolved = true;
+                        matchedByFullNameCount++;
+                    }
+                    else
+                    {
+                        int slash = normalizedToken.LastIndexOf('/');
+                        if (slash >= 0 && slash + 1 < normalizedToken.Length)
+                        {
+                            string leafName = normalizedToken.Substring(slash + 1);
+                            if (knownByName.Contains(leafName))
+                            {
+                                resolved = true;
+                                matchedByNameCount++;
+                            }
+                        }
+                    }
+                }
+
+                if (!resolved && hasValidMaterialId)
+                {
+                    resolved = true;
+                    matchedByMaterialIdCount++;
+                }
+
+                if (resolved)
+                {
+                    matchedCount++;
+                    continue;
+                }
+
+                missingCount++;
+                if (brush.MaterialId >= 0)
+                    missingWithMaterialIdCount++;
+
+                string missKey = hasToken
+                    ? normalizedToken
+                    : $"<id:{brush.MaterialId}>";
+                if (missingCounts.TryGetValue(missKey, out int current))
+                    missingCounts[missKey] = current + 1;
+                else
+                    missingCounts[missKey] = 1;
+            }
+
+            return new BrushMaterialOverrideStats(
+                overrideCount,
+                matchedCount,
+                missingCount,
+                matchedByNameCount,
+                matchedByFullNameCount,
+                matchedByMaterialIdCount,
+                missingWithMaterialIdCount,
+                ToSortedCountEntries(missingCounts));
+        }
+
         static int CountBrushMaterialOverrides(BrushEntry[] brushes)
         {
             if (brushes == null || brushes.Length == 0)
@@ -1358,9 +1534,10 @@ namespace OpenFarCry.Level.Data
             int count = 0;
             for (int i = 0; i < brushes.Length; i++)
             {
-                if (!string.IsNullOrWhiteSpace(brushes[i].MaterialOverride))
+                if (!string.IsNullOrWhiteSpace(brushes[i].MaterialOverride) || brushes[i].MaterialId >= 0)
                     count++;
             }
+
             return count;
         }
 
@@ -1369,31 +1546,15 @@ namespace OpenFarCry.Level.Data
             FcLevelSupplementData.MaterialDesc[] materials,
             bool matched)
         {
-            if (brushes == null || brushes.Length == 0)
-                return 0;
+            var stats = BuildBrushMaterialOverrideStats(brushes, materials);
+            return matched ? stats.MatchedCount : stats.MissingCount;
+        }
 
-            var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (materials != null)
-            {
-                for (int i = 0; i < materials.Length; i++)
-                {
-                    if (!string.IsNullOrWhiteSpace(materials[i].Name))
-                        known.Add(materials[i].Name);
-                }
-            }
-
-            int count = 0;
-            for (int i = 0; i < brushes.Length; i++)
-            {
-                string mat = brushes[i].MaterialOverride;
-                if (string.IsNullOrWhiteSpace(mat))
-                    continue;
-
-                bool has = known.Contains(mat);
-                if (has == matched)
-                    count++;
-            }
-            return count;
+        static string NormalizeMaterialKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+            return value.Trim().Replace('\\', '/').Trim('/').ToLowerInvariant();
         }
 
         static int CountEntityModelPaths(EntityEntry[] entities)
