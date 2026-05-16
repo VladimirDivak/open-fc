@@ -10,7 +10,8 @@ namespace OpenFarCry.Level.Services
         public static async UniTask<CgfRuntimeImportResult> ImportStaticGeometryWithTexturePreloadAsync(
             string virtualPath,
             string levelScopeId,
-            CancellationToken ct)
+            CancellationToken ct,
+            bool skipTexturePreload = false)
         {
             var result = await CgfRuntimeImporter.ImportAsync(
                 CreateStaticGeometryRequest(virtualPath),
@@ -20,12 +21,13 @@ namespace OpenFarCry.Level.Services
             if (ct.IsCancellationRequested || result == null || !result.Success)
                 return result;
 
-            await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
-                result.ParsedFile,
-                result.Mesh,
-                result.BuildResult?.SubmeshMaterialIds,
-                levelScopeId,
-                ct);
+            if (!skipTexturePreload)
+                await CgfRuntimeImporter.MaterialService.PreloadTexturesAsync(
+                    result.ParsedFile,
+                    result.Mesh,
+                    result.BuildResult?.SubmeshMaterialIds,
+                    levelScopeId,
+                    ct);
 
             return result;
         }
@@ -34,7 +36,8 @@ namespace OpenFarCry.Level.Services
             string baseVirtualPath,
             string levelScopeId,
             CgfLodImportService lodService,
-            CancellationToken ct)
+            CancellationToken ct,
+            bool skipTexturePreload = false)
         {
             var service = lodService ?? new CgfLodImportService();
             var lodPaths = service.FindSiblingLodPaths(baseVirtualPath);
@@ -51,7 +54,8 @@ namespace OpenFarCry.Level.Services
                 var lodResult = await ImportStaticGeometryWithTexturePreloadAsync(
                     lodPaths[i],
                     levelScopeId,
-                    ct);
+                    ct,
+                    skipTexturePreload);
 
                 if (lodResult == null || !lodResult.Success)
                     continue;

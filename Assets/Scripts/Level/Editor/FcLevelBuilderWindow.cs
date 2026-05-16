@@ -498,6 +498,7 @@ namespace OpenFarCry.Level.Editor
             public readonly Dictionary<string, int> OutcomeCounts;
             public readonly Dictionary<string, int> UnresolvedLineCounts;
             public readonly Dictionary<string, int> ResolutionSourceCounts;
+            public readonly Dictionary<string, int> ShaderFamilyCounts;
 
             public MaterialSlotDiagnosticsSummary(
                 int totalCount,
@@ -511,7 +512,8 @@ namespace OpenFarCry.Level.Editor
                 int instanceUnresolvedCount,
                 Dictionary<string, int> outcomeCounts,
                 Dictionary<string, int> unresolvedLineCounts,
-                Dictionary<string, int> resolutionSourceCounts)
+                Dictionary<string, int> resolutionSourceCounts,
+                Dictionary<string, int> shaderFamilyCounts = null)
             {
                 TotalCount = totalCount;
                 AppliedCount = appliedCount;
@@ -525,6 +527,7 @@ namespace OpenFarCry.Level.Editor
                 OutcomeCounts = outcomeCounts ?? new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
                 UnresolvedLineCounts = unresolvedLineCounts ?? new Dictionary<string, int>(System.StringComparer.Ordinal);
                 ResolutionSourceCounts = resolutionSourceCounts ?? new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
+                ShaderFamilyCounts = shaderFamilyCounts ?? new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
             }
         }
 
@@ -1603,12 +1606,19 @@ namespace OpenFarCry.Level.Editor
             var outcomes = new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
             var unresolvedLines = new Dictionary<string, int>(System.StringComparer.Ordinal);
             var resolutionSources = new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
+            var shaderFamilies = new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < metas.Count; i++)
             {
                 var meta = metas[i];
                 if (meta == null)
                     continue;
+
+                string shaderFamily = ClassifyMaterialShaderFamily(meta.MaterialShader);
+                if (shaderFamilies.TryGetValue(shaderFamily, out int sf))
+                    shaderFamilies[shaderFamily] = sf + 1;
+                else
+                    shaderFamilies[shaderFamily] = 1;
 
                 var lines = meta.SlotResolutionDiagnostics;
                 if (lines == null || lines.Length == 0)
@@ -1695,7 +1705,28 @@ namespace OpenFarCry.Level.Editor
                 instanceUnresolved,
                 outcomes,
                 unresolvedLines,
-                resolutionSources);
+                resolutionSources,
+                shaderFamilies);
+        }
+
+        static string ClassifyMaterialShaderFamily(string shader)
+        {
+            if (string.IsNullOrWhiteSpace(shader))
+                return "none";
+            string s = shader.Trim().ToLowerInvariant();
+            if (s == "nodraw" || s == "no_draw") return "nodraw";
+            if (s.Contains("decalmodulate")) return "modulate-decal";
+            if (s.Contains("decal")) return "decal";
+            if (s.Contains("plants")) return "plants";
+            if (s.Contains("bark")) return "bark";
+            if (s.Contains("glass") || s.Contains("refr")) return "glass";
+            if (s.Contains("alphablend")) return "alphablend";
+            if (s.Contains("glow") || s.Contains("selfillum")) return "glow-decal";
+            if (s.Contains("textureshiftt05")) return "uvscroll";
+            if (s.Contains("bumpspec")) return "bumpspec";
+            if (s.Contains("bumpdiffuse")) return "bumpdiffuse";
+            if (s.Contains("templmodel") || s.Contains("diffuse")) return "diffuse";
+            return "unknown";
         }
 
         static void PersistMaterialSlotDiagnosticsToLayoutData(
@@ -1726,6 +1757,7 @@ namespace OpenFarCry.Level.Editor
             report.BrushMaterialSlotOutcomeCounts = ToSortedCountEntries(summary.OutcomeCounts);
             report.BrushMaterialSlotUnresolvedSamples = ToTopCountEntries(summary.UnresolvedLineCounts, 12);
             report.BrushMaterialResolutionSourceCounts = ToSortedCountEntries(summary.ResolutionSourceCounts);
+            report.BrushMaterialShaderFamilyCounts = ToSortedCountEntries(summary.ShaderFamilyCounts);
             layout.ImportReport = report;
 
             EditorUtility.SetDirty(layout);

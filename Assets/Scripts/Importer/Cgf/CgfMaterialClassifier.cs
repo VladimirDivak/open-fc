@@ -16,7 +16,8 @@ namespace OpenFarCry.Importer.Cgf
         AlphaBlend,
         GlowDecal,
         ModulateDecal,
-        UvScroll
+        UvScroll,
+        Decal
     }
 
     public readonly struct CgfMaterialClassification
@@ -34,6 +35,7 @@ namespace OpenFarCry.Importer.Cgf
         public readonly bool UsesGlossTexture;
         public readonly bool UsesReflection;
         public readonly bool UsesUvScroll;
+        public readonly bool IsRgbOnlyDecal;
 
         public CgfMaterialClassification(
             CgfMaterialShaderFamily family,
@@ -48,7 +50,8 @@ namespace OpenFarCry.Importer.Cgf
             bool usesTransparencyFromDiffuseAlpha,
             bool usesGlossTexture,
             bool usesReflection,
-            bool usesUvScroll)
+            bool usesUvScroll,
+            bool isRgbOnlyDecal = false)
         {
             Family = family;
             IsNoDraw = isNoDraw;
@@ -63,6 +66,7 @@ namespace OpenFarCry.Importer.Cgf
             UsesGlossTexture = usesGlossTexture;
             UsesReflection = usesReflection;
             UsesUvScroll = usesUvScroll;
+            IsRgbOnlyDecal = isRgbOnlyDecal;
         }
     }
 
@@ -90,6 +94,7 @@ namespace OpenFarCry.Importer.Cgf
             bool isAlphaBlend = ContainsOrdinal(shader, "alphablend");
             bool isGlowDecal = ContainsOrdinal(shader, "glow") || ContainsOrdinal(shader, "selfillum");
             bool isModulateDecal = ContainsOrdinal(shader, "decalmodulate");
+            bool isSimpleDecal = !isModulateDecal && !isGlowDecal && ContainsOrdinal(shader, "decal");
             bool isUvScroll = ContainsOrdinal(shader, "textureshiftt05");
             bool isBumpSpecFamily = ContainsOrdinal(shader, "bumpspec");
             bool isBumpDiffuseFamily = ContainsOrdinal(shader, "bumpdiffuse");
@@ -109,6 +114,8 @@ namespace OpenFarCry.Importer.Cgf
                 family = CgfMaterialShaderFamily.GlowDecal;
             else if (isModulateDecal)
                 family = CgfMaterialShaderFamily.ModulateDecal;
+            else if (isSimpleDecal)
+                family = CgfMaterialShaderFamily.Decal;
             else if (isUvScroll)
                 family = CgfMaterialShaderFamily.UvScroll;
             else if (isBumpSpecFamily && (hasGloss || ContainsOrdinal(shader, "glossalpha")))
@@ -134,7 +141,7 @@ namespace OpenFarCry.Importer.Cgf
             return new CgfMaterialClassification(
                 family: family,
                 isNoDraw: isNoDraw,
-                isCutout: hasAlphaTest,
+                isCutout: hasAlphaTest && !isSimpleDecal,
                 isTransparentAlphaBlend: isAlphaBlend || isGlass,
                 isAdditive: isAdditive,
                 isTwoSided: isTwoSided || isPlants,
@@ -144,7 +151,8 @@ namespace OpenFarCry.Importer.Cgf
                 usesTransparencyFromDiffuseAlpha: usesTransparencyFromDiffuseAlpha,
                 usesGlossTexture: hasGloss,
                 usesReflection: isGlass,
-                usesUvScroll: isUvScroll);
+                usesUvScroll: isUvScroll,
+                isRgbOnlyDecal: isSimpleDecal);
         }
 
         static bool ContainsOrdinal(string value, string needle)

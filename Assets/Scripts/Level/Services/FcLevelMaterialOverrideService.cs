@@ -8,7 +8,7 @@ using UnityEngine;
 namespace OpenFarCry.Level.Services
 {
     // Runtime resolver for level-specific material overrides from materials.xml / brush.lst.
-    // First pass: resolve by material name/fullname and build a URP material with the first loadable texture ref.
+    // Resolves level material metadata + texture slots and builds URP materials for scene instances.
     [DefaultExecutionOrder(-98)]
     public sealed class FcLevelMaterialOverrideService : MonoBehaviour
     {
@@ -28,10 +28,44 @@ namespace OpenFarCry.Level.Services
             public string SurfaceTypeDetailObject;
         }
 
+        public readonly struct BrushSlotResolutionInfo
+        {
+            public readonly int SlotIndex;
+            public readonly int SubmeshMaterialId;
+            public readonly bool Targeted;
+            public readonly bool Applied;
+            public readonly string Outcome;
+            public readonly string InputMaterialName;
+            public readonly string OutputMaterialName;
+            public readonly string Detail;
+
+            public BrushSlotResolutionInfo(
+                int slotIndex,
+                int submeshMaterialId,
+                bool targeted,
+                bool applied,
+                string outcome,
+                string inputMaterialName,
+                string outputMaterialName,
+                string detail)
+            {
+                SlotIndex = slotIndex;
+                SubmeshMaterialId = submeshMaterialId;
+                Targeted = targeted;
+                Applied = applied;
+                Outcome = outcome ?? string.Empty;
+                InputMaterialName = inputMaterialName ?? string.Empty;
+                OutputMaterialName = outputMaterialName ?? string.Empty;
+                Detail = detail ?? string.Empty;
+            }
+        }
+
         public static FcLevelMaterialOverrideService Current { get; private set; }
 
         readonly Dictionary<string, FcLevelSupplementData.MaterialDesc> _materialByName =
             new Dictionary<string, FcLevelSupplementData.MaterialDesc>(StringComparer.Ordinal);
+        readonly Dictionary<string, List<FcLevelSupplementData.MaterialDesc>> _materialChildrenByParent =
+            new Dictionary<string, List<FcLevelSupplementData.MaterialDesc>>(StringComparer.Ordinal);
         readonly Dictionary<string, FcLevelSupplementData.SurfaceTypeDesc> _surfaceByMaterialName =
             new Dictionary<string, FcLevelSupplementData.SurfaceTypeDesc>(StringComparer.Ordinal);
         FcLevelSupplementData.MaterialDesc[] _materialsOrdered = Array.Empty<FcLevelSupplementData.MaterialDesc>();
@@ -64,6 +98,7 @@ namespace OpenFarCry.Level.Services
                 var desc = _materialsOrdered[i];
                 AddNameKey(desc.Name, desc);
                 AddNameKey(desc.FullName, desc);
+                AddChildMapping(desc);
             }
 
             var surfaces = supplement != null ? supplement.SurfaceTypes : null;
@@ -84,6 +119,7 @@ namespace OpenFarCry.Level.Services
         public void Clear()
         {
             _materialByName.Clear();
+            _materialChildrenByParent.Clear();
             _surfaceByMaterialName.Clear();
             _materialsOrdered = Array.Empty<FcLevelSupplementData.MaterialDesc>();
 
@@ -98,6 +134,11 @@ namespace OpenFarCry.Level.Services
                     DestroyImmediate(mat);
             }
             _materialCache.Clear();
+        }
+
+        public bool HasResolvableOverride(string overrideName, int materialId)
+        {
+            return TryResolveMaterialDesc(overrideName, materialId, out _, out _);
         }
 
         public bool TryResolveBrushOverrideMaterial(
@@ -224,6 +265,190 @@ namespace OpenFarCry.Level.Services
             return false;
         }
 
+        public bool TryApplyBrushOverrideToRendererSlots(
+            string overrideName,
+            int requestedMaterialId,
+            string scopeId,
+            Material[] slots,
+            int[] submeshMaterialIds)
+        {
+            return TryApplyBrushOverrideToRendererSlots(
+                overrideName,
+                requestedMaterialId,
+                scopeId,
+                slots,
+                submeshMaterialIds,
+                out _);
+        }
+
+        public bool TryApplyBrushOverrideToRendererSlots(
+            string overrideName,
+            int requestedMaterialId,
+            string scopeId,
+            Material[] slots,
+            int[] submeshMaterialIds,
+            out BrushSlotResolutionInfo[] diagnostics)
+        {
+            diagnostics = slots != null && slots.Length > 0
+                ? new BrushSlotResolutionInfo[slots.Length]
+                : Array.Empty<BrushSlotResolutionInfo>();
+
+            if (slots == null || slots.Length == 0)
+                return false;
+
+            bool hasOverrideToken = !string.IsNullOrWhiteSpace(overrideName);
+            bool targetedAny = false;
+            bool replacedAny = false;
+
+            for (int i = 0; i < slots.Length; i++)
+            {
+                string inputMaterialName = slots[i] != null ? slots[i].name : string.Empty;
+                if (!IsSlotTargetedByRequest(requestedMaterialId, slots.Length, submeshMaterialIds, i, out var submeshMaterialId))
+                {
+                    diagnostics[i] = new BrushSlotResolutionInfo(
+                        i,
+                        submeshMaterialId,
+                        targeted: false,
+                        applied: false,
+                        outcome: "not-targeted",
+                        inputMaterialName: inputMaterialName,
+                        outputMaterialName: inputMaterialName,
+                        detail: $"RequestedMaterialId={requestedMaterialId}");
+                    continue;
+                }
+
+                targetedAny = true;
+                if (!TryResolveBrushOverrideMaterialForSubmesh(
+                        overrideName,
+                        requestedMaterialId,
+                        submeshMaterialId,
+                        slots[i] != null ? slots[i].name : string.Empty,
+                        scopeId,
+                        out var overrideMaterial,
+                        out var outcome,
+                        out var detail)
+                    || overrideMaterial == null)
+                {
+                    diagnostics[i] = new BrushSlotResolutionInfo(
+                        i,
+                        submeshMaterialId,
+                        targeted: true,
+                        applied: false,
+                        outcome: string.IsNullOrWhiteSpace(outcome) ? "unresolved" : outcome,
+                        inputMaterialName: inputMaterialName,
+                        outputMaterialName: inputMaterialName,
+                        detail: detail);
+                    continue;
+                }
+
+                slots[i] = overrideMaterial;
+                replacedAny = true;
+                diagnostics[i] = new BrushSlotResolutionInfo(
+                    i,
+                    submeshMaterialId,
+                    targeted: true,
+                    applied: true,
+                    outcome: string.IsNullOrWhiteSpace(outcome) ? "applied" : outcome,
+                    inputMaterialName: inputMaterialName,
+                    outputMaterialName: overrideMaterial.name,
+                    detail: detail);
+            }
+
+            if (replacedAny)
+                return true;
+
+            if (!hasOverrideToken || targetedAny)
+                return false;
+
+            if (!TryResolveBrushOverrideMaterial(
+                    overrideName,
+                    requestedMaterialId,
+                    scopeId,
+                    out var fallbackMaterial)
+                || fallbackMaterial == null)
+            {
+                for (int i = 0; i < slots.Length; i++)
+                {
+                    string inputMaterialName = slots[i] != null ? slots[i].name : string.Empty;
+                    diagnostics[i] = new BrushSlotResolutionInfo(
+                        i,
+                        submeshMaterialIds != null && i < submeshMaterialIds.Length ? submeshMaterialIds[i] : i,
+                        targeted: false,
+                        applied: false,
+                        outcome: "fallback-failed",
+                        inputMaterialName: inputMaterialName,
+                        outputMaterialName: inputMaterialName,
+                        detail: "No targeted slots and generic override fallback failed.");
+                }
+                return false;
+            }
+
+            for (int i = 0; i < slots.Length; i++)
+            {
+                string inputMaterialName = slots[i] != null ? slots[i].name : string.Empty;
+                slots[i] = fallbackMaterial;
+                diagnostics[i] = new BrushSlotResolutionInfo(
+                    i,
+                    submeshMaterialIds != null && i < submeshMaterialIds.Length ? submeshMaterialIds[i] : i,
+                    targeted: false,
+                    applied: true,
+                    outcome: "fallback-all-slots",
+                    inputMaterialName: inputMaterialName,
+                    outputMaterialName: fallbackMaterial.name,
+                    detail: "No targeted slots; applied generic override material to all slots.");
+            }
+
+            return true;
+        }
+
+        public static bool ApplyOverrideToRendererSlots(
+            Material[] slots,
+            Material overrideMaterial,
+            int requestedMaterialId,
+            int[] submeshMaterialIds,
+            bool allowAllSlotsFallback)
+        {
+            if (slots == null || slots.Length == 0 || overrideMaterial == null)
+                return false;
+
+            if (requestedMaterialId < 0)
+            {
+                for (int i = 0; i < slots.Length; i++)
+                    slots[i] = overrideMaterial;
+                return true;
+            }
+
+            bool replaced = false;
+            if (submeshMaterialIds != null && submeshMaterialIds.Length == slots.Length)
+            {
+                for (int i = 0; i < slots.Length; i++)
+                {
+                    if (submeshMaterialIds[i] != requestedMaterialId)
+                        continue;
+
+                    slots[i] = overrideMaterial;
+                    replaced = true;
+                }
+            }
+
+            if (!replaced &&
+                requestedMaterialId >= 0 &&
+                requestedMaterialId < slots.Length)
+            {
+                slots[requestedMaterialId] = overrideMaterial;
+                replaced = true;
+            }
+
+            if (!replaced && allowAllSlotsFallback)
+            {
+                for (int i = 0; i < slots.Length; i++)
+                    slots[i] = overrideMaterial;
+                replaced = true;
+            }
+
+            return replaced;
+        }
+
         void AddNameKey(string value, FcLevelSupplementData.MaterialDesc desc)
         {
             string key = NormalizeKey(value);
@@ -233,49 +458,50 @@ namespace OpenFarCry.Level.Services
                 _materialByName.Add(key, desc);
         }
 
+        void AddChildMapping(FcLevelSupplementData.MaterialDesc desc)
+        {
+            string parentKey = NormalizeKey(desc.ParentName);
+            if (string.IsNullOrEmpty(parentKey))
+                return;
+
+            if (!_materialChildrenByParent.TryGetValue(parentKey, out var children))
+            {
+                children = new List<FcLevelSupplementData.MaterialDesc>();
+                _materialChildrenByParent[parentKey] = children;
+            }
+
+            children.Add(desc);
+        }
+
         bool TryBuildMaterialFromLevelDesc(
             FcLevelSupplementData.MaterialDesc desc,
             string scopeId,
             out Material material)
         {
             material = null;
-            string texturePath = FindFirstLoadableTexture(desc.TextureRefs, scopeId, out var baseMap);
+
+            string shaderNorm = string.IsNullOrWhiteSpace(desc.Shader)
+                ? "templmodelcommon"
+                : desc.Shader.Trim().ToLowerInvariant();
+            bool isDecalShader = shaderNorm.Contains("decal") &&
+                                  !shaderNorm.Contains("decalmodulate");
+            float resolvedAlphaTest = isDecalShader ? 0f : Mathf.Max(0f, desc.AlphaTest);
+            if (isDecalShader && desc.AlphaTest > 0.01f)
+                Debug.Log($"[LevelMaterial] '{desc.Name}': decal shader, RGB-only assumed, AlphaTest suppressed ({desc.AlphaTest:F3}→0).");
 
             var chunk = new CgfMaterialChunk
             {
                 Name = string.IsNullOrWhiteSpace(desc.FullName) ? desc.Name : desc.FullName,
-                ShaderName = string.IsNullOrWhiteSpace(desc.Shader)
-                    ? "templmodelcommon"
-                    : desc.Shader.Trim().ToLowerInvariant(),
+                ShaderName = shaderNorm,
                 MtlType = CgfMtlType.Standard,
-                DiffuseColor = new Color32(255, 255, 255, 255)
+                DiffuseColor = new Color32(255, 255, 255, 255),
+                AlphaTest = resolvedAlphaTest,
+                Opacity = Mathf.Clamp01(desc.Opacity > 0f ? desc.Opacity : 1f),
+                Flags = (CgfMtlFlags)desc.MtlFlags,
             };
 
-            if (baseMap != null)
-            {
-                var resolved = new CgfResolvedMaterialTextures(
-                    diffuseTextureName: texturePath,
-                    normalTextureName: null,
-                    specularTextureName: null,
-                    opacityTextureName: null,
-                    glossTextureName: null,
-                    baseMapVirtualPath: texturePath,
-                    normalMapVirtualPath: null,
-                    specularMapVirtualPath: null,
-                    opacityMapVirtualPath: null,
-                    glossMapVirtualPath: null,
-                    baseMap: baseMap,
-                    normalMap: null,
-                    specularMap: null,
-                    opacityMap: null,
-                    glossMap: null);
-
-                material = CgfMaterialBuilder.Build(chunk, resolved);
-            }
-            else
-            {
-                material = CgfMaterialBuilder.Build(chunk);
-            }
+            var resolved = ResolveLevelMaterialTextures(desc, scopeId);
+            material = CgfMaterialBuilder.Build(chunk, resolved);
 
             if (material != null)
                 material.name = $"LevelMat_{(string.IsNullOrWhiteSpace(desc.FullName) ? desc.Name : desc.FullName)}";
@@ -323,19 +549,215 @@ namespace OpenFarCry.Level.Services
             return material != null;
         }
 
-        static string FindFirstLoadableTexture(string[] refs, string scopeId, out Texture2D texture)
+        static CgfResolvedMaterialTextures ResolveLevelMaterialTextures(
+            FcLevelSupplementData.MaterialDesc desc,
+            string scopeId)
         {
-            texture = null;
+            string diffuseName = null;
+            string normalName = null;
+            string specularName = null;
+            string opacityName = null;
+            string glossName = null;
+
+            string basePath = null;
+            string normalPath = null;
+            string specPath = null;
+            string opacityPath = null;
+            string glossPath = null;
+
+            Texture2D baseTex = null;
+            Texture2D normalTex = null;
+            Texture2D specTex = null;
+            Texture2D opacityTex = null;
+            Texture2D glossTex = null;
+
+            if (TryResolveTextureFromSlots(desc.TextureSlots, scopeId, IsPreferredBaseMapSlot, out var baseSlot))
+            {
+                diffuseName = baseSlot.SourcePath;
+                basePath = baseSlot.ResolvedPath;
+                baseTex = baseSlot.Texture;
+            }
+
+            if (TryResolveTextureFromSlots(desc.TextureSlots, scopeId, IsNormalMapSlot, out var normalSlot))
+            {
+                normalName = normalSlot.SourcePath;
+                normalPath = normalSlot.ResolvedPath;
+                normalTex = normalSlot.Texture;
+            }
+
+            if (TryResolveTextureFromSlots(desc.TextureSlots, scopeId, IsSpecularMapSlot, out var specSlot))
+            {
+                specularName = specSlot.SourcePath;
+                specPath = specSlot.ResolvedPath;
+                specTex = specSlot.Texture;
+            }
+
+            if (TryResolveTextureFromSlots(desc.TextureSlots, scopeId, IsOpacityMapSlot, out var opacitySlot))
+            {
+                opacityName = opacitySlot.SourcePath;
+                opacityPath = opacitySlot.ResolvedPath;
+                opacityTex = opacitySlot.Texture;
+            }
+
+            if (TryResolveTextureFromSlots(desc.TextureSlots, scopeId, IsGlossMapSlot, out var glossSlot))
+            {
+                glossName = glossSlot.SourcePath;
+                glossPath = glossSlot.ResolvedPath;
+                glossTex = glossSlot.Texture;
+            }
+
+            // Backward-compatibility fallback for old flattened refs data.
+            if (baseTex == null && TryResolveTextureFromRefs(desc.TextureRefs, scopeId, out var baseRef))
+            {
+                diffuseName = baseRef.SourcePath;
+                basePath = baseRef.ResolvedPath;
+                baseTex = baseRef.Texture;
+            }
+
+            return new CgfResolvedMaterialTextures(
+                diffuseTextureName: diffuseName,
+                normalTextureName: normalName,
+                specularTextureName: specularName,
+                opacityTextureName: opacityName,
+                glossTextureName: glossName,
+                baseMapVirtualPath: basePath,
+                normalMapVirtualPath: normalPath,
+                specularMapVirtualPath: specPath,
+                opacityMapVirtualPath: opacityPath,
+                glossMapVirtualPath: glossPath,
+                baseMap: baseTex,
+                normalMap: normalTex,
+                specularMap: specTex,
+                opacityMap: opacityTex,
+                glossMap: glossTex);
+        }
+
+        static bool IsPreferredBaseMapSlot(string map)
+        {
+            if (string.IsNullOrWhiteSpace(map))
+                return false;
+
+            switch (map.Trim().ToLowerInvariant())
+            {
+                case "diffuse":
+                case "texture":
+                case "decal":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        static bool IsNormalMapSlot(string map)
+        {
+            if (string.IsNullOrWhiteSpace(map))
+                return false;
+            switch (map.Trim().ToLowerInvariant())
+            {
+                case "bumpmap":
+                case "normal":
+                case "normalmap":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        static bool IsSpecularMapSlot(string map)
+        {
+            if (string.IsNullOrWhiteSpace(map))
+                return false;
+            return map.Trim().Equals("Specular", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool IsOpacityMapSlot(string map)
+        {
+            if (string.IsNullOrWhiteSpace(map))
+                return false;
+            return map.Trim().Equals("Opacity", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool IsGlossMapSlot(string map)
+        {
+            if (string.IsNullOrWhiteSpace(map))
+                return false;
+            switch (map.Trim().ToLowerInvariant())
+            {
+                case "gloss":
+                case "glossmap":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        struct ResolvedTexture
+        {
+            public string SourcePath;
+            public string ResolvedPath;
+            public Texture2D Texture;
+        }
+
+        static bool TryResolveTextureFromSlots(
+            FcLevelSupplementData.MaterialDesc.TextureSlotDesc[] slots,
+            string scopeId,
+            Func<string, bool> match,
+            out ResolvedTexture texture)
+        {
+            texture = default;
+            if (slots == null || slots.Length == 0 || match == null)
+                return false;
+
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (!match(slots[i].Map))
+                    continue;
+                if (TryResolveTexturePath(slots[i].File, scopeId, out var resolved))
+                {
+                    texture = resolved;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool TryResolveTextureFromRefs(
+            string[] refs,
+            string scopeId,
+            out ResolvedTexture texture)
+        {
+            texture = default;
             if (refs == null || refs.Length == 0)
-                return null;
+                return false;
 
             for (int i = 0; i < refs.Length; i++)
             {
-                if (TryLoadTextureCandidate(refs[i], scopeId, out texture, out var resolvedPath))
-                    return resolvedPath;
+                if (TryResolveTexturePath(refs[i], scopeId, out var resolved))
+                {
+                    texture = resolved;
+                    return true;
+                }
             }
 
-            return null;
+            return false;
+        }
+
+        static bool TryResolveTexturePath(string rawPath, string scopeId, out ResolvedTexture texture)
+        {
+            texture = default;
+            if (TryLoadTextureCandidate(rawPath, scopeId, out var loaded, out var resolvedPath))
+            {
+                texture = new ResolvedTexture
+                {
+                    SourcePath = NormalizePath(rawPath),
+                    ResolvedPath = resolvedPath,
+                    Texture = loaded,
+                };
+                return true;
+            }
+
+            return false;
         }
 
         static bool TryLoadTextureCandidate(string rawPath, string scopeId, out Texture2D texture, out string resolvedPath)
@@ -399,6 +821,195 @@ namespace OpenFarCry.Level.Services
             if (string.IsNullOrWhiteSpace(value))
                 return string.Empty;
             return value.Trim().Replace('\\', '/').Trim('/').ToLowerInvariant();
+        }
+
+        bool TryResolveBrushOverrideMaterialForSubmesh(
+            string overrideName,
+            int requestedMaterialId,
+            int submeshMaterialId,
+            string slotMaterialName,
+            string scopeId,
+            out Material material,
+            out string outcome,
+            out string detail)
+        {
+            material = null;
+            outcome = string.Empty;
+            detail = string.Empty;
+
+            string normalizedOverride = NormalizeKey(overrideName);
+            string normalizedSlotMaterialName = NormalizeMaterialNameForLookup(slotMaterialName);
+            string slotCacheKey = $"slot:{normalizedOverride}|req:{requestedMaterialId}|sm:{submeshMaterialId}|src:{normalizedSlotMaterialName}";
+            if (_materialCache.TryGetValue(slotCacheKey, out material) && material != null)
+            {
+                outcome = "cache-slot";
+                detail = "Resolved from slot-specific cache.";
+                return true;
+            }
+
+            if (TryResolveMaterialDesc(overrideName, requestedMaterialId, out var baseDesc, out _))
+            {
+                var selectedDesc = ResolveSubmaterialDesc(
+                    baseDesc,
+                    submeshMaterialId,
+                    normalizedSlotMaterialName,
+                    out var selectionMode);
+                string selectedDescKey = !string.IsNullOrWhiteSpace(selectedDesc.FullName)
+                    ? NormalizeKey(selectedDesc.FullName)
+                    : NormalizeKey(selectedDesc.Name);
+                string descCacheKey = $"desc:{selectedDescKey}|sm:{submeshMaterialId}";
+                if (_materialCache.TryGetValue(descCacheKey, out material) && material != null)
+                {
+                    _materialCache[slotCacheKey] = material;
+                    outcome = $"cache-level-{selectionMode}";
+                    detail = $"Material={selectedDesc.FullName}";
+                    return true;
+                }
+
+                if (TryBuildMaterialFromLevelDesc(selectedDesc, scopeId, out material) && material != null)
+                {
+                    _materialCache[descCacheKey] = material;
+                    _materialCache[slotCacheKey] = material;
+                    outcome = $"level-{selectionMode}";
+                    detail = $"Material={selectedDesc.FullName}";
+                    return true;
+                }
+            }
+
+            if (TryResolveBrushOverrideMaterial(overrideName, requestedMaterialId, scopeId, out material) && material != null)
+            {
+                _materialCache[slotCacheKey] = material;
+                outcome = "fallback-generic";
+                detail = "Used generic override material fallback.";
+                return true;
+            }
+
+            outcome = "unresolved";
+            detail = "No level material/submaterial match and no generic fallback material.";
+            return false;
+        }
+
+        FcLevelSupplementData.MaterialDesc ResolveSubmaterialDesc(
+            FcLevelSupplementData.MaterialDesc parentDesc,
+            int submeshMaterialId,
+            string normalizedSlotMaterialName,
+            out string selectionMode)
+        {
+            string parentKey = NormalizeKey(parentDesc.FullName);
+            if (string.IsNullOrEmpty(parentKey))
+            {
+                selectionMode = "parent";
+                return parentDesc;
+            }
+
+            if (!_materialChildrenByParent.TryGetValue(parentKey, out var children) ||
+                children == null ||
+                children.Count == 0)
+            {
+                selectionMode = "parent";
+                return parentDesc;
+            }
+
+            if (submeshMaterialId >= 0 && submeshMaterialId < children.Count)
+            {
+                selectionMode = "submesh-id";
+                return children[submeshMaterialId];
+            }
+
+            if (TryResolveChildBySourceMaterialName(children, normalizedSlotMaterialName, out var byName))
+            {
+                selectionMode = "source-name";
+                return byName;
+            }
+
+            selectionMode = "parent";
+            return parentDesc;
+        }
+
+        static bool TryResolveChildBySourceMaterialName(
+            List<FcLevelSupplementData.MaterialDesc> children,
+            string normalizedSlotMaterialName,
+            out FcLevelSupplementData.MaterialDesc resolved)
+        {
+            if (children == null || children.Count == 0 || string.IsNullOrEmpty(normalizedSlotMaterialName))
+            {
+                resolved = default;
+                return false;
+            }
+
+            for (int i = 0; i < children.Count; i++)
+            {
+                var child = children[i];
+                string childFull = NormalizeKey(child.FullName);
+                string childName = NormalizeKey(child.Name);
+
+                if (!string.IsNullOrEmpty(childFull) &&
+                    (normalizedSlotMaterialName == childFull || normalizedSlotMaterialName.EndsWith("/" + childFull, StringComparison.Ordinal)))
+                {
+                    resolved = child;
+                    return true;
+                }
+
+                if (!string.IsNullOrEmpty(childName) &&
+                    (normalizedSlotMaterialName == childName || normalizedSlotMaterialName.EndsWith("/" + childName, StringComparison.Ordinal)))
+                {
+                    resolved = child;
+                    return true;
+                }
+
+                // Reverse-path: child fullname has longer path prefix, slot name is its trailing segment
+                if (!string.IsNullOrEmpty(childFull) &&
+                    childFull.EndsWith("/" + normalizedSlotMaterialName, StringComparison.Ordinal))
+                {
+                    resolved = child;
+                    return true;
+                }
+            }
+
+            resolved = default;
+            return false;
+        }
+
+        static string NormalizeMaterialNameForLookup(string value)
+        {
+            string key = NormalizeKey(value);
+            if (string.IsNullOrEmpty(key))
+                return string.Empty;
+
+            const string levelMatPrefix = "levelmat_";
+            const string levelMatTexPrefix = "levelmattex_";
+            if (key.StartsWith(levelMatPrefix, StringComparison.Ordinal))
+                key = key.Substring(levelMatPrefix.Length);
+            else if (key.StartsWith(levelMatTexPrefix, StringComparison.Ordinal))
+                key = key.Substring(levelMatTexPrefix.Length);
+
+            const string instanceSuffix = " (instance)";
+            if (key.EndsWith(instanceSuffix, StringComparison.Ordinal))
+                key = key.Substring(0, key.Length - instanceSuffix.Length);
+
+            return key.Trim();
+        }
+
+        static bool IsSlotTargetedByRequest(
+            int requestedMaterialId,
+            int slotCount,
+            int[] submeshMaterialIds,
+            int slotIndex,
+            out int submeshMaterialId)
+        {
+            submeshMaterialId = submeshMaterialIds != null &&
+                                slotIndex >= 0 &&
+                                slotIndex < submeshMaterialIds.Length
+                ? submeshMaterialIds[slotIndex]
+                : slotIndex;
+
+            if (requestedMaterialId < 0)
+                return true;
+
+            if (submeshMaterialIds != null && submeshMaterialIds.Length == slotCount)
+                return submeshMaterialIds[slotIndex] == requestedMaterialId;
+
+            return slotIndex == requestedMaterialId;
         }
 
         bool TryResolveMaterialDesc(

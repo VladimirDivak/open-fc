@@ -79,6 +79,8 @@ namespace OpenFarCry.Importer.Cgf
                 ApplyGlassState(mat);
             else if (classification.IsTransparentAlphaBlend)
                 ApplyAlphaBlendState(mat);
+            else if (classification.IsRgbOnlyDecal)
+                ApplyOpaqueState(mat);
             else if (classification.Family == CgfMaterialShaderFamily.Plants ||
                      classification.Family == CgfMaterialShaderFamily.Bark)
                 ApplyCutoutState(mat, chunk.AlphaTest > 0.01f ? Mathf.Max(chunk.AlphaTest, 0.1f) : 0.3f);

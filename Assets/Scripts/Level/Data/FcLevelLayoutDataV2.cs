@@ -181,6 +181,7 @@ namespace OpenFarCry.Level.Data
             public CountEntry[] BrushMaterialSlotOutcomeCounts;
             public CountEntry[] BrushMaterialSlotUnresolvedSamples;
             public CountEntry[] BrushMaterialResolutionSourceCounts;
+            public CountEntry[] BrushMaterialShaderFamilyCounts;
             public CountEntry[] EntityClassCounts;
             public CountEntry[] ObjectTypeCounts;
             public CountEntry[] VegetationInstanceTypeCounts;
@@ -651,6 +652,7 @@ namespace OpenFarCry.Level.Data
                 BrushMaterialSlotOutcomeCounts = Array.Empty<ImportReportData.CountEntry>(),
                 BrushMaterialSlotUnresolvedSamples = Array.Empty<ImportReportData.CountEntry>(),
                 BrushMaterialResolutionSourceCounts = Array.Empty<ImportReportData.CountEntry>(),
+                BrushMaterialShaderFamilyCounts = Array.Empty<ImportReportData.CountEntry>(),
                 EntityClassCounts = BuildEntityClassCounts(data.Entities),
                 ObjectTypeCounts = BuildObjectTypeCounts(data.LevelObjects, data.Objects),
                 VegetationInstanceTypeCounts = BuildVegetationInstanceTypeCounts(data.VegetationInstances),

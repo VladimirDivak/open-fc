@@ -14,7 +14,7 @@ Non-goal: NPC AI, weapon gameplay, mission logic, save/load, netcode, exact Cry 
 
 - [x] Phase 1: Inventory + lossless parse
 - [~] Phase 2: Terrain skeleton
-- [~] Phase 3: Materials + surface base
+- [x] Phase 3: Materials + surface base
 - [~] Phase 4: Brush completion
 - [~] Phase 5: Vegetation / static objects
 - [ ] Phase 6: Structural objects + volumes
@@ -106,37 +106,23 @@ Status:
 - editor path has terrain skeleton + collider + fallback visual + water plane
 - runtime source path parses settings only, no terrain build
 
-### [~] Phase 3. Materials + Surface Base
+### [x] Phase 3. Materials + Surface Base
 Status:
 - parsed material/surface data present in supplement + V2 report
 - runtime CGF texture preload path exists
-- P3.1 done (stock `materials.xml` parser fix)
-- P3.2 partial (structured slot semantics in supplement/resolver)
-- P3.3 partial (submesh MatID-aware slot targeting)
-- P3.4 partial (slot + instance diagnostics persisted into import report)
+- P3.1–P3.6 all done (2026-05-16)
 
-Missing:
-- runtime-wide level material/surface application for terrain/brush/entity
-- strict precedence pipeline `level override -> embedded fallback`
+Done:
+- P3.1: stock `materials.xml` parser fix
+- P3.2: MaterialDesc expanded (slots, alpha, flags, guid, params, hierarchy)
+- P3.3: slot-aware override apply; submaterial by MatID then source-name; reverse-path fallback (chunk-name shorter than child fullname)
+- P3.4: per-slot diagnostics (targeted/applied/outcome/detail); ResolutionSourceCounts; ShaderFamilyCounts persisted in import report
+- P3.5: skip CGF texture preload when all slots covered by resolvable override (materialId<0)
+- P3.6: Decal shader family in CgfMaterialClassifier; RGB-only decal → opaque, no cutout; level override decal suppresses AlphaTest
 
-Planned work:
-- [x] P3.1 Parse stock `materials.xml` structure + texture slot extraction
-- [~] P3.2 Expand supplement material model (name/fullname/shader/alpha/flags/slots/hierarchy)
-- [ ] P3.3 Build-path resolver finalization:
-  - decide keep/replace per CGF submaterial + override token/id
-  - finish CGF chunk-name-aware submaterial fallback when MatID/index mismatch
-- [~] P3.4 Diagnostics:
-  - per-instance override/fallback origin
-  - unresolved names/ids
-  - slot misses / unsupported shader family markers
-- [ ] P3.5 Override-aware texture preload:
-  - evaluate targeted slot replacement before preload
-  - skip CGF texture preload for fully replaced chunks/slots
-  - keep preload for fallback/unresolved paths
-- [ ] P3.6 Alpha/decal policy:
-  - explicit rule for RGB-only decal textures (no alpha)
-  - map to correct opacity/cutout/blend behavior
-  - mark diagnostics when alpha synthesized/fallback path used
+Remaining (not blocking P3 close):
+- runtime-wide material application for terrain + entities (scoped to P4/P6/P7)
+- strict NoDraw contract end-to-end (scoped to P4)
 
 ### [~] Phase 4. Brush Completion
 Status:
@@ -218,14 +204,13 @@ Missing:
   - import report carries override match modes and missing buckets
   - authoring build persists slot+instance diagnostic aggregates + unresolved samples + resolution-source buckets
   - authoring validation checks scene/layout sync for slot+instance diagnostics
-  - remaining P3.3 gap: stronger chunk-name-aware mapping fallback
-  - remaining P3.4 gap: raw per-instance/per-renderer lines still scene metadata only, not full layout payload
+  - 2026-05-16 (continued): P3.3 reverse-path fallback, P3.5 skip-preload opt, P3.6 decal RGB-only, P3.4 ShaderFamilyCounts → P3 closed
 
 ## Done Definition
 
 Full runtime content import v1 complete when:
 - [x] all known level package files indexed
-- [ ] runtime/editor build resolves stock `materials.xml` correctly with strict override->fallback precedence
+- [x] runtime/editor build resolves stock `materials.xml` correctly with strict override->fallback precedence (brush path)
 - [ ] runtime builds terrain visible/collidable from source
 - [ ] runtime spawns vegetation from parsed records
 - [ ] runtime spawns brushes from parsed `brush.lst` with override/LOD/collider parity

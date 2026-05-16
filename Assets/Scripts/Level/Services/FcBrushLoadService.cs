@@ -109,10 +109,16 @@ namespace OpenFarCry.Level.Services
                     return;
                 }
 
+                bool skipPreload = brush.MaterialId < 0 &&
+                    !string.IsNullOrWhiteSpace(brush.MaterialOverride) &&
+                    (FcLevelMaterialOverrideService.Current?.HasResolvableOverride(
+                        brush.MaterialOverride, brush.MaterialId) ?? false);
+
                 var result = await FcLevelGeometryImportHelper.ImportStaticGeometryWithTexturePreloadAsync(
                     brush.VirtualPath,
                     LevelScopeId,
-                    ct);
+                    ct,
+                    skipTexturePreload: skipPreload);
 
                 if (ct.IsCancellationRequested) return;
 
@@ -128,7 +134,8 @@ namespace OpenFarCry.Level.Services
                     brush.VirtualPath,
                     LevelScopeId,
                     _lodService,
-                    ct);
+                    ct,
+                    skipTexturePreload: skipPreload);
 
                 if (ct.IsCancellationRequested) return;
                 await UniTask.SwitchToMainThread(ct);

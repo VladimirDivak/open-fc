@@ -131,6 +131,225 @@ namespace OpenFarCry.Level.Tests.Editor
         }
 
         [Test]
+        public void TryApplyBrushOverrideToRendererSlots_UsesSubmaterialChildrenBySubmeshMatId()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var go = new GameObject("override_service_test_submaterials");
+            Material slot0 = null;
+            Material slot1 = null;
+            try
+            {
+                var service = go.AddComponent<FcLevelMaterialOverrideService>();
+                service.Configure("test_level", new FcLevelSupplementData
+                {
+                    Materials = new[]
+                    {
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Root",
+                            FullName = "Group/Root",
+                            ParentName = string.Empty,
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        },
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Child0",
+                            FullName = "Group/Root/Child0",
+                            ParentName = "Group/Root",
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        },
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Child1",
+                            FullName = "Group/Root/Child1",
+                            ParentName = "Group/Root",
+                            Shader = "templplants1",
+                            AlphaTest = 1f,
+                            TextureRefs = null
+                        }
+                    }
+                });
+
+                slot0 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "slot0" };
+                slot1 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "slot1" };
+                var slots = new[] { slot0, slot1 };
+
+                bool applied = service.TryApplyBrushOverrideToRendererSlots(
+                    overrideName: "group/root",
+                    requestedMaterialId: -1,
+                    scopeId: "",
+                    slots: slots,
+                    submeshMaterialIds: new[] { 0, 1 });
+
+                Assert.That(applied, Is.True);
+                Assert.That(slots[0], Is.Not.Null);
+                Assert.That(slots[1], Is.Not.Null);
+                Assert.That(slots[0], Is.Not.SameAs(slot0));
+                Assert.That(slots[1], Is.Not.SameAs(slot1));
+                Assert.That(slots[0].name, Does.Contain("Group/Root/Child0"));
+                Assert.That(slots[1].name, Does.Contain("Group/Root/Child1"));
+                Assert.That(slots[0].GetFloat("_AlphaClip"), Is.EqualTo(0f));
+                Assert.That(slots[1].GetFloat("_AlphaClip"), Is.EqualTo(1f));
+            }
+            finally
+            {
+                if (slot0 != null)
+                    UnityEngine.Object.DestroyImmediate(slot0);
+                if (slot1 != null)
+                    UnityEngine.Object.DestroyImmediate(slot1);
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
+        public void TryApplyBrushOverrideToRendererSlots_FallsBackToSourceMaterialName_WhenMatIdMappingMisses()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var go = new GameObject("override_service_test_submaterials_name_fallback");
+            Material slot0 = null;
+            Material slot1 = null;
+            try
+            {
+                var service = go.AddComponent<FcLevelMaterialOverrideService>();
+                service.Configure("test_level", new FcLevelSupplementData
+                {
+                    Materials = new[]
+                    {
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Root",
+                            FullName = "Group/Root",
+                            ParentName = string.Empty,
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        },
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Child0",
+                            FullName = "Group/Root/Child0",
+                            ParentName = "Group/Root",
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        },
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Child1",
+                            FullName = "Group/Root/Child1",
+                            ParentName = "Group/Root",
+                            Shader = "templplants1",
+                            AlphaTest = 1f,
+                            TextureRefs = null
+                        }
+                    }
+                });
+
+                slot0 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "Group/Root/Child1" };
+                slot1 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "Group/Root/Child0" };
+                var slots = new[] { slot0, slot1 };
+
+                bool applied = service.TryApplyBrushOverrideToRendererSlots(
+                    overrideName: "group/root",
+                    requestedMaterialId: -1,
+                    scopeId: "",
+                    slots: slots,
+                    submeshMaterialIds: new[] { 99, 99 });
+
+                Assert.That(applied, Is.True);
+                Assert.That(slots[0].name, Does.Contain("Group/Root/Child1"));
+                Assert.That(slots[1].name, Does.Contain("Group/Root/Child0"));
+                Assert.That(slots[0].GetFloat("_AlphaClip"), Is.EqualTo(1f));
+                Assert.That(slots[1].GetFloat("_AlphaClip"), Is.EqualTo(0f));
+            }
+            finally
+            {
+                if (slot0 != null)
+                    UnityEngine.Object.DestroyImmediate(slot0);
+                if (slot1 != null)
+                    UnityEngine.Object.DestroyImmediate(slot1);
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
+        public void TryApplyBrushOverrideToRendererSlots_ReturnsPerSlotDiagnostics()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var go = new GameObject("override_service_test_diagnostics");
+            Material slot0 = null;
+            Material slot1 = null;
+            try
+            {
+                var service = go.AddComponent<FcLevelMaterialOverrideService>();
+                service.Configure("test_level", new FcLevelSupplementData
+                {
+                    Materials = new[]
+                    {
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Root",
+                            FullName = "Group/Root",
+                            ParentName = string.Empty,
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        },
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Child0",
+                            FullName = "Group/Root/Child0",
+                            ParentName = "Group/Root",
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        }
+                    }
+                });
+
+                slot0 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "slot0" };
+                slot1 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "slot1" };
+                var slots = new[] { slot0, slot1 };
+
+                bool applied = service.TryApplyBrushOverrideToRendererSlots(
+                    overrideName: "group/root",
+                    requestedMaterialId: 0,
+                    scopeId: "",
+                    slots: slots,
+                    submeshMaterialIds: new[] { 0, 1 },
+                    out var diagnostics);
+
+                Assert.That(applied, Is.True);
+                Assert.That(diagnostics, Is.Not.Null);
+                Assert.That(diagnostics.Length, Is.EqualTo(2));
+                Assert.That(diagnostics[0].Targeted, Is.True);
+                Assert.That(diagnostics[0].Applied, Is.True);
+                Assert.That(diagnostics[0].Outcome, Does.Contain("level-"));
+                Assert.That(diagnostics[1].Targeted, Is.False);
+                Assert.That(diagnostics[1].Applied, Is.False);
+                Assert.That(diagnostics[1].Outcome, Is.EqualTo("not-targeted"));
+            }
+            finally
+            {
+                if (slot0 != null)
+                    UnityEngine.Object.DestroyImmediate(slot0);
+                if (slot1 != null)
+                    UnityEngine.Object.DestroyImmediate(slot1);
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
         public void TryResolveBrushMaterialMetadata_ResolvesSurfaceType_FromMaterialName()
         {
             var go = new GameObject("override_service_test_surface_by_name");
@@ -271,6 +490,107 @@ namespace OpenFarCry.Level.Tests.Editor
                 Assert.That(metadata.SurfaceTypeId, Is.EqualTo(3));
                 Assert.That(metadata.SurfaceTypeName, Is.EqualTo("mud"));
                 Assert.That(metadata.ResolutionSource, Is.EqualTo("override-surface"));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
+        public void TryApplyBrushOverrideToRendererSlots_ResolvesByReversePath_WhenChildFullnameHasLongerPrefix()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var go = new GameObject("override_service_test_reverse_path");
+            Material slot0 = null;
+            try
+            {
+                var service = go.AddComponent<FcLevelMaterialOverrideService>();
+                service.Configure("test_level", new FcLevelSupplementData
+                {
+                    Materials = new[]
+                    {
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "Root",
+                            FullName = "objects/indoor/Root",
+                            ParentName = string.Empty,
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        },
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "metal_part",
+                            FullName = "objects/indoor/Root/metal_part",
+                            ParentName = "objects/indoor/Root",
+                            Shader = "templmodelcommon",
+                            AlphaTest = 0f,
+                            TextureRefs = null
+                        }
+                    }
+                });
+
+                // Slot material name is the short leaf name; child fullname has path prefix.
+                slot0 = new Material(Shader.Find("Universal Render Pipeline/Lit")) { name = "metal_part" };
+                var slots = new[] { slot0 };
+
+                bool applied = service.TryApplyBrushOverrideToRendererSlots(
+                    overrideName: "objects/indoor/Root",
+                    requestedMaterialId: -1,
+                    scopeId: "",
+                    slots: slots,
+                    submeshMaterialIds: new[] { 99 });
+
+                Assert.That(applied, Is.True);
+                Assert.That(slots[0].name, Does.Contain("metal_part"));
+                Assert.That(slots[0], Is.Not.SameAs(slot0));
+            }
+            finally
+            {
+                if (slot0 != null)
+                    UnityEngine.Object.DestroyImmediate(slot0);
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
+        public void TryResolveBrushOverrideMaterial_DecalShader_BuildsAsMaterialWithAlphaClipOff()
+        {
+            if (Shader.Find("Universal Render Pipeline/Lit") == null)
+                Assert.Ignore("URP Lit shader not available in this test context.");
+
+            var go = new GameObject("override_service_test_decal_opaque");
+            try
+            {
+                var service = go.AddComponent<FcLevelMaterialOverrideService>();
+                service.Configure("test_level", new FcLevelSupplementData
+                {
+                    Materials = new[]
+                    {
+                        new FcLevelSupplementData.MaterialDesc
+                        {
+                            Name = "WallDecal",
+                            FullName = "Group/WallDecal",
+                            Shader = "Decal",
+                            AlphaTest = 0.5f,
+                            TextureRefs = null
+                        }
+                    }
+                });
+
+                bool found = service.TryResolveBrushOverrideMaterial(
+                    overrideName: "Group/WallDecal",
+                    materialId: -1,
+                    scopeId: "",
+                    out var mat);
+
+                Assert.That(found, Is.True);
+                Assert.That(mat, Is.Not.Null);
+                Assert.That(mat.GetFloat("_AlphaClip"), Is.EqualTo(0f),
+                    "Decal shader must suppress AlphaTest → opaque mode.");
             }
             finally
             {

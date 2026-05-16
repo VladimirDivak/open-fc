@@ -76,6 +76,8 @@ namespace OpenFarCry.Level.Tests.Editor
                 Assert.That(report.BrushMaterialSlotUnresolvedSamples.Length, Is.EqualTo(0));
                 Assert.That(report.BrushMaterialResolutionSourceCounts, Is.Not.Null);
                 Assert.That(report.BrushMaterialResolutionSourceCounts.Length, Is.EqualTo(0));
+                Assert.That(report.BrushMaterialShaderFamilyCounts, Is.Not.Null);
+                Assert.That(report.BrushMaterialShaderFamilyCounts.Length, Is.EqualTo(0));
             }
             finally
             {
