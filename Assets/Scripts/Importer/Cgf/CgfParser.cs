@@ -745,15 +745,27 @@ namespace OpenFarCry.Importer.Cgf
 
         static void SelectPrimaryMesh(CgfFile file)
         {
+            // Prefer non-proxy nodes. CGF files sometimes list a `_proxy` node before the visual
+            // node; picking it as primary breaks material resolution and cache compatibility.
             int selectedMeshId = -1;
+            int proxyFallbackId = -1;
             foreach (var node in file.NodeChunks)
             {
-                if (file.MeshByChunkID.ContainsKey(node.ObjectID))
+                if (!file.MeshByChunkID.ContainsKey(node.ObjectID))
+                    continue;
+                bool isProxy = node.Name != null &&
+                               node.Name.IndexOf("proxy", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!isProxy)
                 {
                     selectedMeshId = node.ObjectID;
                     break;
                 }
+                if (proxyFallbackId == -1)
+                    proxyFallbackId = node.ObjectID;
             }
+
+            if (selectedMeshId == -1)
+                selectedMeshId = proxyFallbackId;
 
             if (selectedMeshId == -1 && file.MeshChunks.Count > 0)
                 selectedMeshId = file.MeshChunks[0].ChunkID;

@@ -10,6 +10,8 @@ namespace OpenFarCry.Level.Data
 {
     public static class FcLevelLoader
     {
+        static readonly HashSet<string> MountedLevelKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // ── Public API ──────────────────────────────────────────────────────────
 
         public static IReadOnlyList<string> ListLevelNames()
@@ -165,20 +167,46 @@ namespace OpenFarCry.Level.Data
 
         public static void EnsureLevelMounted(string levelName)
         {
+            if (string.IsNullOrWhiteSpace(levelName))
+                return;
+
+            string levelKey = levelName.Trim().ToLowerInvariant();
+            if (MountedLevelKeys.Contains(levelKey))
+                return;
+
             if (!TryGetInstallPath(out string installPath))
             {
                 Debug.LogError("[FcLevelLoader] Game install path not configured.");
                 return;
             }
 
-            string pakPath = Path.Combine(installPath, "Levels", levelName, "level.pak");
+            string resolvedLevelDirName = ResolveLevelDirectoryName(installPath, levelName);
+            string pakPath = Path.Combine(installPath, "Levels", resolvedLevelDirName, "level.pak");
             if (!File.Exists(pakPath))
             {
                 Debug.LogWarning($"[FcLevelLoader] Level PAK not found: '{pakPath}'");
                 return;
             }
 
-            FcFileSystem.Mount(pakPath, bindRoot: $"levels/{levelName.ToLowerInvariant()}");
+            FcFileSystem.Mount(pakPath, bindRoot: $"levels/{levelKey}");
+            MountedLevelKeys.Add(levelKey);
+        }
+
+        static string ResolveLevelDirectoryName(string installPath, string levelName)
+        {
+            string levelsDir = Path.Combine(installPath, "Levels");
+            if (!Directory.Exists(levelsDir))
+                return levelName;
+
+            var dirs = Directory.GetDirectories(levelsDir);
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                string dirName = Path.GetFileName(dirs[i]);
+                if (string.Equals(dirName, levelName, StringComparison.OrdinalIgnoreCase))
+                    return dirName;
+            }
+
+            return levelName;
         }
 
         // ── Coordinate conversion ────────────────────────────────────────────────

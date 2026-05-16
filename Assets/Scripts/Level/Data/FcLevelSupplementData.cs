@@ -41,11 +41,27 @@ namespace OpenFarCry.Level.Data
         [Serializable]
         public struct MaterialDesc
         {
+            [Serializable]
+            public struct TextureSlotDesc
+            {
+                public string Map;
+                public string File;
+                public float Amount;
+                public string TexType;
+                public NameValuePair[] Attributes;
+            }
+
             public string Name;
             public string FullName;
             public string ParentName;
             public string Shader;
             public int Depth;
+            public float AlphaTest;
+            public float Opacity;
+            public int MtlFlags;
+            public string MaterialGuid;
+            public TextureSlotDesc[] TextureSlots;
+            public NameValuePair[] PublicParams;
             public string[] TextureRefs;
             public NameValuePair[] Attributes;
         }

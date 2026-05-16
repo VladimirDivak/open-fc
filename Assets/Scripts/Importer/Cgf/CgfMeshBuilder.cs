@@ -178,6 +178,11 @@ namespace OpenFarCry.Importer.Cgf
             for (int i = 0; i < cgf.NodeChunks.Count; i++)
             {
                 var node = cgf.NodeChunks[i];
+                // Skip physics-proxy nodes — they are excluded from visual mesh and handled
+                // separately by TryBuildFromProxyNodeMesh for collider generation.
+                if (node.Name != null &&
+                    node.Name.IndexOf("proxy", StringComparison.OrdinalIgnoreCase) >= 0)
+                    continue;
                 if (!cgf.MeshByChunkID.TryGetValue(node.ObjectID, out var chunk))
                     continue;
                 if (chunk == null || chunk.HasBoneInfo || chunk.Vertices == null || chunk.Faces == null)

@@ -100,7 +100,9 @@ namespace OpenFarCry.FileSystem
             {
                 if (_mountedPaths.Contains(fullPath))
                 {
-                    Debug.LogWarning($"[FcFileSystem] Already mounted, skipping: {Path.GetFileName(pakPath)}");
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    Debug.Log($"[FcFileSystem] Already mounted, skipping: {Path.GetFileName(pakPath)}");
+#endif
                     return;
                 }
                 var archive = new PakArchive(fullPath, bindRoot);

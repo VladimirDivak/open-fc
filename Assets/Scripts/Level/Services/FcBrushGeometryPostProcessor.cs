@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using OpenFarCry.Importer.Cgf;
 using UnityEngine;
@@ -7,18 +8,20 @@ namespace OpenFarCry.Level.Services
 {
     public static class FcBrushGeometryPostProcessor
     {
-        public const int CacheFormatVersion = 2;
+        public const int CacheFormatVersion = 3;
         static readonly int PropCull = Shader.PropertyToID("_Cull");
 
         public readonly struct Artifacts
         {
             public readonly Mesh PhysicsColliderMesh;
             public readonly Mesh VisualFilteredMesh;
+            public readonly int[] VisualSubmeshMaterialIds;
 
-            public Artifacts(Mesh physicsColliderMesh, Mesh visualFilteredMesh)
+            public Artifacts(Mesh physicsColliderMesh, Mesh visualFilteredMesh, int[] visualSubmeshMaterialIds)
             {
                 PhysicsColliderMesh = physicsColliderMesh;
                 VisualFilteredMesh = visualFilteredMesh;
+                VisualSubmeshMaterialIds = visualSubmeshMaterialIds;
             }
         }
 
@@ -32,7 +35,14 @@ namespace OpenFarCry.Level.Services
             if (visualRoot == null || buildResult == null || parsedFile == null)
                 return default;
 
-            Mesh visualFilteredMesh = StripProxySubmeshesFromVisual(visualRoot, buildResult, parsedFile);
+            var visualSubmeshMaterialIds = buildResult.SubmeshMaterialIds != null
+                ? (int[])buildResult.SubmeshMaterialIds.Clone()
+                : null;
+            Mesh visualFilteredMesh = StripProxySubmeshesFromVisual(
+                visualRoot,
+                buildResult,
+                parsedFile,
+                ref visualSubmeshMaterialIds);
             Mesh physicsColliderMesh = null;
 
             if (addPhysicsCollider && buildResult.Mesh != null)
@@ -53,8 +63,8 @@ namespace OpenFarCry.Level.Services
             }
 
             DisableBackfaceCulling(visualRoot);
-            StampCacheMetadata(visualRoot, brushRuntimeParity: true);
-            return new Artifacts(physicsColliderMesh, visualFilteredMesh);
+            StampCacheMetadata(visualRoot, brushRuntimeParity: true, visualSubmeshMaterialIds);
+            return new Artifacts(physicsColliderMesh, visualFilteredMesh, visualSubmeshMaterialIds);
         }
 
         public static void DisableBackfaceCulling(GameObject root)
@@ -75,7 +85,10 @@ namespace OpenFarCry.Level.Services
             }
         }
 
-        public static void StampCacheMetadata(GameObject root, bool brushRuntimeParity)
+        public static void StampCacheMetadata(
+            GameObject root,
+            bool brushRuntimeParity,
+            int[] submeshMaterialIds = null)
         {
             if (root == null)
                 return;
@@ -84,7 +97,7 @@ namespace OpenFarCry.Level.Services
             if (meta == null)
                 meta = root.AddComponent<FcCachedGeometryMetadata>();
 
-            meta.SetMetadata(CacheFormatVersion, brushRuntimeParity);
+            meta.SetMetadata(CacheFormatVersion, brushRuntimeParity, submeshMaterialIds);
         }
 
         public static bool IsBrushRuntimeParityCompatible(GameObject prefabRoot)
@@ -102,7 +115,8 @@ namespace OpenFarCry.Level.Services
         static Mesh StripProxySubmeshesFromVisual(
             GameObject visualRoot,
             BuildResult buildResult,
-            CgfFile parsedFile)
+            CgfFile parsedFile,
+            ref int[] visualSubmeshMaterialIds)
         {
             if (visualRoot == null || buildResult?.SubmeshMaterialIds == null)
                 return null;
@@ -149,34 +163,92 @@ namespace OpenFarCry.Level.Services
             if (keep.Count == 0)
             {
                 mr.enabled = false;
+                visualSubmeshMaterialIds = Array.Empty<int>();
                 return null;
             }
 
-            var filtered = Object.Instantiate(sourceMesh);
-            filtered.name = sourceMesh.name + "_NoProxyVisual";
-            filtered.subMeshCount = keep.Count;
-            for (int i = 0; i < keep.Count; i++)
-            {
-                int src = keep[i];
-                filtered.SetTriangles(sourceMesh.GetTriangles(src), i, true);
-            }
-            filtered.RecalculateBounds();
+            var filtered = BuildCompactedMesh(sourceMesh, keep);
 
             mf.sharedMesh = filtered;
 
             var mats = mr.sharedMaterials;
             var newMats = new Material[keep.Count];
+            var filteredMatIds = new int[keep.Count];
             for (int i = 0; i < keep.Count; i++)
             {
                 int src = keep[i];
                 newMats[i] = src >= 0 && src < mats.Length ? mats[src] : null;
+                filteredMatIds[i] = matIds[src];
             }
             mr.sharedMaterials = newMats;
+            visualSubmeshMaterialIds = filteredMatIds;
+            return filtered;
+        }
+
+        // Builds a new mesh containing only the submeshes in `keepSubmeshIndices`, with the vertex
+        // buffer compacted to exclude vertices that are only referenced by the stripped submeshes.
+        static Mesh BuildCompactedMesh(Mesh source, List<int> keepSubmeshIndices)
+        {
+            // Gather triangles for kept submeshes and mark which source vertices are needed.
+            var keptTris = new int[keepSubmeshIndices.Count][];
+            var usedVertex = new bool[source.vertexCount];
+            for (int i = 0; i < keepSubmeshIndices.Count; i++)
+            {
+                var tris = source.GetTriangles(keepSubmeshIndices[i]);
+                keptTris[i] = tris;
+                for (int t = 0; t < tris.Length; t++)
+                    usedVertex[tris[t]] = true;
+            }
+
+            // Build old→new vertex index mapping.
+            var oldToNew = new int[source.vertexCount];
+            int newVertCount = 0;
+            for (int i = 0; i < oldToNew.Length; i++)
+                oldToNew[i] = usedVertex[i] ? newVertCount++ : -1;
+
+            // Extract only the used vertex data.
+            var srcPositions = source.vertices;
+            var srcNormals   = source.normals;
+            var srcUV0       = source.uv;
+
+            var newPositions = new Vector3[newVertCount];
+            var newNormals   = srcNormals.Length == source.vertexCount ? new Vector3[newVertCount] : null;
+            var newUV0       = srcUV0.Length    == source.vertexCount ? new Vector2[newVertCount] : null;
+
+            for (int i = 0; i < source.vertexCount; i++)
+            {
+                int n = oldToNew[i];
+                if (n < 0) continue;
+                newPositions[n] = srcPositions[i];
+                if (newNormals != null) newNormals[n] = srcNormals[i];
+                if (newUV0    != null) newUV0[n]     = srcUV0[i];
+            }
+
+            // Remap triangle indices and assemble the filtered mesh.
+            var filtered = new Mesh { name = source.name + "_NoProxyVisual" };
+            if (newVertCount > 65535) filtered.indexFormat = IndexFormat.UInt32;
+            filtered.SetVertices(newPositions);
+            if (newNormals != null) filtered.SetNormals(newNormals);
+            if (newUV0    != null) filtered.SetUVs(0, newUV0);
+
+            filtered.subMeshCount = keepSubmeshIndices.Count;
+            for (int i = 0; i < keepSubmeshIndices.Count; i++)
+            {
+                var orig     = keptTris[i];
+                var remapped = new int[orig.Length];
+                for (int j = 0; j < orig.Length; j++)
+                    remapped[j] = oldToNew[orig[j]];
+                filtered.SetTriangles(remapped, i);
+            }
+            filtered.RecalculateBounds();
             return filtered;
         }
 
         static bool TryBuildPhysicsColliderMesh(CgfFile parsedFile, float importScale, out Mesh mesh)
         {
+            if (TryBuildFromProxyNodeMesh(parsedFile, importScale, out mesh))
+                return true;
+
             if (TryBuildFromNoDrawFaces(parsedFile, importScale, out mesh))
                 return true;
 
@@ -184,6 +256,26 @@ namespace OpenFarCry.Level.Services
                 return true;
 
             mesh = null;
+            return false;
+        }
+
+        static bool TryBuildFromProxyNodeMesh(CgfFile parsedFile, float importScale, out Mesh mesh)
+        {
+            mesh = null;
+            if (parsedFile?.NodeChunks == null) return false;
+
+            for (int i = 0; i < parsedFile.NodeChunks.Count; i++)
+            {
+                var node = parsedFile.NodeChunks[i];
+                if (node.Name == null || node.Name.IndexOf("proxy", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                if (!parsedFile.MeshByChunkID.TryGetValue(node.ObjectID, out var proxyMesh))
+                    continue;
+                if (proxyMesh?.Vertices == null || proxyMesh.Vertices.Length == 0 ||
+                    proxyMesh.Faces == null || proxyMesh.Faces.Length == 0)
+                    continue;
+                return BuildColliderMeshFromFaces(null, proxyMesh, importScale, null, "BrushProxyNodeCollider", out mesh);
+            }
             return false;
         }
 

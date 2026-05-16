@@ -8,6 +8,7 @@ using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
 using OpenFarCry.Level.Services;
 using OpenFarCry.FileSystem;
+using OpenFarCry.Importer.Texture;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -19,6 +20,16 @@ namespace OpenFarCry.Level.Editor
 {
     public static class FcLevelSceneBuilder
     {
+        public enum SceneBuildMode
+        {
+            Runtime = 0,
+            Authoring = 1,
+        }
+
+        static readonly int FcCoverTexId = Shader.PropertyToID("_FcCoverTex");
+        static readonly int FcCoverScaleId = Shader.PropertyToID("_FcCoverScale");
+        static readonly int FcCoverOffsetId = Shader.PropertyToID("_FcCoverOffset");
+
         // ── Build ────────────────────────────────────────────────────────────────
 
         public static BuildStats BuildScene(
@@ -27,7 +38,8 @@ namespace OpenFarCry.Level.Editor
             FcEntityPrefabRegistry registry,
             Scene targetScene,
             bool skipHidden = true,
-            bool buildBrushes = true)
+            bool buildBrushes = true,
+            SceneBuildMode buildMode = SceneBuildMode.Runtime)
         {
             var sw = new Stopwatch();
             var report = new FcLevelLoadReport { LevelName = levelName, MissionName = missionName };
@@ -42,61 +54,75 @@ namespace OpenFarCry.Level.Editor
                 return default;
             }
 
-            AssetDatabase.StartAssetEditing();
+            // Load brushes once; used both for layout save and scene build.
+            sw.Restart();
+            IReadOnlyList<FcBrushDesc> brushList = buildBrushes
+                ? FcBrushLoader.LoadBrushes(levelName)
+                : System.Array.Empty<FcBrushDesc>();
+            report.RecordPhase("LoadBrushList", sw.Elapsed.TotalMilliseconds);
+
+            sw.Restart();
+            var supplement = FcLevelSupplementLoader.Load(levelName);
+            SaveLayoutData(levelName, missionName, mission, brushList, supplement);
+            report.RecordPhase("SaveLayoutData", sw.Elapsed.TotalMilliseconds);
+
+            // Root GO
+            var levelRoot = new GameObject($"Level_{levelName}");
+            SceneManager.MoveGameObjectToScene(levelRoot, targetScene);
+
+            // Services
+            InstantiateServices(levelRoot, levelName, mission.Environment);
+            FcLevelLoader.TryLoadTerrainSettings(levelName, out int terrainRes, out int terrainUnit, out var surfaceLayers);
+            Terrain levelTerrain = null;
             try
             {
-                // Load brushes once; used both for layout save and scene build.
-                sw.Restart();
-                IReadOnlyList<FcBrushDesc> brushList = buildBrushes
-                    ? FcBrushLoader.LoadBrushes(levelName)
-                    : System.Array.Empty<FcBrushDesc>();
-                report.RecordPhase("LoadBrushList", sw.Elapsed.TotalMilliseconds);
-
-                sw.Restart();
-                var supplement = FcLevelSupplementLoader.Load(levelName);
-                SaveLayoutData(levelName, missionName, mission, brushList, supplement);
-                report.RecordPhase("SaveLayoutData", sw.Elapsed.TotalMilliseconds);
-
-                // Root GO
-                var levelRoot = new GameObject($"Level_{levelName}");
-                SceneManager.MoveGameObjectToScene(levelRoot, targetScene);
-
-                // Services
-                InstantiateServices(levelRoot, levelName, mission.Environment);
-                FcLevelLoader.TryLoadTerrainSettings(levelName, out int terrainRes, out int terrainUnit, out var surfaceLayers);
-                var levelTerrain = BuildUnityTerrain(levelRoot, levelName, mission.Environment, terrainRes, terrainUnit, surfaceLayers);
-
-                // Entity + object containers
-                var entityRoot = new GameObject("Entities");
-                entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
-                var objectRoot = new GameObject("Objects");
-                objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
-
-                sw.Restart();
-                var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
-                report.RecordPhase("BuildEntities", sw.Elapsed.TotalMilliseconds);
-
-                // Vegetation
-                sw.Restart();
-                stats.Vegetation = BuildVegetationInstances(supplement, levelName, terrainRes, terrainUnit, levelRoot, levelTerrain);
-                report.RecordPhase("BuildVegetation", sw.Elapsed.TotalMilliseconds);
-
-                // ── Brush geometry ──────────────────────────────────────────────────
-                if (buildBrushes)
-                {
-                    sw.Restart();
-                    stats.Brushes = BuildBrushesFromList(brushList, levelRoot);
-                    report.RecordPhase("BuildBrushPlaceholders", sw.Elapsed.TotalMilliseconds);
-                }
-
-                report.LogEditorBuild();
-                EditorSceneManager.MarkSceneDirty(targetScene);
-                return stats;
+                levelTerrain = BuildUnityTerrain(
+                    levelRoot,
+                    levelName,
+                    mission.Environment,
+                    terrainRes,
+                    terrainUnit,
+                    surfaceLayers,
+                    buildMode);
             }
-            finally
+            catch (Exception ex)
             {
-                AssetDatabase.StopAssetEditing();
+                Debug.LogError($"[FcLevelSceneBuilder] Terrain build failed, continuing without terrain: {ex.Message}\n{ex.StackTrace}");
             }
+
+            // Entity + object containers
+            var entityRoot = new GameObject("Entities");
+            entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+            var objectRoot = new GameObject("Objects");
+            objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+
+            sw.Restart();
+            var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
+            report.RecordPhase("BuildEntities", sw.Elapsed.TotalMilliseconds);
+
+            // Vegetation
+            sw.Restart();
+            stats.Vegetation = BuildVegetationInstances(
+                supplement,
+                levelName,
+                terrainRes,
+                terrainUnit,
+                levelRoot,
+                levelTerrain,
+                buildMode);
+            report.RecordPhase("BuildVegetation", sw.Elapsed.TotalMilliseconds);
+
+            // ── Brush geometry ──────────────────────────────────────────────────
+            if (buildBrushes)
+            {
+                sw.Restart();
+                stats.Brushes = BuildBrushesFromList(brushList, levelRoot, buildMode);
+                report.RecordPhase("BuildBrushPlaceholders", sw.Elapsed.TotalMilliseconds);
+            }
+
+            report.LogEditorBuild();
+            EditorSceneManager.MarkSceneDirty(targetScene);
+            return stats;
         }
 
         // V2 adapter: keeps current scene build path while layout format evolves.
@@ -104,7 +130,8 @@ namespace OpenFarCry.Level.Editor
             FcLevelLayoutDataV2 layoutData,
             FcEntityPrefabRegistry registry,
             Scene targetScene,
-            bool skipHidden = true)
+            bool skipHidden = true,
+            SceneBuildMode buildMode = SceneBuildMode.Runtime)
         {
             if (layoutData == null)
             {
@@ -120,7 +147,22 @@ namespace OpenFarCry.Level.Editor
 
             InstantiateServices(levelRoot, layoutData.LevelName, mission.Environment);
             FcLevelLoader.TryLoadTerrainSettings(layoutData.LevelName, out int terrainRes, out int terrainUnit, out var surfaceLayers);
-            var levelTerrain = BuildUnityTerrain(levelRoot, layoutData.LevelName, mission.Environment, terrainRes, terrainUnit, surfaceLayers);
+            Terrain levelTerrain = null;
+            try
+            {
+                levelTerrain = BuildUnityTerrain(
+                    levelRoot,
+                    layoutData.LevelName,
+                    mission.Environment,
+                    terrainRes,
+                    terrainUnit,
+                    surfaceLayers,
+                    buildMode);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[FcLevelSceneBuilder] Terrain build failed, continuing without terrain: {ex.Message}\n{ex.StackTrace}");
+            }
 
             var entityRoot = new GameObject("Entities");
             entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
@@ -129,9 +171,15 @@ namespace OpenFarCry.Level.Editor
 
             var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
 
-            stats.Vegetation = BuildVegetationInstancesFromLayout(layoutData, terrainRes, terrainUnit, levelRoot, levelTerrain);
+            stats.Vegetation = BuildVegetationInstancesFromLayout(
+                layoutData,
+                terrainRes,
+                terrainUnit,
+                levelRoot,
+                levelTerrain,
+                buildMode);
 
-            stats.Brushes = BuildBrushesFromList(brushList, levelRoot);
+            stats.Brushes = BuildBrushesFromList(brushList, levelRoot, buildMode);
 
             EditorSceneManager.MarkSceneDirty(targetScene);
             return stats;
@@ -139,11 +187,15 @@ namespace OpenFarCry.Level.Editor
 
         // ── Brushes ──────────────────────────────────────────────────────────────
 
-        static int BuildBrushesFromList(IReadOnlyList<FcBrushDesc> brushes, GameObject levelRoot)
+        static int BuildBrushesFromList(
+            IReadOnlyList<FcBrushDesc> brushes,
+            GameObject levelRoot,
+            SceneBuildMode buildMode)
         {
             if (brushes == null || brushes.Count == 0) return 0;
 
-            var brushRoot = new GameObject("Brushes");
+            string rootName = buildMode == SceneBuildMode.Authoring ? "Brushes_Authoring" : "Brushes";
+            var brushRoot = new GameObject(rootName);
             brushRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             foreach (var desc in brushes)
@@ -172,7 +224,8 @@ namespace OpenFarCry.Level.Editor
             int terrainResolution,
             int heightmapUnitSize,
             GameObject levelRoot,
-            Terrain terrain)
+            Terrain terrain,
+            SceneBuildMode buildMode)
         {
             if (supplement == null ||
                 supplement.VegetationInstances == null || supplement.VegetationInstances.Length == 0 ||
@@ -186,6 +239,15 @@ namespace OpenFarCry.Level.Editor
                     typeByIndex[t.Index] = t;
             }
 
+            if (buildMode == SceneBuildMode.Authoring)
+            {
+                return PlaceVegetationAsAuthoringInstances(
+                    supplement.VegetationInstances,
+                    typeByIndex,
+                    levelRoot,
+                    terrain);
+            }
+
             return PlaceVegetationAsTreeInstances(supplement.VegetationInstances, typeByIndex, terrain);
         }
 
@@ -194,7 +256,8 @@ namespace OpenFarCry.Level.Editor
             int terrainResolution,
             int heightmapUnitSize,
             GameObject levelRoot,
-            Terrain terrain)
+            Terrain terrain,
+            SceneBuildMode buildMode)
         {
             if (layoutData.VegetationInstances == null || layoutData.VegetationInstances.Length == 0 ||
                 layoutData.VegetationTypes == null || layoutData.VegetationTypes.Length == 0)
@@ -207,7 +270,65 @@ namespace OpenFarCry.Level.Editor
                     typeByIndex[t.Index] = t;
             }
 
+            if (buildMode == SceneBuildMode.Authoring)
+            {
+                return PlaceVegetationAsAuthoringInstances(
+                    layoutData.VegetationInstances,
+                    typeByIndex,
+                    levelRoot,
+                    terrain);
+            }
+
             return PlaceVegetationAsTreeInstances(layoutData.VegetationInstances, typeByIndex, terrain);
+        }
+
+        static int PlaceVegetationAsAuthoringInstances(
+            FcLevelSupplementData.VegetationInstanceDesc[] instances,
+            Dictionary<int, FcLevelSupplementData.VegetationTypeDesc> typeByIndex,
+            GameObject levelRoot,
+            Terrain terrain)
+        {
+            if (instances == null || instances.Length == 0 || levelRoot == null)
+                return 0;
+
+            var root = new GameObject("Vegetation_Authoring");
+            root.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+
+            Vector3 terrainOrigin = terrain != null ? terrain.transform.position : Vector3.zero;
+            float terrainSizeX = terrain != null && terrain.terrainData != null ? terrain.terrainData.size.x : 1f;
+            float terrainSizeZ = terrain != null && terrain.terrainData != null ? terrain.terrainData.size.z : 1f;
+
+            int placed = 0;
+            for (int i = 0; i < instances.Length; i++)
+            {
+                var inst = instances[i];
+                if (!typeByIndex.TryGetValue(inst.Type, out var typeDef))
+                    continue;
+                if (string.IsNullOrWhiteSpace(typeDef.FileName))
+                    continue;
+
+                float nx = inst.X / 65535f;
+                float nz = inst.Y / 65535f;
+                float wx = terrainOrigin.x + nx * terrainSizeX;
+                float wz = terrainOrigin.z + nz * terrainSizeZ;
+                float wy = terrain != null ? terrain.SampleHeight(new Vector3(wx, 0f, wz)) : 0f;
+
+                var go = new GameObject($"Vegetation_{i:D6}");
+                go.transform.SetParent(root.transform, worldPositionStays: false);
+                go.transform.position = new Vector3(wx, wy, wz);
+                float scale = inst.Scale > 0f ? inst.Scale : 1f;
+                go.transform.localScale = new Vector3(scale, scale, scale);
+
+                var vegetation = go.AddComponent<FcVegetationInstance>();
+                var so = new SerializedObject(vegetation);
+                so.FindProperty("_virtualPath").stringValue = typeDef.FileName;
+                so.FindProperty("_typeIndex").intValue = inst.Type;
+                so.FindProperty("_instanceScale").floatValue = scale;
+                so.ApplyModifiedPropertiesWithoutUndo();
+                placed++;
+            }
+
+            return placed;
         }
 
         // Attaches FcVegetationTerrainService to the terrain GO with serialized VirtualPaths + instance data.
@@ -289,7 +410,8 @@ namespace OpenFarCry.Level.Editor
             FcLevelEnvironmentDesc environment,
             int resolution,
             int heightmapUnitSize,
-            List<FcTerrainLayerDesc> surfaceLayers)
+            List<FcTerrainLayerDesc> surfaceLayers,
+            SceneBuildMode buildMode)
         {
             string basePath = $"levels/{levelName.ToLowerInvariant()}";
             string h16Path = $"{basePath}/terrain/land_map.h16";
@@ -308,15 +430,17 @@ namespace OpenFarCry.Level.Editor
 
             int hmRes = resolution + 1; // e.g. 1025
             float worldSize = (resolution - 1) * heightmapUnitSize;
+            surfaceLayers ??= new List<FcTerrainLayerDesc>();
 
             var terrainData = new TerrainData();
             terrainData.heightmapResolution = hmRes;
             terrainData.size = new Vector3(worldSize, FcTerrainHeightmapDecoder.MaxWorldHeight, worldSize);
             terrainData.SetHeights(0, 0, heights);
+            var inMemoryTerrainData = terrainData;
 
             // ── Persist TerrainData ──────────────────────────────────────────────
             const string fcDataDir = "Assets/FCData/Levels";
-            string levelDir = $"{fcDataDir}/{levelName}";
+            string levelDir = $"{fcDataDir}/{NormalizeLevelAssetKey(levelName)}";
             EnsureDir(fcDataDir);
             EnsureDir(levelDir);
             string tdPath = $"{levelDir}/TerrainData.asset";
@@ -325,41 +449,76 @@ namespace OpenFarCry.Level.Editor
             AssetDatabase.CreateAsset(terrainData, tdPath);
             AssetDatabase.SaveAssets();
             terrainData = AssetDatabase.LoadAssetAtPath<TerrainData>(tdPath);
+            if (terrainData == null)
+            {
+                Debug.LogWarning(
+                    $"[FcLevelSceneBuilder] Failed to reload TerrainData asset '{tdPath}', using in-memory instance.");
+                terrainData = inMemoryTerrainData;
+            }
 
             // ── Build TerrainLayers ──────────────────────────────────────────────
             // Layer 0: cover_low.dds — global megatexture (CLAMP, tiled once over worldSize).
             // Layers 1-N: detail textures per surface type from <SurfaceTypes> in leveldata.xml.
             var terrainLayers = new List<TerrainLayer>();
+            bool authoringMode = buildMode == SceneBuildMode.Authoring;
+            string terrainTexturesDir = $"{levelDir}/TerrainTextures";
+            if (authoringMode)
+                EnsureDir(terrainTexturesDir);
 
-            // Stub layers carry tileSize/tileOffset only — no textures.
-            // FcTerrainTextureService loads and assigns textures at runtime from the PAK VFS.
             string coverPath = $"{basePath}/terrain/cover_low.dds";
             {
-                var stub = new TerrainLayer { tileSize = new Vector2(worldSize, worldSize) };
+                var layer = new TerrainLayer { tileSize = new Vector2(worldSize, worldSize) };
+                if (authoringMode)
+                {
+                    TryLoadAndPersistTerrainTexture(
+                        coverPath,
+                        $"{terrainTexturesDir}/Cover.asset",
+                        transpose: true,
+                        out var coverTexture);
+                    layer.diffuseTexture = coverTexture;
+                }
+
                 string layerPath = $"{levelDir}/TerrainLayer_Cover.terrainlayer";
-                SaveTerrainLayerAsset(stub, layerPath);
-                terrainLayers.Add(AssetDatabase.LoadAssetAtPath<TerrainLayer>(layerPath));
+                terrainLayers.Add(SaveAndLoadTerrainLayerAsset(layer, layerPath));
             }
 
-            foreach (var layerDesc in surfaceLayers)
+            var validSurfaceLayers = new List<FcTerrainLayerDesc>(surfaceLayers.Count);
+            for (int i = 0; i < surfaceLayers.Count; i++)
+            {
+                var layerDesc = surfaceLayers[i];
+                if (layerDesc != null)
+                    validSurfaceLayers.Add(layerDesc);
+            }
+
+            foreach (var layerDesc in validSurfaceLayers)
             {
                 // DetailScaleX/Y in leveldata.xml is a UV scale: 1/scale = world meters per tile.
                 float tileSizeX = layerDesc.ScaleX > 0f ? 1f / layerDesc.ScaleX : 1f;
                 float tileSizeY = layerDesc.ScaleY > 0f ? 1f / layerDesc.ScaleY : 1f;
-                var stub = new TerrainLayer { tileSize = new Vector2(tileSizeX, tileSizeY) };
+                var layer = new TerrainLayer { tileSize = new Vector2(tileSizeX, tileSizeY) };
+                if (authoringMode)
+                {
+                    TryLoadAndPersistTerrainTexture(
+                        layerDesc.DetailTexturePath,
+                        $"{terrainTexturesDir}/SurfaceType_{layerDesc.SurfaceTypeId}.asset",
+                        transpose: false,
+                        out var detailTexture);
+                    layer.diffuseTexture = detailTexture;
+                }
+
                 string layerPath = $"{levelDir}/TerrainLayer_Type{layerDesc.SurfaceTypeId}.terrainlayer";
-                SaveTerrainLayerAsset(stub, layerPath);
-                terrainLayers.Add(AssetDatabase.LoadAssetAtPath<TerrainLayer>(layerPath));
+                terrainLayers.Add(SaveAndLoadTerrainLayerAsset(layer, layerPath));
             }
 
+            terrainLayers.RemoveAll(l => l == null);
             terrainData.terrainLayers = terrainLayers.ToArray();
 
             // ── Build and apply alphamap (splatmap) ──────────────────────────────
-            if (surfaceLayers.Count > 0)
+            if (validSurfaceLayers.Count > 0)
             {
                 byte[] surfaceTypeIds = FcTerrainHeightmapDecoder.DecodeSurfaceTypes(samples);
                 terrainData.alphamapResolution = resolution;
-                float[,,] alphamap = FcTerrainSplatmapBuilder.Build(surfaceTypeIds, resolution, surfaceLayers);
+                float[,,] alphamap = FcTerrainSplatmapBuilder.Build(surfaceTypeIds, resolution, validSurfaceLayers);
                 terrainData.SetAlphamaps(0, 0, alphamap);
             }
 
@@ -373,38 +532,83 @@ namespace OpenFarCry.Level.Editor
             var terrain = terrainGo.GetComponent<Terrain>();
             const string terrainMaterialPath = "Assets/Materials/FarCry Terrain Material.mat";
             var terrainMaterial = AssetDatabase.LoadAssetAtPath<Material>(terrainMaterialPath);
-            if (terrainMaterial != null)
+            Material assignedTerrainMaterial = null;
+            if (IsUsableTerrainMaterial(terrainMaterial))
             {
-                terrain.materialTemplate = terrainMaterial;
-                terrain.materialType = Terrain.MaterialType.Custom;
+                if (buildMode == SceneBuildMode.Authoring)
+                {
+                    string authoringMaterialPath = $"{levelDir}/TerrainMaterial_Authoring.mat";
+                    if (AssetDatabase.LoadAssetAtPath<Material>(authoringMaterialPath) != null)
+                        AssetDatabase.DeleteAsset(authoringMaterialPath);
+
+                    var authoringMaterial = new Material(terrainMaterial)
+                    {
+                        name = $"{terrainMaterial.name}_{levelName}_Authoring"
+                    };
+                    AssetDatabase.CreateAsset(authoringMaterial, authoringMaterialPath);
+                    AssetDatabase.SaveAssets();
+                    assignedTerrainMaterial = AssetDatabase.LoadAssetAtPath<Material>(authoringMaterialPath);
+                    if (!IsUsableTerrainMaterial(assignedTerrainMaterial))
+                        assignedTerrainMaterial = authoringMaterial;
+                }
+                else
+                {
+                    assignedTerrainMaterial = terrainMaterial;
+                }
             }
             else
             {
                 Debug.LogWarning(
-                    $"[FcLevelSceneBuilder] Terrain material not found at '{terrainMaterialPath}'. " +
-                    "Terrain will use the default Unity material.");
+                    $"[FcLevelSceneBuilder] Terrain material missing/invalid at '{terrainMaterialPath}'. " +
+                    "Trying terrain material fallback.");
             }
 
-            // Attach runtime texture loader — populates TerrainLayer.diffuseTexture at Play Mode start.
-            var texService = terrainGo.AddComponent<FcTerrainTextureService>();
-            texService.CoverLayer = new FcTerrainTextureService.LayerDef
+            if (!IsUsableTerrainMaterial(assignedTerrainMaterial))
             {
-                VfsPath   = coverPath,
-                TileSizeX = worldSize,
-                TileSizeY = worldSize,
-            };
-            texService.CoverCtcPath = $"{basePath}/terrain/cover.ctc";
-            texService.CoverSectorCount = Mathf.Max(1, Mathf.RoundToInt((resolution * heightmapUnitSize) / 64f));
-            texService.DetailLayers = new FcTerrainTextureService.LayerDef[surfaceLayers.Count];
-            for (int i = 0; i < surfaceLayers.Count; i++)
+                assignedTerrainMaterial = CreateFallbackTerrainMaterial(levelDir, levelName, buildMode);
+            }
+
+            if (IsUsableTerrainMaterial(assignedTerrainMaterial))
             {
-                var ld = surfaceLayers[i];
-                texService.DetailLayers[i] = new FcTerrainTextureService.LayerDef
+                terrain.materialType = Terrain.MaterialType.Custom;
+                terrain.materialTemplate = assignedTerrainMaterial;
+            }
+            else
+            {
+                terrain.materialTemplate = null;
+                terrain.materialType = Terrain.MaterialType.BuiltInStandard;
+                Debug.LogWarning(
+                    "[FcLevelSceneBuilder] No usable custom terrain material found. " +
+                    "Using built-in terrain material mode.");
+            }
+
+            if (buildMode == SceneBuildMode.Runtime)
+            {
+                // Runtime scene keeps lazy terrain texture load from VFS.
+                var texService = terrainGo.AddComponent<FcTerrainTextureService>();
+                texService.CoverLayer = new FcTerrainTextureService.LayerDef
                 {
-                    VfsPath   = ld.DetailTexturePath,
-                    TileSizeX = ld.ScaleX > 0f ? 1f / ld.ScaleX : 1f,
-                    TileSizeY = ld.ScaleY > 0f ? 1f / ld.ScaleY : 1f,
+                    VfsPath = coverPath,
+                    TileSizeX = worldSize,
+                    TileSizeY = worldSize,
                 };
+                texService.CoverCtcPath = $"{basePath}/terrain/cover.ctc";
+                texService.CoverSectorCount = Mathf.Max(1, Mathf.RoundToInt((resolution * heightmapUnitSize) / 64f));
+                texService.DetailLayers = new FcTerrainTextureService.LayerDef[surfaceLayers.Count];
+                for (int i = 0; i < surfaceLayers.Count; i++)
+                {
+                    var ld = surfaceLayers[i];
+                    texService.DetailLayers[i] = new FcTerrainTextureService.LayerDef
+                    {
+                        VfsPath = ld.DetailTexturePath,
+                        TileSizeX = ld.ScaleX > 0f ? 1f / ld.ScaleX : 1f,
+                        TileSizeY = ld.ScaleY > 0f ? 1f / ld.ScaleY : 1f,
+                    };
+                }
+            }
+            else
+            {
+                ApplyAuthoringCoverMaterialProperties(terrain);
             }
 
             if (environment != null)
@@ -414,12 +618,215 @@ namespace OpenFarCry.Level.Editor
             return terrain;
         }
 
+        static bool IsUsableTerrainMaterial(Material material)
+        {
+            if (material == null)
+                return false;
+            if (material.shader == null)
+                return false;
+            return !string.Equals(
+                material.shader.name,
+                "Hidden/InternalErrorShader",
+                System.StringComparison.Ordinal);
+        }
+
+        static Material CreateFallbackTerrainMaterial(string levelDir, string levelName, SceneBuildMode buildMode)
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Terrain/Lit");
+            if (shader == null)
+                shader = Shader.Find("Nature/Terrain/Standard");
+            if (shader == null)
+                return null;
+
+            var fallback = new Material(shader)
+            {
+                name = $"TerrainFallback_{levelName}"
+            };
+
+            if (buildMode != SceneBuildMode.Authoring)
+                return fallback;
+
+            try
+            {
+                string path = $"{levelDir}/TerrainMaterial_Fallback.mat";
+                if (AssetDatabase.LoadAssetAtPath<Material>(path) != null)
+                    AssetDatabase.DeleteAsset(path);
+                AssetDatabase.CreateAsset(fallback, path);
+                AssetDatabase.SaveAssets();
+                var persisted = AssetDatabase.LoadAssetAtPath<Material>(path);
+                return persisted != null ? persisted : fallback;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Failed to persist fallback terrain material: {e.Message}");
+                return fallback;
+            }
+        }
+
         static void SaveTerrainLayerAsset(TerrainLayer layer, string assetPath)
         {
             if (AssetDatabase.LoadAssetAtPath<TerrainLayer>(assetPath) != null)
                 AssetDatabase.DeleteAsset(assetPath);
             AssetDatabase.CreateAsset(layer, assetPath);
             AssetDatabase.SaveAssets();
+        }
+
+        static TerrainLayer SaveAndLoadTerrainLayerAsset(TerrainLayer layer, string assetPath)
+        {
+            if (layer == null)
+                return null;
+
+            SaveTerrainLayerAsset(layer, assetPath);
+            var loaded = AssetDatabase.LoadAssetAtPath<TerrainLayer>(assetPath);
+            if (loaded == null)
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Failed to load TerrainLayer asset '{assetPath}', using in-memory layer.");
+                return layer;
+            }
+
+            return loaded;
+        }
+
+        static void ApplyAuthoringCoverMaterialProperties(Terrain terrain)
+        {
+            if (terrain == null || terrain.terrainData == null)
+                return;
+
+            var layers = terrain.terrainData.terrainLayers;
+            if (layers == null || layers.Length == 0 || layers[0] == null)
+                return;
+
+            var coverLayer = layers[0];
+            var material = terrain.materialTemplate;
+            if (material == null)
+                return;
+            if (!material.HasProperty(FcCoverTexId))
+                return;
+
+            material.SetTexture(FcCoverTexId, coverLayer.diffuseTexture);
+
+            Vector2 tileSize = coverLayer.tileSize;
+            float scaleX = tileSize.x > 0f ? 1f / tileSize.x : 1f;
+            float scaleY = tileSize.y > 0f ? 1f / tileSize.y : 1f;
+            if (material.HasProperty(FcCoverScaleId))
+                material.SetVector(FcCoverScaleId, new Vector4(scaleX, scaleY, 0f, 0f));
+            if (material.HasProperty(FcCoverOffsetId))
+                material.SetVector(FcCoverOffsetId, Vector4.zero);
+        }
+
+        static bool TryLoadAndPersistTerrainTexture(
+            string virtualPath,
+            string assetPath,
+            bool transpose,
+            out Texture2D textureAsset)
+        {
+            textureAsset = null;
+            if (string.IsNullOrWhiteSpace(virtualPath))
+                return false;
+            if (!TextureImportService.IsSupportedVirtualPath(virtualPath))
+                return false;
+            if (!TextureImportService.RuntimeService.TryLoad(virtualPath, out var loadedTexture))
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Failed to load terrain texture '{virtualPath}'.");
+                return false;
+            }
+            if (loadedTexture == null)
+                return false;
+
+            Texture2D assetTexture = transpose
+                ? TransposeTexture(loadedTexture)
+                : DuplicateTexture(loadedTexture);
+            if (assetTexture == null)
+                return false;
+
+            if (AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath) != null)
+                AssetDatabase.DeleteAsset(assetPath);
+
+            AssetDatabase.CreateAsset(assetTexture, assetPath);
+            textureAsset = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+            return textureAsset != null;
+        }
+
+        static Texture2D DuplicateTexture(Texture2D source)
+        {
+            if (source == null)
+                return null;
+            if (source.isReadable)
+                return Object.Instantiate(source);
+
+            return CopyTextureViaRenderTarget(source);
+        }
+
+        static Texture2D TransposeTexture(Texture2D source)
+        {
+            if (source == null)
+                return null;
+
+            var readable = source.isReadable ? source : CopyTextureViaRenderTarget(source);
+            if (readable == null)
+                return null;
+
+            int w = readable.width;
+            int h = readable.height;
+            var srcPixels = readable.GetPixels32();
+            if (!source.isReadable)
+                Object.DestroyImmediate(readable);
+
+            var transposed = new Texture2D(h, w, TextureFormat.RGBA32, mipChain: false, linear: false);
+            var dstPixels = new Color32[srcPixels.Length];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    dstPixels[x * h + y] = srcPixels[y * w + x];
+            transposed.SetPixels32(dstPixels);
+            transposed.Apply(updateMipmaps: false, makeNoLongerReadable: false);
+            transposed.wrapMode = source.wrapMode;
+            transposed.wrapModeU = source.wrapModeU;
+            transposed.wrapModeV = source.wrapModeV;
+            transposed.wrapModeW = source.wrapModeW;
+            transposed.filterMode = source.filterMode;
+            transposed.anisoLevel = source.anisoLevel;
+            transposed.mipMapBias = source.mipMapBias;
+            return transposed;
+        }
+
+        static Texture2D CopyTextureViaRenderTarget(Texture2D source)
+        {
+            RenderTexture rt = null;
+            var previous = RenderTexture.active;
+            try
+            {
+                rt = RenderTexture.GetTemporary(
+                    source.width,
+                    source.height,
+                    0,
+                    RenderTextureFormat.ARGB32,
+                    RenderTextureReadWrite.Default);
+
+                Graphics.Blit(source, rt);
+                RenderTexture.active = rt;
+                var copy = new Texture2D(
+                    source.width,
+                    source.height,
+                    TextureFormat.RGBA32,
+                    mipChain: source.mipmapCount > 1,
+                    linear: false);
+                copy.ReadPixels(new Rect(0, 0, source.width, source.height), 0, 0);
+                copy.Apply(updateMipmaps: source.mipmapCount > 1, makeNoLongerReadable: false);
+                copy.wrapMode = source.wrapMode;
+                copy.wrapModeU = source.wrapModeU;
+                copy.wrapModeV = source.wrapModeV;
+                copy.wrapModeW = source.wrapModeW;
+                copy.filterMode = source.filterMode;
+                copy.anisoLevel = source.anisoLevel;
+                copy.mipMapBias = source.mipMapBias;
+                return copy;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (rt != null)
+                    RenderTexture.ReleaseTemporary(rt);
+            }
         }
 
         static void BuildWaterPlane(Transform terrainRoot, int resolution, float metersPerSample, float waterLevel)
@@ -475,6 +882,24 @@ namespace OpenFarCry.Level.Editor
             if (!string.IsNullOrEmpty(parent) && !AssetDatabase.IsValidFolder(parent))
                 EnsureDir(parent);
             AssetDatabase.CreateFolder(parent, leaf);
+        }
+
+        static string NormalizeLevelAssetKey(string levelName)
+        {
+            if (string.IsNullOrWhiteSpace(levelName))
+                return "level";
+
+            var trimmed = levelName.Trim().ToLowerInvariant();
+            var chars = trimmed.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+            {
+                char c = chars[i];
+                if (c == '/' || c == '\\' || char.IsControl(c) || char.IsWhiteSpace(c))
+                    chars[i] = '_';
+            }
+
+            string key = new string(chars).Trim('_', '.');
+            return string.IsNullOrEmpty(key) ? "level" : key;
         }
 
         // CryEngine Matrix34 (row-major, Z-up) -> Unity scene transform.

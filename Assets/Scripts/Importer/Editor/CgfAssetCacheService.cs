@@ -213,8 +213,17 @@ namespace OpenFarCry.Importer.Editor
             if (AssetDatabase.LoadAssetAtPath<Material>(materialPath) != null)
                 AssetDatabase.DeleteAsset(materialPath);
 
-            AssetDatabase.CreateAsset(clone, materialPath);
-            return AssetDatabase.LoadAssetAtPath<Material>(materialPath);
+            try
+            {
+                AssetDatabase.CreateAsset(clone, materialPath);
+                return AssetDatabase.LoadAssetAtPath<Material>(materialPath);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[CgfImporter] Failed to persist material asset '{materialPath}': {e.Message}");
+                Object.DestroyImmediate(clone);
+                return null;
+            }
         }
 
         static Texture2D PersistTextureAsset(
@@ -251,7 +260,16 @@ namespace OpenFarCry.Importer.Editor
             }
 
             clone.name = source.name;
-            AssetDatabase.CreateAsset(clone, texturePath);
+            try
+            {
+                AssetDatabase.CreateAsset(clone, texturePath);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[CgfImporter] Failed to persist texture asset '{texturePath}': {e.Message}");
+                Object.DestroyImmediate(clone);
+                return null;
+            }
 
             var persisted = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
             textureByKey[key] = persisted;
@@ -358,14 +376,16 @@ namespace OpenFarCry.Importer.Editor
             }
             if (mesh == null)
                 return false;
-            if (mesh.name != CgfMeshBuilder.MeshCacheVersionName)
+            // Accept both the original mesh name and proxy-stripped variants (e.g. "vN_NoProxyVisual").
+            if (!mesh.name.StartsWith(CgfMeshBuilder.MeshCacheVersionName, StringComparison.Ordinal))
                 return false;
 
             int expectedSubmeshCount = parsedFile.MeshChunk.Faces
                 .Select(f => f.MatID)
                 .Distinct()
                 .Count();
-            if (mesh.subMeshCount != expectedSubmeshCount)
+            // Proxy-stripped meshes have fewer submeshes than the raw CGF; allow equal or fewer.
+            if (mesh.subMeshCount > expectedSubmeshCount)
                 return false;
 
             bool expectedHasUv0 = parsedFile.MeshChunk.UVs != null && parsedFile.MeshChunk.UVs.Length > 0;
@@ -392,15 +412,30 @@ namespace OpenFarCry.Importer.Editor
             if (string.IsNullOrWhiteSpace(value))
                 return "asset";
 
+            value = value.Trim();
             char[] invalid = Path.GetInvalidFileNameChars();
             var chars = value.ToCharArray();
             for (int i = 0; i < chars.Length; i++)
             {
-                if (chars[i] == '/' || chars[i] == '\\' || invalid.Contains(chars[i]))
+                char c = chars[i];
+                bool isControlOrSpace = char.IsControl(c);
+                bool isUnityUnsafe =
+                    c == '"' || c == ':' || c == '*' || c == '?' ||
+                    c == '<' || c == '>' || c == '|' || c == '#';
+                if (c == '/' || c == '\\' || invalid.Contains(c) || isControlOrSpace || isUnityUnsafe)
                     chars[i] = '_';
             }
 
-            return new string(chars);
+            string sanitized = new string(chars).Trim();
+            while (sanitized.Contains("  "))
+                sanitized = sanitized.Replace("  ", " ");
+            sanitized = sanitized.Replace(' ', '_');
+            sanitized = sanitized.Trim('.', '_');
+            if (string.IsNullOrEmpty(sanitized))
+                return "asset";
+            if (sanitized.Length > 96)
+                sanitized = sanitized.Substring(0, 96);
+            return sanitized;
         }
     }
 }

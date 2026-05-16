@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using UnityEngine;
 using OpenFarCry.Importer.Cgf;
 
 namespace OpenFarCry.Importer.Editor
@@ -136,7 +137,19 @@ namespace OpenFarCry.Importer.Editor
             request.ApplyPostTransform(go);
 
             if (request.SaveToProject && request.SaveAssets != null)
-                request.SaveAssets(buildResult.Mesh, go, importedClips);
+            {
+                // Use the actual mesh from the MeshFilter after post-processing (e.g. proxy-strip may
+                // have replaced sharedMesh with a filtered copy). Saving the correct mesh ensures the
+                // .asset and the prefab reference the same object, keeping IsCachedPrefabCompatible happy.
+                var meshToSave = buildResult.Mesh;
+                if (go != null)
+                {
+                    var mf = go.GetComponentInChildren<MeshFilter>(true);
+                    if (mf != null && mf.sharedMesh != null)
+                        meshToSave = mf.sharedMesh;
+                }
+                request.SaveAssets(meshToSave, go, importedClips);
+            }
 
             return CgfImportResult.Completed(
                 gameObject: go,

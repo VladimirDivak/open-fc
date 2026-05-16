@@ -18,6 +18,7 @@ namespace OpenFarCry.Level.Entities
         [SerializeField] string _surfaceTypeName;
         [SerializeField] string _surfaceTypeMaterial;
         [SerializeField] string _surfaceTypeDetailObject;
+        [SerializeField] string[] _slotResolutionDiagnostics;
 
         public string ResolutionSource => _resolutionSource;
         public string RequestedOverrideName => _requestedOverrideName;
@@ -30,6 +31,7 @@ namespace OpenFarCry.Level.Entities
         public string SurfaceTypeName => _surfaceTypeName;
         public string SurfaceTypeMaterial => _surfaceTypeMaterial;
         public string SurfaceTypeDetailObject => _surfaceTypeDetailObject;
+        public string[] SlotResolutionDiagnostics => _slotResolutionDiagnostics;
 
         public void SetMetadata(FcLevelMaterialOverrideService.BrushMaterialMetadata metadata)
         {
@@ -44,6 +46,13 @@ namespace OpenFarCry.Level.Entities
             _surfaceTypeName = metadata.SurfaceTypeName ?? string.Empty;
             _surfaceTypeMaterial = metadata.SurfaceTypeMaterial ?? string.Empty;
             _surfaceTypeDetailObject = metadata.SurfaceTypeDetailObject ?? string.Empty;
+        }
+
+        public void SetSlotResolutionDiagnostics(string[] diagnostics)
+        {
+            _slotResolutionDiagnostics = diagnostics != null
+                ? (string[])diagnostics.Clone()
+                : null;
         }
     }
 }

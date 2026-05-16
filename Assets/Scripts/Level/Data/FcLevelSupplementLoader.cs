@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Xml;
@@ -244,20 +245,46 @@ namespace OpenFarCry.Level.Data
         static FcLevelSupplementData.MaterialDesc[] ParseMaterials(string basePath)
         {
             var doc = LoadXmlIfExists($"{basePath}/materials.xml");
+            return ParseMaterialsFromDocument(doc);
+        }
+
+        static FcLevelSupplementData.MaterialDesc[] ParseMaterialsFromDocument(XmlDocument doc)
+        {
             if (doc == null) return Array.Empty<FcLevelSupplementData.MaterialDesc>();
 
             var list = new List<FcLevelSupplementData.MaterialDesc>();
+            var libraryNodes = doc.SelectNodes("//Library");
+            if (libraryNodes != null && libraryNodes.Count > 0)
+            {
+                for (int i = 0; i < libraryNodes.Count; i++)
+                {
+                    var library = libraryNodes[i];
+                    if (library == null)
+                        continue;
+
+                    foreach (XmlNode child in library.ChildNodes)
+                    {
+                        if (child.NodeType != XmlNodeType.Element)
+                            continue;
+                        if (!child.Name.Equals("Material", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        TraverseMaterialNode(child, parentFullName: string.Empty, depth: 0, list);
+                    }
+                }
+                return list.ToArray();
+            }
+
+            // Compatibility fallback for already-flattened XML fixtures.
             var root = doc.DocumentElement;
             if (root == null)
                 return Array.Empty<FcLevelSupplementData.MaterialDesc>();
-
             foreach (XmlNode child in root.ChildNodes)
             {
                 if (child.NodeType != XmlNodeType.Element)
                     continue;
                 if (!child.Name.Equals("Material", StringComparison.OrdinalIgnoreCase))
                     continue;
-
                 TraverseMaterialNode(child, parentFullName: string.Empty, depth: 0, list);
             }
             return list.ToArray();
@@ -280,17 +307,46 @@ namespace OpenFarCry.Level.Data
                 ParentName = parentFullName ?? string.Empty,
                 Shader = attrs?["Shader"]?.Value ?? string.Empty,
                 Depth = depth,
+                AlphaTest = ParseFloat(attrs?["AlphaTest"]?.Value, 0f),
+                Opacity = ParseFloat(attrs?["Opacity"]?.Value, 1f),
+                MtlFlags = ParseInt(attrs?["MtlFlags"]?.Value, 0),
+                MaterialGuid = attrs?["Id"]?.Value ?? string.Empty,
+                TextureSlots = CollectMaterialTextureSlots(node),
+                PublicParams = CollectMaterialPublicParams(node),
                 TextureRefs = CollectMaterialTextureRefs(node),
                 Attributes = ToPairs(attrs),
             });
 
-            foreach (XmlNode child in node.ChildNodes)
+            foreach (var childMaterial in EnumerateChildMaterialNodes(node))
+            {
+                TraverseMaterialNode(childMaterial, fullName, depth + 1, output);
+            }
+        }
+
+        static IEnumerable<XmlNode> EnumerateChildMaterialNodes(XmlNode materialNode)
+        {
+            foreach (XmlNode child in materialNode.ChildNodes)
             {
                 if (child.NodeType != XmlNodeType.Element)
                     continue;
-                if (!child.Name.Equals("Material", StringComparison.OrdinalIgnoreCase))
+
+                if (child.Name.Equals("Material", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return child;
                     continue;
-                TraverseMaterialNode(child, fullName, depth + 1, output);
+                }
+
+                if (!child.Name.Equals("SubMaterials", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                foreach (XmlNode sub in child.ChildNodes)
+                {
+                    if (sub.NodeType != XmlNodeType.Element)
+                        continue;
+                    if (!sub.Name.Equals("Material", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    yield return sub;
+                }
             }
         }
 
@@ -307,21 +363,25 @@ namespace OpenFarCry.Level.Data
         static string[] CollectMaterialTextureRefs(XmlNode materialNode)
         {
             var refs = new HashSet<string>(StringComparer.Ordinal);
+            var slots = CollectMaterialTextureSlots(materialNode);
+            for (int i = 0; i < slots.Length; i++)
+                TryAddPath(refs, slots[i].File);
 
-            // Common direct attributes on material nodes.
+            // Common direct attributes on material nodes (legacy/alternate exports).
             var attrs = materialNode.Attributes;
             if (attrs != null)
             {
-                TryAddPath(refs, attrs["Diffuse"]?.Value);
                 TryAddPath(refs, attrs["Texture"]?.Value);
+                TryAddPath(refs, attrs["DiffuseMap"]?.Value);
                 TryAddPath(refs, attrs["NormalMap"]?.Value);
                 TryAddPath(refs, attrs["Bumpmap"]?.Value);
-                TryAddPath(refs, attrs["Specular"]?.Value);
-                TryAddPath(refs, attrs["Opacity"]?.Value);
-                TryAddPath(refs, attrs["Emissive"]?.Value);
+                TryAddPath(refs, attrs["SpecularMap"]?.Value);
+                TryAddPath(refs, attrs["OpacityMap"]?.Value);
+                TryAddPath(refs, attrs["EmissiveMap"]?.Value);
+                TryAddPath(refs, attrs["Detail"]?.Value);
             }
 
-            // Typical texture subnodes in Cry material XMLs.
+            // Fallback for flatter custom XML fixtures.
             foreach (XmlNode child in materialNode.ChildNodes)
             {
                 if (child.NodeType != XmlNodeType.Element)
@@ -329,13 +389,89 @@ namespace OpenFarCry.Level.Data
 
                 var childAttrs = child.Attributes;
                 TryAddPath(refs, childAttrs?["File"]?.Value);
-                TryAddPath(refs, childAttrs?["Map"]?.Value);
                 TryAddPath(refs, childAttrs?["Texture"]?.Value);
             }
 
             var result = new List<string>(refs);
             result.Sort(StringComparer.Ordinal);
             return result.ToArray();
+        }
+
+        static FcLevelSupplementData.MaterialDesc.TextureSlotDesc[] CollectMaterialTextureSlots(XmlNode materialNode)
+        {
+            var slots = new List<FcLevelSupplementData.MaterialDesc.TextureSlotDesc>();
+
+            foreach (XmlNode textureNode in EnumerateMaterialTextureNodes(materialNode))
+            {
+                var attrs = textureNode.Attributes;
+                string file = NormalizePath(attrs?["File"]?.Value ?? attrs?["Texture"]?.Value);
+                if (string.IsNullOrWhiteSpace(file))
+                    continue;
+
+                slots.Add(new FcLevelSupplementData.MaterialDesc.TextureSlotDesc
+                {
+                    Map = attrs?["Map"]?.Value ?? string.Empty,
+                    File = file,
+                    Amount = ParseFloat(attrs?["Amount"]?.Value, 0f),
+                    TexType = attrs?["TexType"]?.Value ?? string.Empty,
+                    Attributes = ToPairs(attrs),
+                });
+            }
+
+            return slots.ToArray();
+        }
+
+        static IEnumerable<XmlNode> EnumerateMaterialTextureNodes(XmlNode materialNode)
+        {
+            foreach (XmlNode child in materialNode.ChildNodes)
+            {
+                if (child.NodeType != XmlNodeType.Element)
+                    continue;
+
+                if (child.Name.Equals("Texture", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return child;
+                    continue;
+                }
+
+                if (!child.Name.Equals("Textures", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                foreach (XmlNode texture in child.ChildNodes)
+                {
+                    if (texture.NodeType != XmlNodeType.Element)
+                        continue;
+                    if (!texture.Name.Equals("Texture", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    yield return texture;
+                }
+            }
+        }
+
+        static FcLevelSupplementData.NameValuePair[] CollectMaterialPublicParams(XmlNode materialNode)
+        {
+            var result = new List<FcLevelSupplementData.NameValuePair>();
+            foreach (XmlNode child in materialNode.ChildNodes)
+            {
+                if (child.NodeType != XmlNodeType.Element)
+                    continue;
+                if (!child.Name.Equals("PublicParams", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (child.Attributes == null || child.Attributes.Count == 0)
+                    continue;
+
+                for (int i = 0; i < child.Attributes.Count; i++)
+                {
+                    var attr = child.Attributes[i];
+                    result.Add(new FcLevelSupplementData.NameValuePair
+                    {
+                        Key = attr?.Name ?? string.Empty,
+                        Value = attr?.Value ?? string.Empty,
+                    });
+                }
+            }
+
+            return result.Count == 0 ? Array.Empty<FcLevelSupplementData.NameValuePair>() : result.ToArray();
         }
 
         struct ParsedVegetationInstances
@@ -496,6 +632,14 @@ namespace OpenFarCry.Level.Data
 
         static int ParseInt(string s, int fallback)
             => int.TryParse(s, out int v) ? v : fallback;
+
+        static float ParseFloat(string s, float fallback)
+        {
+            if (string.IsNullOrWhiteSpace(s))
+                return fallback;
+
+            return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+        }
 
         static T Safe<T>(Func<T> read, T fallback, List<FcLevelSupplementData.ParserIssue> issues, string source)
         {

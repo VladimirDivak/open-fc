@@ -142,18 +142,10 @@ namespace OpenFarCry.Level.Entities
             if (string.IsNullOrWhiteSpace(_materialOverride) && _materialId < 0)
                 return;
 
-            if (!service.TryResolveBrushOverrideMaterial(
-                    _materialOverride,
-                    _materialId,
-                    levelScopeId,
-                    out var overrideMaterial,
-                    out _)
-                || overrideMaterial == null)
-            {
-                return;
-            }
-
             var renderers = visualRoot.GetComponentsInChildren<Renderer>(includeInactive: true);
+            List<string> slotDiagnostics = null;
+            int unresolvedDiagnostics = 0;
+            int targetedMisses = 0;
             for (int r = 0; r < renderers.Length; r++)
             {
                 var renderer = renderers[r];
@@ -164,10 +156,84 @@ namespace OpenFarCry.Level.Entities
                 if (mats == null || mats.Length == 0)
                     continue;
 
-                for (int i = 0; i < mats.Length; i++)
-                    mats[i] = overrideMaterial;
+                int[] submeshMaterialIds = ResolveRendererSubmeshMaterialIds(renderer, visualRoot);
+                if (!service.TryApplyBrushOverrideToRendererSlots(
+                        _materialOverride,
+                        _materialId,
+                        levelScopeId,
+                        mats,
+                        submeshMaterialIds,
+                        out var diagnostics))
+                {
+                    AppendSlotDiagnostics(
+                        ref slotDiagnostics,
+                        renderer,
+                        diagnostics);
+                    CountResolutionIssues(diagnostics, ref unresolvedDiagnostics, ref targetedMisses);
+                    continue;
+                }
+
                 renderer.sharedMaterials = mats;
+                AppendSlotDiagnostics(
+                    ref slotDiagnostics,
+                    renderer,
+                    diagnostics);
+                CountResolutionIssues(diagnostics, ref unresolvedDiagnostics, ref targetedMisses);
             }
+
+            ApplySlotDiagnostics(visualRoot, slotDiagnostics);
+            if (unresolvedDiagnostics > 0)
+            {
+                Debug.LogWarning(
+                    $"[FcBrushMaterialOverride] '{_virtualPath}': unresolved slot resolutions={unresolvedDiagnostics}, targetedMisses={targetedMisses}, override='{_materialOverride}', materialId={_materialId}.",
+                    this);
+            }
+        }
+
+        int[] ResolveRendererSubmeshMaterialIds(Renderer renderer, GameObject visualRoot)
+        {
+            if (renderer == null || visualRoot == null)
+                return null;
+
+            var rootMeta = visualRoot.GetComponent<FcCachedGeometryMetadata>();
+            if (rootMeta != null &&
+                renderer.transform == visualRoot.transform &&
+                rootMeta.SubmeshMaterialIds != null)
+            {
+                return rootMeta.SubmeshMaterialIds;
+            }
+
+            if (renderer.transform == visualRoot.transform)
+                return _importResult?.BuildResult?.SubmeshMaterialIds;
+
+            if (_lodResults == null || _lodResults.Count == 0)
+                return null;
+
+            string rendererName = renderer.gameObject != null ? renderer.gameObject.name : string.Empty;
+            if (!TryParseLodRendererIndex(rendererName, out int lodIndex))
+                return null;
+
+            if (lodIndex < 0 || lodIndex >= _lodResults.Count)
+                return null;
+
+            return _lodResults[lodIndex]?.BuildResult?.SubmeshMaterialIds;
+        }
+
+        static bool TryParseLodRendererIndex(string name, out int lodIndex)
+        {
+            lodIndex = -1;
+            if (string.IsNullOrEmpty(name))
+                return false;
+
+            if (!name.StartsWith("LOD", System.StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var suffix = name.Substring(3);
+            if (!int.TryParse(suffix, out int parsedLodNumber))
+                return false;
+
+            lodIndex = parsedLodNumber - 1;
+            return lodIndex >= 0;
         }
 
         static void ApplyMaterialMetadata(
@@ -194,6 +260,65 @@ namespace OpenFarCry.Level.Entities
                 if (colMeta == null)
                     colMeta = colGo.AddComponent<FcLevelMaterialMetadata>();
                 colMeta.SetMetadata(metadata);
+            }
+        }
+
+        static void AppendSlotDiagnostics(
+            ref List<string> destination,
+            Renderer renderer,
+            FcLevelMaterialOverrideService.BrushSlotResolutionInfo[] diagnostics)
+        {
+            if (diagnostics == null || diagnostics.Length == 0)
+                return;
+
+            if (destination == null)
+                destination = new List<string>(diagnostics.Length);
+
+            string rendererName = renderer != null && renderer.gameObject != null
+                ? renderer.gameObject.name
+                : "<null-renderer>";
+
+            for (int i = 0; i < diagnostics.Length; i++)
+            {
+                var d = diagnostics[i];
+                destination.Add(
+                    $"renderer={rendererName};slot={d.SlotIndex};submeshMatId={d.SubmeshMaterialId};" +
+                    $"targeted={d.Targeted};applied={d.Applied};outcome={d.Outcome};" +
+                    $"in={d.InputMaterialName};out={d.OutputMaterialName};detail={d.Detail}");
+            }
+        }
+
+        static void ApplySlotDiagnostics(GameObject visualRoot, List<string> diagnostics)
+        {
+            if (visualRoot == null || diagnostics == null || diagnostics.Count == 0)
+                return;
+
+            var rootMeta = visualRoot.GetComponent<FcLevelMaterialMetadata>();
+            if (rootMeta == null)
+                rootMeta = visualRoot.AddComponent<FcLevelMaterialMetadata>();
+
+            rootMeta.SetSlotResolutionDiagnostics(diagnostics.ToArray());
+        }
+
+        static void CountResolutionIssues(
+            FcLevelMaterialOverrideService.BrushSlotResolutionInfo[] diagnostics,
+            ref int unresolvedCount,
+            ref int targetedMissCount)
+        {
+            if (diagnostics == null || diagnostics.Length == 0)
+                return;
+
+            for (int i = 0; i < diagnostics.Length; i++)
+            {
+                var d = diagnostics[i];
+                if (d.Targeted && !d.Applied)
+                    targetedMissCount++;
+
+                if (string.Equals(d.Outcome, "unresolved", System.StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(d.Outcome, "fallback-failed", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    unresolvedCount++;
+                }
             }
         }
 
