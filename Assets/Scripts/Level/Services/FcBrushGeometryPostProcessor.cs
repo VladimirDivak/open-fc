@@ -271,8 +271,8 @@ namespace OpenFarCry.Level.Services
                     continue;
                 if (!parsedFile.MeshByChunkID.TryGetValue(node.ObjectID, out var proxyMesh))
                     continue;
-                if (proxyMesh?.Vertices == null || proxyMesh.Vertices.Length == 0 ||
-                    proxyMesh.Faces == null || proxyMesh.Faces.Length == 0)
+                if (!proxyMesh.Vertices.IsCreated || proxyMesh.Vertices.Length == 0 ||
+                    !proxyMesh.Faces.IsCreated || proxyMesh.Faces.Length == 0)
                     continue;
                 return BuildColliderMeshFromFaces(null, proxyMesh, importScale, null, "BrushProxyNodeCollider", out mesh);
             }
@@ -283,7 +283,7 @@ namespace OpenFarCry.Level.Services
         {
             mesh = null;
             var meshChunk = parsedFile?.MeshChunk;
-            if (meshChunk?.Vertices == null || meshChunk.Faces == null || meshChunk.Faces.Length == 0)
+            if (meshChunk == null || !meshChunk.Vertices.IsCreated || !meshChunk.Faces.IsCreated || meshChunk.Faces.Length == 0)
                 return false;
 
             if (!TryResolveRootMaterial(parsedFile, out var rootMat) || rootMat == null)
@@ -318,9 +318,10 @@ namespace OpenFarCry.Level.Services
             for (int i = 0; i < chunks.Count; i++)
             {
                 var candidate = chunks[i]?.Mesh;
-                if (candidate?.Vertices != null &&
+                if (candidate != null &&
+                    candidate.Vertices.IsCreated &&
                     candidate.Vertices.Length > 0 &&
-                    candidate.Faces != null &&
+                    candidate.Faces.IsCreated &&
                     candidate.Faces.Length > 0)
                 {
                     phys = candidate;
@@ -343,7 +344,7 @@ namespace OpenFarCry.Level.Services
             out Mesh mesh)
         {
             mesh = null;
-            if (source?.Vertices == null || source.Faces == null || source.Faces.Length == 0)
+            if (source == null || !source.Vertices.IsCreated || !source.Faces.IsCreated || source.Faces.Length == 0)
                 return false;
 
             var nodeTransform = Matrix4x4.identity;

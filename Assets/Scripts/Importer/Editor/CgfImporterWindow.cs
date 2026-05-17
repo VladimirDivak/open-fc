@@ -192,7 +192,7 @@ namespace OpenFarCry.Importer.Editor
                 EditorGUILayout.LabelField($"Mesh ID:    {m.ChunkID}");
                 EditorGUILayout.LabelField($"Вершин:     {m.Vertices.Length}");
                 EditorGUILayout.LabelField($"Граней:     {m.Faces.Length}");
-                EditorGUILayout.LabelField($"UV-вершин:  {m.UVs.Length}");
+                EditorGUILayout.LabelField($"UV-вершин:  {(m.UVs.IsCreated ? m.UVs.Length : 0)}");
                 EditorGUILayout.LabelField($"Submeshes:  {submeshCount}");
             }
             else

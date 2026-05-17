@@ -390,7 +390,7 @@ namespace OpenFarCry.Importer.Editor
             if (mesh.subMeshCount > expectedSubmeshCount)
                 return false;
 
-            bool expectedHasUv0 = parsedFile.MeshChunk.UVs != null && parsedFile.MeshChunk.UVs.Length > 0;
+            bool expectedHasUv0 = parsedFile.MeshChunk.UVs.IsCreated && parsedFile.MeshChunk.UVs.Length > 0;
             bool actualHasUv0 = mesh.uv != null && mesh.uv.Length > 0;
             if (expectedHasUv0 != actualHasUv0)
                 return false;

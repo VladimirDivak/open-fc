@@ -160,6 +160,8 @@ namespace OpenFarCry.Importer.Cgf
             lock (s_sync)
             {
                 s_byPath.Clear();
+                foreach (var entry in s_bySemantic.Values)
+                    entry.Caf?.Dispose();
                 s_bySemantic.Clear();
                 s_contentHashBySource.Clear();
                 s_tick = 0;
@@ -202,6 +204,10 @@ namespace OpenFarCry.Importer.Cgf
                     }
                 }
                 if (oldest == null) break;
+                
+                if (s_bySemantic.TryGetValue(oldest, out var entry))
+                    entry.Caf?.Dispose();
+
                 s_bySemantic.Remove(oldest);
             }
 
@@ -279,7 +285,7 @@ namespace OpenFarCry.Importer.Cgf
                     HashInt(ref hash, unchecked((int)track.ControllerID));
 
                     int keyCount = 0;
-                    if (track.Ticks != null && track.Positions != null && track.Rotations != null)
+                    if (track.Ticks.IsCreated && track.Positions.IsCreated && track.Rotations.IsCreated)
                         keyCount = Mathf.Min(track.Ticks.Length, track.Positions.Length, track.Rotations.Length);
                     HashInt(ref hash, keyCount);
 

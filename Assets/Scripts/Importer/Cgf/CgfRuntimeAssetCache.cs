@@ -258,6 +258,9 @@ namespace OpenFarCry.Importer.Cgf
                 for (int i = 0; i < deleteParsedKeys.Count; i++)
                 {
                     string key = deleteParsedKeys[i];
+                    if (_parsedByKey.TryGetValue(key, out var entry))
+                        entry.ParsedFile?.Dispose();
+
                     _parsedByKey.Remove(key);
                     RemoveParsedKeyFromAllScopesUnsafe(key);
                     removed++;
@@ -289,6 +292,9 @@ namespace OpenFarCry.Importer.Cgf
         {
             lock (_sync)
             {
+                foreach (var parsedEntry in _parsedByKey.Values)
+                    parsedEntry.ParsedFile?.Dispose();
+
                 foreach (var modelEntry in _modelsByKey.Values)
                     DisposeModelEntryUnsafe(modelEntry);
 

@@ -52,10 +52,10 @@ namespace OpenFarCry.Importer.Cgf
                     continue;
 
                 var mesh = boneMeshChunk?.Mesh;
-                var verts = mesh?.Vertices;
-                if (verts == null || verts.Length == 0)
+                if (mesh == null || !mesh.Vertices.IsCreated || mesh.Vertices.Length == 0)
                     continue;
 
+                var verts = mesh.Vertices;
                 var bone = boneTransforms[runtimeBoneIndex];
                 if (bone == null)
                     continue;

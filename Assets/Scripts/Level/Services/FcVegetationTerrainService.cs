@@ -1287,7 +1287,7 @@ namespace OpenFarCry.Level.Services
             mesh = null;
             var parsedFile = baseResult?.ParsedFile;
             var source = parsedFile?.MeshChunk;
-            if (parsedFile == null || source == null || source.Vertices == null || source.Faces == null || source.Faces.Length == 0)
+            if (parsedFile == null || source == null || !source.Vertices.IsCreated || !source.Faces.IsCreated || source.Faces.Length == 0)
                 return false;
 
             if (!TryResolveRootMaterial(parsedFile, out var rootMat) || rootMat == null)
@@ -1315,7 +1315,7 @@ namespace OpenFarCry.Level.Services
             out Mesh mesh)
         {
             mesh = null;
-            if (source?.Vertices == null || source.Faces == null || source.Faces.Length == 0)
+            if (source == null || !source.Vertices.IsCreated || !source.Faces.IsCreated || source.Faces.Length == 0)
                 return false;
 
             var nodeTransform = Matrix4x4.identity;
