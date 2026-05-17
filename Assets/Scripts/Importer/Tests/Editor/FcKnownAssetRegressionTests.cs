@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using OpenFarCry.FileSystem;
 using OpenFarCry.Importer.Cgf;
+using UnityEngine;
 
 namespace OpenFarCry.Importer.Tests.Editor
 {
@@ -27,8 +28,10 @@ namespace OpenFarCry.Importer.Tests.Editor
 
             Assert.That(file, Is.Not.Null);
             Assert.That(file.MeshChunk, Is.Not.Null, "No MeshChunk — static CGF should have one.");
-            Assert.That(file.MeshChunk.Vertices, Is.Not.Null.And.Length.GreaterThan(0));
-            Assert.That(file.MeshChunk.Faces,    Is.Not.Null.And.Length.GreaterThan(0));
+            Assert.That(file.MeshChunk.Vertices.IsCreated, Is.True);
+            Assert.That(file.MeshChunk.Vertices.Length, Is.GreaterThan(0));
+            Assert.That(file.MeshChunk.Faces.IsCreated, Is.True);
+            Assert.That(file.MeshChunk.Faces.Length, Is.GreaterThan(0));
             Assert.That(file.MeshChunk.HasBoneInfo, Is.False, "overhanging_rock should be static.");
         }
 
@@ -55,7 +58,8 @@ namespace OpenFarCry.Importer.Tests.Editor
 
             Assert.That(file, Is.Not.Null);
             Assert.That(file.MeshChunk, Is.Not.Null);
-            Assert.That(file.MeshChunk.Faces, Is.Not.Null.And.Length.GreaterThan(0));
+            Assert.That(file.MeshChunk.Faces.IsCreated, Is.True);
+            Assert.That(file.MeshChunk.Faces.Length, Is.GreaterThan(0));
 
             // Streetlight has lamp + pole — expect at least 2 distinct material IDs.
             var matIds = new System.Collections.Generic.HashSet<int>();
@@ -70,6 +74,10 @@ namespace OpenFarCry.Importer.Tests.Editor
             const string basePath = "objects/buildings/m03/compound_area/coa_streetlight";
             if (!FcFileSystem.Exists(basePath + ".cgf"))
                 Assert.Ignore("Base CGF not in VFS.");
+
+            string dir = "objects/buildings/m03/compound_area";
+            var entries = FcFileSystem.GetEntries(dir);
+            Debug.Log($"[VFS DEBUG] Entries in {dir}: {string.Join(", ", entries)}");
 
             bool hasLod = FcFileSystem.Exists(basePath + "_lod1.cgf") ||
                           FcFileSystem.Exists(basePath + "_lod2.cgf");
@@ -130,7 +138,8 @@ namespace OpenFarCry.Importer.Tests.Editor
             var file = LoadAsset("objects/glm/ww2style/ceiling/ww2_gk_cbe02_x200y100z200_decal.cgf");
 
             Assert.That(file.MeshChunk, Is.Not.Null);
-            Assert.That(file.MeshChunk.Vertices, Is.Not.Null.And.Length.GreaterThan(0));
+            Assert.That(file.MeshChunk.Vertices.IsCreated, Is.True);
+            Assert.That(file.MeshChunk.Vertices.Length, Is.GreaterThan(0));
         }
     }
 }

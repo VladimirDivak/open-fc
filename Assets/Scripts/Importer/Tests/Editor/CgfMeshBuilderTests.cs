@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using NUnit.Framework;
 using OpenFarCry.Importer.Cgf;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace OpenFarCry.Importer.Tests.Editor
@@ -14,21 +16,40 @@ namespace OpenFarCry.Importer.Tests.Editor
             return new CgfFile { MeshChunk = mesh };
         }
 
-        static CgfMeshChunk StaticMesh(
+        static unsafe CgfMeshChunk StaticMesh(
             CryVertex[] verts,
             CryFace[] faces,
             CryUV[] uvs = null,
             CryTexFace[] texFaces = null)
         {
-            return new CgfMeshChunk
+            var chunk = new CgfMeshChunk
             {
                 ChunkID = 1,
                 HasBoneInfo = false,
-                Vertices = verts,
-                Faces = faces,
-                UVs = uvs,
-                TexFaces = texFaces
+                Vertices = new NativeArray<CryVertex>(verts.Length, Allocator.Persistent),
+                Faces = new NativeArray<CryFace>(faces.Length, Allocator.Persistent),
+                UVs = uvs != null ? new NativeArray<CryUV>(uvs.Length, Allocator.Persistent) : default,
+                TexFaces = texFaces != null ? new NativeArray<CryTexFace>(texFaces.Length, Allocator.Persistent) : default
             };
+
+            fixed (CryVertex* src = verts)
+                UnsafeUtility.MemCpy(chunk.Vertices.GetUnsafePtr(), src, verts.Length * sizeof(CryVertex));
+            fixed (CryFace* src = faces)
+                UnsafeUtility.MemCpy(chunk.Faces.GetUnsafePtr(), src, faces.Length * sizeof(CryFace));
+            
+            if (uvs != null)
+            {
+                fixed (CryUV* src = uvs)
+                    UnsafeUtility.MemCpy(chunk.UVs.GetUnsafePtr(), src, uvs.Length * sizeof(CryUV));
+            }
+
+            if (texFaces != null)
+            {
+                fixed (CryTexFace* src = texFaces)
+                    UnsafeUtility.MemCpy(chunk.TexFaces.GetUnsafePtr(), src, texFaces.Length * sizeof(CryTexFace));
+            }
+
+            return chunk;
         }
 
         static CryVertex V(float x = 0f, float y = 0f, float z = 0f) =>
@@ -75,11 +96,12 @@ namespace OpenFarCry.Importer.Tests.Editor
         public void VertexDedup_SamePiSameTi_SharedOutputVertex()
         {
             // Corner 0 and corner 2 both reference (pi=0, ti=0) → only 2 unique vertices
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts:    new[] { V(0, 0, 0), V(1, 0, 0) },
                 faces:    new[] { new CryFace { V0 = 0, V1 = 1, V2 = 0, MatID = 0 } },
                 uvs:      new[] { new CryUV { U = 0f, V = 0f } },
-                texFaces: new[] { new CryTexFace { T0 = 0, T1 = 0, T2 = 0 } }));
+                texFaces: new[] { new CryTexFace { T0 = 0, T1 = 0, T2 = 0 } });
+            var file = SimpleFile(mesh);
 
             var result = CgfMeshBuilder.Build(file, importSkeleton: false);
 
@@ -90,11 +112,12 @@ namespace OpenFarCry.Importer.Tests.Editor
         public void VertexDedup_SamePiDifferentTi_SeparateOutputVertices()
         {
             // Corner 0 = (pi=0, ti=0); corner 2 = (pi=0, ti=1) → same position, different UV → split
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts:    new[] { V(0, 0, 0), V(1, 0, 0) },
                 faces:    new[] { new CryFace { V0 = 0, V1 = 1, V2 = 0, MatID = 0 } },
                 uvs:      new[] { new CryUV { U = 0f, V = 0f }, new CryUV { U = 1f, V = 0f } },
-                texFaces: new[] { new CryTexFace { T0 = 0, T1 = 0, T2 = 1 } }));
+                texFaces: new[] { new CryTexFace { T0 = 0, T1 = 0, T2 = 1 } });
+            var file = SimpleFile(mesh);
 
             var result = CgfMeshBuilder.Build(file, importSkeleton: false);
 
@@ -106,11 +129,12 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void Uv_VCoord_IsFlipped()
         {
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts:    new[] { V(0, 0, 0), V(1, 0, 0), V(0, 1, 0) },
                 faces:    new[] { new CryFace { V0 = 0, V1 = 1, V2 = 2, MatID = 0 } },
                 uvs:      new[] { new CryUV { U = 0.5f, V = 0.75f } },
-                texFaces: new[] { new CryTexFace { T0 = 0, T1 = 0, T2 = 0 } }));
+                texFaces: new[] { new CryTexFace { T0 = 0, T1 = 0, T2 = 0 } });
+            var file = SimpleFile(mesh);
 
             var result = CgfMeshBuilder.Build(file, importSkeleton: false);
 
@@ -125,9 +149,10 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void StaticMesh_NodeMatrix44RowTranslation_IsBakedIntoVertices()
         {
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts: new[] { V(0, 0, 0) },
-                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } }));
+                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } });
+            var file = SimpleFile(mesh);
             AddNode(file, chunkId: 10, objectId: 1, parentId: -1, transform: OldMatrix44WithRowTranslation(10f, 20f, 30f));
 
             var result = CgfMeshBuilder.Build(file, importSkeleton: false);
@@ -139,9 +164,10 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void StaticMesh_NodeParentChain_IsAccumulatedBeforeBake()
         {
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts: new[] { V(0, 0, 0) },
-                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } }));
+                faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } });
+            var file = SimpleFile(mesh);
             AddNode(file, chunkId: 10, objectId: -1, parentId: -1, transform: OldMatrix44WithRowTranslation(100f, 0f, 0f));
             AddNode(file, chunkId: 11, objectId: 1, parentId: 10, transform: OldMatrix44WithRowTranslation(10f, 20f, 30f));
 
@@ -153,10 +179,10 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void StaticMesh_MultipleNodeMeshes_AreCombinedWithTheirNodeTransforms()
         {
-            var meshA = StaticMesh(
+            using var meshA = StaticMesh(
                 verts: new[] { V(0, 0, 0) },
                 faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } });
-            var meshB = StaticMesh(
+            using var meshB = StaticMesh(
                 verts: new[] { V(0, 0, 0) },
                 faces: new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 1 } });
             meshB.ChunkID = 2;
@@ -181,7 +207,7 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void Submeshes_TwoDistinctMatIDs_ProduceTwoSubmeshes()
         {
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts: new[]
                 {
                     V(0, 0, 0), V(1, 0, 0), V(0, 1, 0),
@@ -191,7 +217,8 @@ namespace OpenFarCry.Importer.Tests.Editor
                 {
                     new CryFace { V0 = 0, V1 = 1, V2 = 2, MatID = 0 },
                     new CryFace { V0 = 3, V1 = 4, V2 = 5, MatID = 1 }
-                }));
+                });
+            var file = SimpleFile(mesh);
 
             var result = CgfMeshBuilder.Build(file, importSkeleton: false);
 
@@ -253,7 +280,7 @@ namespace OpenFarCry.Importer.Tests.Editor
         public void BoneWeights_UnnormalizedLinks_SumToOne()
         {
             // Links with weights 2.0 and 1.0 (sum=3) → normalized 2/3 and 1/3
-            var file = MakeSkeletalFile(
+            using var file = MakeSkeletalFile(
                 boneCount: 2,
                 links: new[]
                 {
@@ -273,7 +300,7 @@ namespace OpenFarCry.Importer.Tests.Editor
         public void BoneWeights_FiveLinks_OnlyTopFourIncluded()
         {
             // 5 links; top 4 by weight must cover all weight (sum = 1 after normalization)
-            var file = MakeSkeletalFile(
+            using var file = MakeSkeletalFile(
                 boneCount: 5,
                 links: new[]
                 {
@@ -298,7 +325,7 @@ namespace OpenFarCry.Importer.Tests.Editor
         public void BindPoses_IdentityBindMatrix_ProducesIdentityBindPose()
         {
             // Identity bind matrix → MatrixInImporterSpace(identity) = identity → inverse = identity
-            var file = MakeSkeletalFile(
+            using var file = MakeSkeletalFile(
                 boneCount: 1,
                 links: new[] { new CryLink { BoneID = 0, Blending = 1f } },
                 bindMatrices: new[] { Matrix4x4.identity });
@@ -319,7 +346,7 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void PrepareAndUpload_StaticMesh_MatchesBuild()
         {
-            var file = SimpleFile(StaticMesh(
+            using var mesh = StaticMesh(
                 verts: new[]
                 {
                     V(0, 0, 0), V(1, 0, 0), V(0, 1, 0),
@@ -329,7 +356,8 @@ namespace OpenFarCry.Importer.Tests.Editor
                 {
                     new CryFace { V0 = 0, V1 = 1, V2 = 2, MatID = 0 },
                     new CryFace { V0 = 3, V1 = 4, V2 = 5, MatID = 1 }
-                }));
+                });
+            var file = SimpleFile(mesh);
 
             var baseline = CgfMeshBuilder.Build(file, importSkeleton: false, importScale: 0.01f);
             var prepared = CgfMeshBuilder.PrepareBuild(file, importSkeleton: false, importScale: 0.01f);
@@ -341,7 +369,7 @@ namespace OpenFarCry.Importer.Tests.Editor
         [Test]
         public void PrepareAndUpload_SkeletalMesh_MatchesBuild()
         {
-            var file = MakeSkeletalFile(
+            using var file = MakeSkeletalFile(
                 boneCount: 3,
                 links: new[]
                 {
@@ -361,7 +389,7 @@ namespace OpenFarCry.Importer.Tests.Editor
 
         // Builds a minimal CgfFile with a one-vertex degenerate triangle so we can
         // inspect boneWeights and bindPoses without driving the full geometry path.
-        static CgfFile MakeSkeletalFile(int boneCount, CryLink[] links, Matrix4x4[] bindMatrices = null)
+        static unsafe CgfFile MakeSkeletalFile(int boneCount, CryLink[] links, Matrix4x4[] bindMatrices = null)
         {
             var boneNames = new string[boneCount];
             for (int i = 0; i < boneCount; i++)
@@ -383,17 +411,30 @@ namespace OpenFarCry.Importer.Tests.Editor
             {
                 ChunkID = 1,
                 HasBoneInfo = true,
-                Vertices  = new[] { V(0, 0, 0) },
-                Faces     = new[] { new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 } },
-                BoneLinks = new[] { links }
+                Vertices  = new NativeArray<CryVertex>(1, Allocator.Persistent),
+                Faces     = new NativeArray<CryFace>(1, Allocator.Persistent),
+                BoneLinks = new NativeArray<CryLink>(links.Length, Allocator.Persistent),
+                BoneLinkOffsets = new NativeArray<int>(1, Allocator.Persistent),
+                BoneLinkCounts = new NativeArray<int>(1, Allocator.Persistent)
             };
+            mesh.Vertices[0] = V(0, 0, 0);
+            mesh.Faces[0] = new CryFace { V0 = 0, V1 = 0, V2 = 0, MatID = 0 };
+            
+            fixed (CryLink* src = links)
+                UnsafeUtility.MemCpy(mesh.BoneLinks.GetUnsafePtr(), src, links.Length * sizeof(CryLink));
+            
+            mesh.BoneLinkOffsets[0] = 0;
+            mesh.BoneLinkCounts[0] = links.Length;
 
             return new CgfFile
             {
                 MeshChunk   = mesh,
                 BoneNames   = new CgfBoneNameListChunk { Names = boneNames },
                 BoneAnim    = new CgfBoneAnimChunk { Bones = bones },
-                BoneInitPos = new CgfBoneInitPosChunk { BindMatrices = matrices }
+                BoneInitPosByMeshChunkID = new Dictionary<int, CgfBoneInitPosChunk>
+                {
+                    { 1, new CgfBoneInitPosChunk { MeshChunkID = 1, BindMatrices = matrices } }
+                }
             };
         }
 
