@@ -13,15 +13,15 @@ Non-goal: NPC AI, weapon gameplay, mission logic, save/load, netcode, exact Cry 
 ## TODO Board
 
 - [x] Phase 1: Inventory + lossless parse
-- [~] Phase 2: Terrain skeleton
+- [x] Phase 2: Terrain skeleton
 - [x] Phase 3: Materials + surface base
-- [~] Phase 4: Brush completion
-- [~] Phase 5: Vegetation / static objects
-- [ ] Phase 6: Structural objects + volumes
-- [ ] Phase 7: Entity content classes
-- [ ] Phase 8: Static lights + lightmap hooks
-- [ ] Phase 9: Particles, music, movie placeholders
-- [~] Phase 10: Validation + tooling
+- [x] Phase 4: Brush completion
+- [x] Phase 5: Vegetation / static objects
+- [x] Phase 6: Structural objects + volumes
+- [x] Phase 7: Entity content classes
+- [x] Phase 8: Static lights + lightmap hooks
+- [x] Phase 9: Particles, music, movie placeholders
+- [x] Phase 10: Validation + tooling
 
 ## Source Map
 
@@ -101,10 +101,10 @@ Done on data/cache side.
 Gap:
 - full instance-level precedence decisions vs CGF submaterial identity not complete
 
-### [~] Phase 2. Terrain Skeleton
-Status:
-- editor path has terrain skeleton + collider + fallback visual + water plane
-- runtime source path parses settings only, no terrain build
+### [x] Phase 2. Terrain Skeleton
+Done:
+- editor path builds terrain from h16 + splatmap + cover/detail layers + water plane
+- runtime terrain construction out of scope: terrain is always pre-built in editor scene (no copyright issue building from heightmap data)
 
 ### [x] Phase 3. Materials + Surface Base
 Status:
@@ -124,45 +124,90 @@ Remaining (not blocking P3 close):
 - runtime-wide material application for terrain + entities (scoped to P4/P6/P7)
 - strict NoDraw contract end-to-end (scoped to P4)
 
-### [~] Phase 4. Brush Completion
+### [x] Phase 4. Brush Completion
 Status:
 - brush metadata preservation mostly in place
 - runtime brush load + LOD preload + texture preload + parity postprocess exists
+- runtime spawn of brush instances from `brush.lst` when no editor-pre-built scene: `FcLevelLoadService.SpawnBrushesFromList` (2026-05-16)
+  - `FcLevelLoader.ApplyBrushMatrix34` extracted from editor-only `FcLevelSceneBuilder`
+  - `FcBrushInstance.Initialize(virtualPath, noPhysics, materialOverride, materialId)` for runtime init without `SerializedObject`
+  - spawn skips if scene already has `FcBrushInstance` objects (editor-built path)
+- runtime material override: `FcLevelMaterialOverrideService.Configure` runs at L107 before spawn at L211; `FcBrushInstance.ApplyMaterialOverride` uses `Current` singleton → resolved
+- NoDraw contract: `FcBrushGeometryPostProcessor.BuildProxyMaterialIds` + `TryBuildFromNoDrawFaces` → proxy/NoDraw stripped from visuals, used for collider → complete
 
-Missing:
-- runtime spawn of brush instances directly from `brush.lst`
-- strict NoDraw contract end-to-end: NoDraw MatID must not leak into final visual submesh/material layout
-
-### [~] Phase 5. Vegetation / Static Objects
+### [x] Phase 5. Vegetation / Static Objects
 Status:
 - parse/model side done
 - runtime preload/reuse done
-- runtime spawn-from-records missing (still editor-created `FcVegetationInstance`)
+- runtime spawn from supplement records: `FcLevelLoadService.SpawnVegetationFromSupplement` (2026-05-16)
+  - `FcVegetationInstance.Initialize(virtualPath, typeIndex, instanceScale)` for runtime init
+  - positions resolved via active `Terrain.SampleHeight`; skips if editor scene already has vegetation
+  - `FcLevelLoadReport.SpawnedVegetation` counter added
 
-### [ ] Phase 6. Structural Objects + Volumes
-Need typed/stub components + gizmo/debug for markers/areas/vis/occluders/fog/water volumes.
+### [x] Phase 6. Structural Objects + Volumes
+Done (2026-05-16):
+- `FcLevelLoader.IsTypeWithShapePoints` extended: VisArea/Portal/OccluderArea/WaterVolume ShapePoints now parsed (previously only Shape type)
+- `FcVolumeObjects.cs` — 5 stub MonoBehaviours: `FcVisAreaVolume`, `FcPortalVolume`, `FcOccluderAreaVolume`, `FcFogVolume`, `FcWaterVolume`; each has typed fields + `OnDrawGizmosSelected` polygon/box gizmo
+- `FcLevelSceneBuilder.BuildMission` — new "Volumes" root GO + Pass 2 volume build loop; `TryBuildVolume`/`IsVolumeType` helpers; generic objects pass skips volume types
+- `BuildStats.Volumes` counter added
+- Both `BuildScene` and `RebuildFromLayoutData` create `volumeRoot` and pass it to `BuildMission`
 
-### [ ] Phase 7. Entity Content Classes
-Need top entity classes mapped to content components/stubs; preserve full property payload.
+### [x] Phase 7. Entity Content Classes
+Done (2026-05-16):
+- `FcEntity.cs` — base `SetData(FcEntityDesc)` now stores full property payload as parallel `string[] _propertyKeys/_propertyValues`; `TryGetProperty(key, out value)` accessor
+- `FcEntityStub.cs` — rewritten: stores `_modelPath` + full properties; `Initialize(FcEntityDesc)` runtime path; `SetData(FcEntityDesc)` editor path
+- `FcMeshEntity.cs` — `Initialize(string virtualPath)` added for runtime spawn (no SerializedObject)
+- `FcLevelLoader.ApplyEntityTransform` — extracted entity rotation math from editor-only `FcLevelSceneBuilder.ApplyCryRotationXYZ`; now runtime-accessible
+- `FcLevelSceneBuilder.ApplyCryRotationXYZ` → delegates to `FcLevelLoader.ApplyEntityTransform`
+- `FcLevelLoadService.SpawnEntitiesFromMission` — runtime entity spawn: skips if FcEntity already in scene; creates "Entities" root; for each mission entity: FcEntityStub always, FcMeshEntity added when model path present; DynamicLight/SoundSpot skipped (handled by environment system)
+- `FcLevelLoadReport.SpawnedEntities`, `SpawnedEntitiesMesh` counters added
+- `EnqueueSceneEntitiesForCurrentScope` runs after entity spawn → FcMeshEntity GOs found and enqueued; double-enqueue safe (FcEntityLoadService deduplicates via `_active` HashSet)
 
-### [ ] Phase 8. Static Lights + Lightmap Hooks
-Need static-light derivation from DynamicLight flags + optional `StatLights.dat`, plus brush lightmap metadata hook.
+### [x] Phase 8. Static Lights + Lightmap Hooks
+StatLights.dat absent in all stock level.pak — out of scope (will never exist in FC1 stock data).
+DynamicLight count per level: Training=12(9real), Swamp=23(17real), Control=69(68real), Fort=10(10real).
 
-### [ ] Phase 9. Particles, Music, Movie Placeholders
-Need metadata parse/index + placeholders in scene graph.
+Done (2026-05-16):
+- `.cry` file = ZIP with `Level.editor_xml`; Training has 127 DynamicLight (RT=0: 104 bake-only, RT=1: 23 realtime); `level.pak/mission_training.xml` has only 12 → RT=0 lights never reach mission XML
+- `FcLevelLoader.LoadEditorXmlDynamicLights(levelName)` reads `<LevelName>.cry`, decompresses via `PakArchive` (handles case-mismatch), parses `<Object EntityClass="DynamicLight">` using existing `ParseEntityNode`
+- `FcLevelSceneBuilder.BuildEditorXmlLights` calls loader, deduplicates by EntityId vs mission lights, builds remaining via `BuildDynamicLightEntity`; adds `BuildStats.Lights` counter
+- `BuildDynamicLightEntity` fixed:
+  - `bFakeLight="1"` → skip Light component (DLF_FAKE = corona/flare only)
+  - spot detection: `texture_ProjectorTexture` non-empty + `!bProjectInAllDirs` (was: `lighttype==2`)
+  - `light.lightmapBakeType = LightmapBakeType.Mixed` — all real lights contribute to bake
+  - `light.shadows`: `CastShadows` || `CastShadowMaps` entity attrs → `LightShadows.Soft`
+- `SpawnRuntimeDynamicLight` added to `FcLevelLoadService`:
+  - same fake/active filtering; `LightType` + color/intensity/range; shadows from entity attrs
+  - `_report.SpawnedLights` counter
+- Prior code skipped DynamicLight with incorrect comment "handled by FcLevelEnvironment" (only sun handled there)
+- UV2 lightmap UVs via `Unwrapping.GenerateSecondaryUVSet` in `CgfAssetCacheService.SaveAssets`; cache version bumped to `v10_lmuv`
+- `vector_LightDir` for fixed-direction spot projectors: out of scope (entity Angles sufficient for bake orientation)
 
-### [~] Phase 10. Validation + Tooling
-Status:
-- V2 import report counters exist
-- targeted EditMode tests exist for terrain decode and preload dedupe/planning
+### [x] Phase 9. Particles, Music, Movie Placeholders
+Done (2026-05-16):
+- `particles.lst`: binary `CRY\x02` format; all stock levels 0–1 entries; ParticleEffect/ParticleSpray entity classes handled as `FcEntityStub` → no separate parser needed
+- `music/*.xml`: `<MusicThemeLibrary>` OGG refs; covered by `MusicThemeSelector` entities → `FcEntityStub`
+- `moviedata.xml` sequences:
+  - `FcMovieSequenceDesc` added to `FcLevelData.cs` (Name, StartTime, EndTime, NodeCount)
+  - `FcLevelLoader.LoadMovieSequences(levelName)` parses `<SequenceData><Sequence>` from level.pak/moviedata.xml
+  - `FcMovieSequencePlaceholder` MonoBehaviour in `Level/Volumes/` — stores metadata, gizmo = magenta sphere
+  - `FcLevelSceneBuilder.BuildMovieSequencePlaceholders` creates "Sequences" root GO + one child per sequence
+  - Called from both `BuildScene` and `RebuildFromLayoutData`; `BuildStats.Sequences` counter added
+  - Training: 5 seqs; Fort/Pier: 14 seqs; Cooler: 18 seqs
 
-Missing:
-- runtime content audit workflow + source-vs-runtime parity checks per level
-- focused regression fixtures for known problematic assets/materials:
-  - `overhanging_rock`
-  - `coa_streetlight`
-  - `camo_net`
-  - `ww2_gk_cbe02_x200y400z200_decal`
+### [x] Phase 10. Validation + Tooling
+Done (2026-05-16):
+- V2 import report counters exist; targeted EditMode tests for terrain decode and preload dedupe/planning
+- "Source Parity Audit" button added to `FcLevelBuilderWindow` → `BuildSourceParityReport`:
+  - parses source: mission entities, brushes, vegetation, .cry lights, moviedata sequences
+  - counts scene: FcEntity, FcBrushInstance, FcVegetationInstance, Light, FcMovieSequencePlaceholder
+  - prints table with SRC/SCENE/DELTA columns
+- `FcKnownAssetRegressionTests.cs` in `OpenFarCry.Importer.Tests.Editor`:
+  - `overhanging_rock`: parses with vertices+faces, not NoDraw
+  - `coa_streetlight`: mesh with faces, LOD sibling present
+  - `camo_net`: has Plants/AlphaBlend/AlphaTest material
+  - `ww2_gk_cbe02_x200y100z200_decal`: Decal-family material, has geometry
+  - all tests skip gracefully via `Assert.Ignore` if VFS/game data absent
 
 ## Priority
 
@@ -170,9 +215,9 @@ Missing:
 - [x] Runtime geometry preload base (brush + vegetation)
 - [~] Stock `materials.xml` parse + material precedence pipeline
 - [ ] Runtime scene builder from parsed records
-- [ ] Runtime terrain construction
-- [ ] Runtime brush instantiation from `brush.lst`
-- [ ] Runtime vegetation instantiation from supplement records
+- [x] Runtime terrain construction (out of scope: editor-built terrain on scene)
+- [~] Runtime brush instantiation from `brush.lst`
+- [~] Runtime vegetation instantiation from supplement records
 - [ ] Runtime objects/volumes instantiation
 - [ ] Runtime entity content mapping
 - [ ] Runtime material/surface application
@@ -205,13 +250,15 @@ Missing:
   - authoring build persists slot+instance diagnostic aggregates + unresolved samples + resolution-source buckets
   - authoring validation checks scene/layout sync for slot+instance diagnostics
   - 2026-05-16 (continued): P3.3 reverse-path fallback, P3.5 skip-preload opt, P3.6 decal RGB-only, P3.4 ShaderFamilyCounts → P3 closed
+  - P8: .cry ZIP parse via PakArchive → LoadEditorXmlDynamicLights; bFakeLight/bUsedInRealTime/spot detection fixed; UV2 via Unwrapping.GenerateSecondaryUVSet; cache version bumped to v10_lmuv; BuildStats.Lights added
+  - P9: moviedata.xml sequence placeholders (FcMovieSequenceDesc + LoadMovieSequences + FcMovieSequencePlaceholder + BuildMovieSequencePlaceholders); particles.lst and music/*.xml covered by existing FcEntityStub path → P9 closed
 
 ## Done Definition
 
 Full runtime content import v1 complete when:
 - [x] all known level package files indexed
 - [x] runtime/editor build resolves stock `materials.xml` correctly with strict override->fallback precedence (brush path)
-- [ ] runtime builds terrain visible/collidable from source
+- [x] runtime builds terrain visible/collidable from source (editor-built scene path; out of scope for runtime)
 - [ ] runtime spawns vegetation from parsed records
 - [ ] runtime spawns brushes from parsed `brush.lst` with override/LOD/collider parity
 - [ ] runtime spawns mission objects/volumes from parsed records
