@@ -19,7 +19,8 @@ namespace OpenFarCry.Level.Services
 
         public FcLevelGeometryPreloadPlan BuildVegetationPlan(
             FcLevelSupplementData supplement,
-            IReadOnlyList<FcVegetationInstance> sceneVegetationFallback)
+            IReadOnlyList<FcVegetationInstance> sceneVegetationFallback,
+            IReadOnlyList<string> terrainServicePaths = null)
         {
             var uniqueBasePaths = new HashSet<string>(StringComparer.Ordinal);
 
@@ -28,6 +29,7 @@ namespace OpenFarCry.Level.Services
                 sceneVegetationFallback,
                 uniqueBasePaths,
                 static instance => instance.VirtualPath);
+            CollectRawPaths(terrainServicePaths, uniqueBasePaths);
 
             return BuildPlanForPaths(
                 uniqueBasePaths,
@@ -166,6 +168,22 @@ namespace OpenFarCry.Level.Services
                 importSkeleton: false,
                 selectedMeshChunkId: -1,
                 sourceKind: sourceKind);
+        }
+
+        static void CollectRawPaths(IReadOnlyList<string> paths, HashSet<string> uniquePaths)
+        {
+            if (paths == null || paths.Count == 0)
+                return;
+
+            for (int i = 0; i < paths.Count; i++)
+            {
+                var vp = paths[i];
+                if (string.IsNullOrWhiteSpace(vp))
+                    continue;
+
+                try { uniquePaths.Add(ImportAssetPaths.NormalizeVirtualPath(vp)); }
+                catch { /* ignore invalid path */ }
+            }
         }
 
         IReadOnlyList<string> FindLodPathsFromService(string basePath)

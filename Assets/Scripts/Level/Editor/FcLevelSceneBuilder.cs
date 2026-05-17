@@ -7,6 +7,7 @@ using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
 using OpenFarCry.Level.Services;
+using OpenFarCry.Level.Volumes;
 using OpenFarCry.FileSystem;
 using OpenFarCry.Importer.Texture;
 using UnityEditor;
@@ -95,10 +96,22 @@ namespace OpenFarCry.Level.Editor
             entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
             var objectRoot = new GameObject("Objects");
             objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+            var volumeRoot = new GameObject("Volumes");
+            volumeRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             sw.Restart();
-            var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
+            var stats = BuildMission(mission, registry, entityRoot, objectRoot, volumeRoot, skipHidden);
             report.RecordPhase("BuildEntities", sw.Elapsed.TotalMilliseconds);
+
+            // Editor-XML static lights (from <LevelName>.cry) — bake-only sources not in mission XML.
+            sw.Restart();
+            stats.Lights += BuildEditorXmlLights(levelName, mission, entityRoot);
+            report.RecordPhase("BuildEditorXmlLights", sw.Elapsed.TotalMilliseconds);
+
+            // Movie sequence placeholders from moviedata.xml.
+            sw.Restart();
+            stats.Sequences = BuildMovieSequencePlaceholders(levelName, levelRoot);
+            report.RecordPhase("BuildMovieSequences", sw.Elapsed.TotalMilliseconds);
 
             // Vegetation
             sw.Restart();
@@ -168,8 +181,10 @@ namespace OpenFarCry.Level.Editor
             entityRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
             var objectRoot = new GameObject("Objects");
             objectRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
+            var volumeRoot = new GameObject("Volumes");
+            volumeRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
-            var stats = BuildMission(mission, registry, entityRoot, objectRoot, skipHidden);
+            var stats = BuildMission(mission, registry, entityRoot, objectRoot, volumeRoot, skipHidden);
 
             stats.Vegetation = BuildVegetationInstancesFromLayout(
                 layoutData,
@@ -180,6 +195,8 @@ namespace OpenFarCry.Level.Editor
                 buildMode);
 
             stats.Brushes = BuildBrushesFromList(brushList, levelRoot, buildMode);
+
+            stats.Sequences = BuildMovieSequencePlaceholders(layoutData.LevelName, levelRoot);
 
             EditorSceneManager.MarkSceneDirty(targetScene);
             return stats;
@@ -324,6 +341,7 @@ namespace OpenFarCry.Level.Editor
                 so.FindProperty("_virtualPath").stringValue = typeDef.FileName;
                 so.FindProperty("_typeIndex").intValue = inst.Type;
                 so.FindProperty("_instanceScale").floatValue = scale;
+                so.FindProperty("_materialOverride").stringValue = typeDef.Material ?? string.Empty;
                 so.ApplyModifiedPropertiesWithoutUndo();
                 placed++;
             }
@@ -902,36 +920,8 @@ namespace OpenFarCry.Level.Editor
             return string.IsNullOrEmpty(key) ? "level" : key;
         }
 
-        // CryEngine Matrix34 (row-major, Z-up) -> Unity scene transform.
-        // Static CGF vertices are imported as Cry(x,y,z) -> Unity asset(x,z,-y),
-        // while level placement uses Cry(x,y,z) -> Unity scene(x,z,y). Therefore
-        // instance linear transform is SceneBasis * CryMatrix * Inverse(AssetBasis).
         static void ApplyCryMatrix34(Transform t, float[] m)
-        {
-            float m00=m[0],  m01=m[1],  m02=m[2],  m03=m[3];
-            float m10=m[4],  m11=m[5],  m12=m[6],  m13=m[7];
-            float m20=m[8],  m21=m[9],  m22=m[10], m23=m[11];
-
-            t.position = new Vector3(m03, m23, m13);
-
-            var colX = new Vector3( m00,  m20,  m10);
-            var colY = new Vector3( m02,  m22,  m12);
-            var colZ = new Vector3(-m01, -m21, -m11);
-
-            float sX = colX.magnitude;
-            float sY = colY.magnitude;
-            float sZ = colZ.magnitude;
-
-            // SceneBasis has opposite handedness from AssetBasis, so the composed
-            // instance matrix contains one reflection. Keep it explicit as -Z scale.
-            if (sZ > 1e-5f && sY > 1e-5f)
-                t.rotation = Quaternion.LookRotation(-colZ / sZ, colY / sY);
-
-            t.localScale = new Vector3(
-                sX > 1e-5f ? sX : 1f,
-                sY > 1e-5f ? sY : 1f,
-                sZ > 1e-5f ? -sZ : -1f);
-        }
+            => FcLevelLoader.ApplyBrushMatrix34(t, m);
 
         // ── Shared entity/object build ────────────────────────────────────────────
 
@@ -940,6 +930,7 @@ namespace OpenFarCry.Level.Editor
             FcEntityPrefabRegistry registry,
             GameObject entityRoot,
             GameObject objectRoot,
+            GameObject volumeRoot,
             bool skipHidden)
         {
             var stats = new BuildStats();
@@ -987,11 +978,23 @@ namespace OpenFarCry.Level.Editor
                 stats.Entities++;
             }
 
-            // Pass 2: objects (generic LevelObjects first; legacy fallback kept for safety)
+            // Pass 2: volume objects (VisArea / Portal / OccluderArea / FogVolume / WaterVolume)
+            if (mission.LevelObjects != null)
+            {
+                foreach (var levelObject in mission.LevelObjects)
+                {
+                    if (!TryBuildVolume(levelObject, volumeRoot)) continue;
+                    stats.Volumes++;
+                }
+            }
+
+            // Pass 3: generic objects (generic LevelObjects first; legacy fallback kept for safety)
             if (mission.LevelObjects != null && mission.LevelObjects.Count > 0)
             {
                 foreach (var levelObject in mission.LevelObjects)
                 {
+                    if (IsVolumeType(levelObject.Type)) continue;
+
                     var prefab = registry.GetPrefabForObjectType(levelObject.Type);
                     if (prefab == null) { stats.Unknown++; continue; }
 
@@ -1068,6 +1071,107 @@ namespace OpenFarCry.Level.Editor
             return desc;
         }
 
+        static bool IsVolumeType(string type) =>
+            type != null && (
+            type.Equals("VisArea",      StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("Portal",       StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("OccluderArea", StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("FogVolume",    StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("WaterVolume",  StringComparison.OrdinalIgnoreCase));
+
+        // Returns true if the object was handled as a volume; false if caller should skip.
+        static bool TryBuildVolume(FcLevelObjectDesc src, GameObject volumeRoot)
+        {
+            if (!IsVolumeType(src.Type)) return false;
+
+            var go = new GameObject(string.IsNullOrEmpty(src.Name) ? src.Type : src.Name);
+            go.transform.SetParent(volumeRoot.transform, worldPositionStays: false);
+            go.transform.position = src.Pos;
+
+            var pts = src.ShapePoints.Count > 0 ? src.ShapePoints.ToArray() : null;
+            var attr = src.Attributes;
+
+            if (src.Type.Equals("VisArea", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = go.AddComponent<FcVisAreaVolume>();
+                v.Points          = pts;
+                v.Height          = ParseAttrFloat(attr, "Height", 3f);
+                v.AmbientColor    = ParseAttrColor(attr, "AmbientColor", Color.gray);
+                v.DynAmbientColor = ParseAttrColor(attr, "DynAmbientColor", Color.gray);
+                v.AffectedBySun   = ParseAttrBool(attr, "AffectedBySun");
+                v.SkyOnly         = ParseAttrBool(attr, "SkyOnly");
+                v.ViewDistRatio   = (int)ParseAttrFloat(attr, "ViewDistRatio", 100f);
+                v.Closed          = ParseAttrBool(attr, "Closed", defaultTrue: true);
+            }
+            else if (src.Type.Equals("Portal", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = go.AddComponent<FcPortalVolume>();
+                v.Points        = pts;
+                v.Height        = ParseAttrFloat(attr, "Height", 2f);
+                v.DoubleSide    = ParseAttrBool(attr, "DoubleSide", defaultTrue: true);
+                v.AmbientColor  = ParseAttrColor(attr, "AmbientColor", Color.gray);
+            }
+            else if (src.Type.Equals("OccluderArea", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = go.AddComponent<FcOccluderAreaVolume>();
+                v.Points        = pts;
+                v.Height        = ParseAttrFloat(attr, "Height", 5f);
+                v.UseInIndoors  = ParseAttrBool(attr, "UseInIndoors");
+            }
+            else if (src.Type.Equals("FogVolume", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = go.AddComponent<FcFogVolume>();
+                v.FogColor      = ParseAttrColor(attr, "Color", Color.white);
+                v.ViewDistance  = ParseAttrFloat(attr, "ViewDistance", 50f);
+                v.Width         = ParseAttrFloat(attr, "Width", 1f);
+                v.Height        = ParseAttrFloat(attr, "Height", 1f);
+                v.Length        = ParseAttrFloat(attr, "Length", 1f);
+            }
+            else if (src.Type.Equals("WaterVolume", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = go.AddComponent<FcWaterVolume>();
+                v.Points        = pts;
+                v.Height        = ParseAttrFloat(attr, "Height", -1f);
+                attr.TryGetValue("Material",    out v.Material);
+                attr.TryGetValue("WaterShader", out v.WaterShader);
+                v.WaterSpeed    = ParseAttrFloat(attr, "WaterSpeed", 0f);
+            }
+
+            return true;
+        }
+
+        static float ParseAttrFloat(
+            System.Collections.Generic.Dictionary<string, string> attrs,
+            string key, float fallback)
+        {
+            if (attrs.TryGetValue(key, out string s) &&
+                float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out float v))
+                return v;
+            return fallback;
+        }
+
+        static bool ParseAttrBool(
+            System.Collections.Generic.Dictionary<string, string> attrs,
+            string key, bool defaultTrue = false)
+        {
+            if (!attrs.TryGetValue(key, out string s)) return defaultTrue;
+            return s == "1" || s.Equals("true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static Color ParseAttrColor(
+            System.Collections.Generic.Dictionary<string, string> attrs,
+            string key, Color fallback)
+        {
+            if (!attrs.TryGetValue(key, out string s)) return fallback;
+            var parts = s.Split(',');
+            if (parts.Length < 3) return fallback;
+            if (float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float r) &&
+                float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float g) &&
+                float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float b))
+                return new Color(r, g, b);
+            return fallback;
+        }
+
         static float ParseInvariantFloat(string value, float fallback)
         {
             if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float v))
@@ -1135,42 +1239,57 @@ namespace OpenFarCry.Level.Editor
         // Cry entities render with Matrix34::CreateRotationXYZ(Deg2Rad(angles)).
         // Convert that linear part through the same scene/asset basis bridge as brushes.
         static void ApplyCryRotationXYZ(Transform t, Vector3 cryAngles, float scale)
+            => FcLevelLoader.ApplyEntityTransform(t, t.position, cryAngles, scale);
+
+        static int BuildMovieSequencePlaceholders(string levelName, GameObject levelRoot)
         {
-            float sx = Mathf.Sin(cryAngles.x * Mathf.Deg2Rad);
-            float cx = Mathf.Cos(cryAngles.x * Mathf.Deg2Rad);
-            float sy = Mathf.Sin(cryAngles.y * Mathf.Deg2Rad);
-            float cy = Mathf.Cos(cryAngles.y * Mathf.Deg2Rad);
-            float sz = Mathf.Sin(cryAngles.z * Mathf.Deg2Rad);
-            float cz = Mathf.Cos(cryAngles.z * Mathf.Deg2Rad);
+            var sequences = FcLevelLoader.LoadMovieSequences(levelName);
+            if (sequences == null || sequences.Count == 0)
+                return 0;
 
-            float sycz = sy * cz;
-            float sysz = sy * sz;
+            var seqRoot = new GameObject("Sequences");
+            seqRoot.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
-            float m00 = cy * cz;
-            float m01 = sycz * sx - cx * sz;
-            float m02 = sycz * cx + sx * sz;
-            float m10 = cy * sz;
-            float m11 = sysz * sx + cx * cz;
-            float m12 = sysz * cx - sx * cz;
-            float m20 = -sy;
-            float m21 = cy * sx;
-            float m22 = cy * cx;
+            foreach (var seq in sequences)
+            {
+                var go = new GameObject(seq.Name);
+                go.transform.SetParent(seqRoot.transform, worldPositionStays: false);
+                var placeholder = go.AddComponent<FcMovieSequencePlaceholder>();
+                placeholder.StartTime = seq.StartTime;
+                placeholder.EndTime   = seq.EndTime;
+                placeholder.NodeCount = seq.NodeCount;
+            }
 
-            var colX = new Vector3( m00,  m20,  m10);
-            var colY = new Vector3( m02,  m22,  m12);
-            var colZ = new Vector3(-m01, -m21, -m11);
+            Debug.Log($"[FcLevelSceneBuilder] Movie sequences: {sequences.Count} placeholders built for '{levelName}'.");
+            return sequences.Count;
+        }
 
-            float sX = colX.magnitude;
-            float sY = colY.magnitude;
-            float sZ = colZ.magnitude;
+        static int BuildEditorXmlLights(string levelName, FcMissionDesc mission, GameObject entityRoot)
+        {
+            var editorLights = FcLevelLoader.LoadEditorXmlDynamicLights(levelName);
+            if (editorLights == null || editorLights.Count == 0)
+                return 0;
 
-            if (sZ > 1e-5f && sY > 1e-5f)
-                t.rotation = Quaternion.LookRotation(-colZ / sZ, colY / sY);
+            // Skip lights already built from mission XML (same EntityId).
+            var missionLightIds = new HashSet<int>();
+            if (mission?.Entities != null)
+            {
+                foreach (var e in mission.Entities)
+                    if (e.EntityClass == "DynamicLight" && e.Id > 0)
+                        missionLightIds.Add(e.Id);
+            }
 
-            t.localScale = new Vector3(
-                (sX > 1e-5f ? sX : 1f) * scale,
-                (sY > 1e-5f ? sY : 1f) * scale,
-                (sZ > 1e-5f ? -sZ : -1f) * scale);
+            int built = 0;
+            foreach (var desc in editorLights)
+            {
+                if (desc.Id > 0 && missionLightIds.Contains(desc.Id))
+                    continue;
+                BuildDynamicLightEntity(desc, entityRoot);
+                built++;
+            }
+
+            Debug.Log($"[FcLevelSceneBuilder] Editor XML lights: {built} built from {editorLights.Count} total (skipped {editorLights.Count - built} already in mission).");
+            return built;
         }
 
         static GameObject BuildDynamicLightEntity(FcEntityDesc desc, GameObject entityRoot)
@@ -1179,12 +1298,22 @@ namespace OpenFarCry.Level.Editor
             go.transform.SetParent(entityRoot.transform, false);
             SetTransform(go.transform, desc.Pos, desc.Angles, desc.Scale);
 
-            var light = go.AddComponent<Light>();
             var p = desc.Properties;
 
-            bool projectAll = p.TryGetValue("bProjectInAllDirs", out var piad) && piad == "1";
-            int lighttype   = p.TryGetValue("lighttype", out var lt) && int.TryParse(lt, out int lti) ? lti : 0;
-            light.type = lighttype == 2 && !projectAll ? LightType.Spot : LightType.Point;
+            bool active  = !p.TryGetValue("bActive",    out var act)  || act  == "1";
+            bool isFake  =  p.TryGetValue("bFakeLight", out var fake) && fake == "1";
+
+            go.SetActive(active);
+
+            if (isFake)
+                return go;
+
+            var light = go.AddComponent<Light>();
+
+            bool hasProjectorTex = p.TryGetValue("texture_ProjectorTexture", out var tex) && !string.IsNullOrEmpty(tex);
+            bool projectAll      = p.TryGetValue("bProjectInAllDirs", out var piad) && piad == "1";
+            bool isSpot          = hasProjectorTex && !projectAll;
+            light.type = isSpot ? LightType.Spot : LightType.Point;
 
             if (p.TryGetValue("clrDiffuse", out var clrStr) && TryParseFloats(clrStr, out float r, out float g, out float b))
             {
@@ -1196,11 +1325,14 @@ namespace OpenFarCry.Level.Editor
             if (p.TryGetValue("OuterRadius", out var rad) && TryParseF(rad, out float radius))
                 light.range = radius;
 
-            if (light.type == LightType.Spot && p.TryGetValue("ProjectorFov", out var fov) && TryParseF(fov, out float fovF))
+            if (isSpot && p.TryGetValue("ProjectorFov", out var fov) && TryParseF(fov, out float fovF))
                 light.spotAngle = fovF;
 
-            bool active = !p.TryGetValue("bActive", out var act) || act == "1";
-            go.SetActive(active);
+            bool castShadowMaps = desc.RootAttributes.TryGetValue("CastShadowMaps", out var csm) && csm == "1";
+            light.shadows = (desc.CastShadows || castShadowMaps) ? LightShadows.Soft : LightShadows.None;
+
+            bool usedInRealTime = !p.TryGetValue("bUsedInRealTime", out var rt) || rt == "1";
+            light.lightmapBakeType = usedInRealTime ? LightmapBakeType.Mixed : LightmapBakeType.Baked;
 
             return go;
         }
@@ -1248,13 +1380,16 @@ namespace OpenFarCry.Level.Editor
         {
             public int Entities;
             public int Objects;
+            public int Volumes;
             public int Brushes;
             public int Vegetation;
+            public int Lights;
+            public int Sequences;
             public int Skipped;
             public int Unknown;
 
             public override string ToString() =>
-                $"Entities: {Entities}  Objects: {Objects}  Brushes: {Brushes}  Vegetation: {Vegetation}  Skipped: {Skipped}  Unknown: {Unknown}";
+                $"Entities: {Entities}  Objects: {Objects}  Volumes: {Volumes}  Brushes: {Brushes}  Vegetation: {Vegetation}  Lights: {Lights}  Sequences: {Sequences}  Skipped: {Skipped}  Unknown: {Unknown}";
         }
     }
 }

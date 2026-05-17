@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using OpenFarCry.Importer;
 using OpenFarCry.Importer.Cgf;
@@ -8,6 +9,7 @@ using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
 using OpenFarCry.Level.Services;
+using OpenFarCry.Level.Volumes;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -151,6 +153,9 @@ namespace OpenFarCry.Level.Editor
             if (GUILayout.Button("Audit Scene Dependencies (FCData)"))
                 AuditSceneDependencies();
 
+            if (GUILayout.Button("Source Parity Audit"))
+                RunSourceParityAudit();
+
             if (GUILayout.Button("Validate Authoring Scene"))
                 ValidateAuthoringScene();
 
@@ -159,6 +164,12 @@ namespace OpenFarCry.Level.Editor
 
             if (GUILayout.Button("Purge Level FCData Cache"))
                 PurgeLevelFcDataCache();
+
+            using (new EditorGUI.DisabledScope(_levelNames.Count == 0))
+            {
+                if (GUILayout.Button("Pre-Bake CGF Materials for Level"))
+                    PreBakeLevelMaterials();
+            }
         }
 
         void DrawStatus()
@@ -198,8 +209,42 @@ namespace OpenFarCry.Level.Editor
                 _buildBrushes,
                 FcLevelSceneBuilder.SceneBuildMode.Runtime);
 
+            BakeLevelMaterials(levelName);
+
             _lastBuildStats = $"Built '{levelName}/{missionName}':\n{stats}";
             Debug.Log($"[FcLevelBuilder] {_lastBuildStats}");
+        }
+
+        void BakeLevelMaterials(string levelName)
+        {
+            var profilesByPath = new Dictionary<string, GeometryImportProfile>(System.StringComparer.Ordinal);
+            var dummyStats = new GeometryCacheStats();
+            if (_buildBrushes)
+                RegisterBrushProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
+            RegisterVegetationProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
+            RegisterMeshEntityProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
+
+            FcMaterialManifest cgfManifest = null;
+
+            try
+            {
+                EditorUtility.DisplayProgressBar("Baking level material manifests", levelName, 0f);
+
+                if (profilesByPath.Count > 0)
+                    cgfManifest = CgfMaterialEditorBakeService.BakeOrUpdateLevelManifest(
+                        levelName, profilesByPath.Keys);
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                AssetDatabase.Refresh();
+            }
+
+            string cgfInfo = cgfManifest != null
+                ? $"\nCGF material manifest: {cgfManifest.EntryCount} entries"
+                : "\nCGF material manifest: none";
+
+            Debug.Log($"[FcLevelBuilder] Material bake complete for '{levelName}'.{cgfInfo}");
         }
 
         void BuildAuthoringScene()
@@ -267,6 +312,93 @@ namespace OpenFarCry.Level.Editor
             var report = BuildSceneDependencyAudit(active);
             _lastBuildStats = report;
             Debug.Log($"[FcLevelBuilder] {report}");
+        }
+
+        void RunSourceParityAudit()
+        {
+            _lastError = null;
+            var active = SceneManager.GetActiveScene();
+            if (!active.IsValid() || !active.isLoaded)
+            {
+                _lastError = "No active loaded scene.";
+                return;
+            }
+
+            if (_levelNames.Count == 0 || _missionNames.Count == 0)
+            {
+                _lastError = "Select level + mission first.";
+                return;
+            }
+
+            string levelName   = _levelNames[_levelIndex];
+            string missionName = _missionNames[_missionIndex];
+            var report = BuildSourceParityReport(levelName, missionName, active);
+            _lastBuildStats = report;
+            Debug.Log($"[FcLevelBuilder] Source Parity\n{report}");
+        }
+
+        static string BuildSourceParityReport(string levelName, string missionName, Scene scene)
+        {
+            // ── Source ────────────────────────────────────────────────────────────
+            FcMissionDesc mission = null;
+            try { mission = FcLevelLoader.LoadMission(levelName, missionName); }
+            catch (System.Exception e) { Debug.LogWarning($"[FcLevelBuilder] Parity audit: LoadMission failed: {e.Message}"); }
+
+            int srcEntities   = mission?.Entities?.Count ?? 0;
+            int srcObjects    = mission?.Objects?.Count  ?? 0;
+            int srcLevelObjs  = mission?.LevelObjects?.Count ?? 0;
+
+            IReadOnlyList<FcBrushDesc> brushes = null;
+            try { brushes = FcBrushLoader.LoadBrushes(levelName); } catch { }
+            int srcBrushes = brushes?.Count ?? 0;
+
+            FcLevelSupplementData supplement = null;
+            try { supplement = FcLevelSupplementLoader.Load(levelName); } catch { }
+            int srcVegetation = supplement?.VegetationInstances?.Length ?? 0;
+
+            var editorLights = FcLevelLoader.LoadEditorXmlDynamicLights(levelName);
+            int srcCryLights  = editorLights?.Count ?? 0;
+            int srcMissionDL  = mission?.Entities?.Count(e => string.Equals(e.EntityClass, "DynamicLight", System.StringComparison.OrdinalIgnoreCase)) ?? 0;
+            int srcLights     = srcCryLights > 0 ? srcCryLights : srcMissionDL;
+
+            var sequences = FcLevelLoader.LoadMovieSequences(levelName);
+            int srcSequences = sequences?.Count ?? 0;
+
+            // ── Scene ─────────────────────────────────────────────────────────────
+            var roots = scene.GetRootGameObjects();
+            int scnEntities   = 0;
+            int scnBrushes    = 0;
+            int scnVegetation = 0;
+            int scnLights     = 0;
+            int scnSequences  = 0;
+
+            foreach (var root in roots)
+            {
+                scnEntities   += root.GetComponentsInChildren<FcEntity>(true).Length;
+                scnBrushes    += root.GetComponentsInChildren<FcBrushInstance>(true).Length;
+                scnVegetation += root.GetComponentsInChildren<FcVegetationInstance>(true).Length;
+                scnLights     += root.GetComponentsInChildren<Light>(true).Length;
+                scnSequences  += root.GetComponentsInChildren<FcMovieSequencePlaceholder>(true).Length;
+            }
+
+            // ── Format ────────────────────────────────────────────────────────────
+            var sb = new StringBuilder();
+            sb.AppendLine($"Source parity: {levelName}/{missionName}");
+            sb.AppendLine($"  (.cry lights={srcCryLights}, mission DL={srcMissionDL})");
+            sb.AppendLine($"{"TYPE",-22} {"SRC",6} {"SCENE",6} {"DELTA",7}");
+            AppendParityRow(sb, "Entities",         srcEntities,   scnEntities);
+            AppendParityRow(sb, "Objects+LevelObjs",srcObjects + srcLevelObjs, 0);
+            AppendParityRow(sb, "Brushes",          srcBrushes,    scnBrushes);
+            AppendParityRow(sb, "Vegetation",       srcVegetation, scnVegetation);
+            AppendParityRow(sb, "Lights",           srcLights,     scnLights);
+            AppendParityRow(sb, "Sequences",        srcSequences,  scnSequences);
+            return sb.ToString().TrimEnd();
+        }
+
+        static void AppendParityRow(StringBuilder sb, string label, int src, int scene)
+        {
+            string delta = src == 0 ? "n/a" : scene == src ? "OK" : $"{scene - src:+#;-#;0}";
+            sb.AppendLine($"  {label,-20} {src,6} {scene,6} {delta,7}");
         }
 
         void FinalizeAuthoringScene()
@@ -353,6 +485,78 @@ namespace OpenFarCry.Level.Editor
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
             _lastBuildStats = $"Deleted FCData cache for level '{levelName}'.";
+        }
+
+        void PreBakeLevelMaterials()
+        {
+            _lastError = null;
+            string levelName = GetSelectedLevelName();
+            if (string.IsNullOrWhiteSpace(levelName))
+            {
+                _lastError = "No selected level.";
+                return;
+            }
+
+            int baked = 0;
+            int reused = 0;
+            int failed = 0;
+            var profilesByPath = new Dictionary<string, GeometryImportProfile>(System.StringComparer.Ordinal);
+            var dummyStats = new GeometryCacheStats();
+
+            if (_buildBrushes)
+                RegisterBrushProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
+            RegisterVegetationProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
+            RegisterMeshEntityProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
+
+            var paths = new List<string>(profilesByPath.Keys);
+            try
+            {
+                for (int i = 0; i < paths.Count; i++)
+                {
+                    string virtualPath = paths[i];
+                    EditorUtility.DisplayProgressBar(
+                        "Pre-baking CGF materials",
+                        $"{i + 1}/{paths.Count}: {virtualPath}",
+                        paths.Count > 0 ? (float)(i + 1) / paths.Count : 1f);
+
+                    if (!TryLoadParsedFile(virtualPath, out var parsedFile))
+                    {
+                        failed++;
+                        continue;
+                    }
+
+                    if (parsedFile.MaterialChunks == null)
+                        continue;
+
+                    for (int c = 0; c < parsedFile.MaterialChunks.Count; c++)
+                    {
+                        var chunk = parsedFile.MaterialChunks[c];
+                        if (chunk == null || chunk.MtlType == CgfMtlType.Multi)
+                            continue;
+
+                        string assetPath = CgfMaterialEditorBakeService.GetBakedMaterialPath(virtualPath, chunk.TableIndex);
+                        bool existed = AssetDatabase.LoadAssetAtPath<Material>(assetPath) != null;
+                        var mat = CgfMaterialEditorBakeService.GetOrBakeMaterial(virtualPath, chunk);
+                        if (mat != null)
+                        {
+                            if (existed) reused++; else baked++;
+                        }
+                        else
+                        {
+                            failed++;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+            _lastBuildStats = $"Pre-bake CGF materials for '{levelName}':\nBaked: {baked}, Reused: {reused}, Failed: {failed}";
+            Debug.Log($"[FcLevelBuilder] {_lastBuildStats}");
         }
 
         [System.Flags]
@@ -800,6 +1004,43 @@ namespace OpenFarCry.Level.Editor
             }
         }
 
+        static void RegisterMeshEntityProfilesFromLevelData(
+            string levelName,
+            Dictionary<string, GeometryImportProfile> profilesByPath,
+            ref GeometryCacheStats stats)
+        {
+            var missionNames = FcLevelLoader.ListMissionNames(levelName);
+            if (missionNames == null)
+                return;
+
+            foreach (var missionName in missionNames)
+            {
+                FcMissionDesc mission;
+                try { mission = FcLevelLoader.LoadMission(levelName, missionName); }
+                catch { continue; }
+
+                if (mission?.Entities == null)
+                    continue;
+
+                for (int i = 0; i < mission.Entities.Count; i++)
+                {
+                    var entity = mission.Entities[i];
+                    string cgfPath = entity?.GetModelVirtualPath();
+                    if (string.IsNullOrWhiteSpace(cgfPath))
+                        continue;
+
+                    stats.SourceInstances++;
+                    RegisterImportProfile(
+                        cgfPath,
+                        importSkeleton: false,
+                        importScale: 0.01f,
+                        usageFlags: GeometryUsageFlags.MeshEntity,
+                        requiresPhysicsCollider: false,
+                        profilesByPath: profilesByPath);
+                }
+            }
+        }
+
         static void RegisterBrushAndVegetationProfiles(
             List<FcBrushInstance> brushes,
             List<FcVegetationInstance> vegetation,
@@ -941,7 +1182,11 @@ namespace OpenFarCry.Level.Editor
                                 persistMesh: cacheService.PersistMeshAssetForVirtualPath,
                                 materialService: CgfRuntimeImporter.MaterialService),
                     attachAnimations: null,
-                    applyPostTransform: go => ApplyPostImportTransform(go, profile),
+                    applyPostTransform: go =>
+                    {
+                        ApplyPostImportTransform(go, profile);
+                        CgfMaterialEditorBakeService.PostProcessGameObjectMaterials(go, parsedFile, virtualPath);
+                    },
                     saveAssets: (mesh, go, clips) => cacheService.SaveAssets(virtualPath, mesh, go, clips),
                     useRuntimeImportService: true,
                     useRuntimeMemoryCache: true,

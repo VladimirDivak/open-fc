@@ -35,6 +35,11 @@ namespace OpenFarCry.Level.Data
             return null;
         }
 
+        // Returns the entity-level material override name from the root Material attribute.
+        // Format is "LibraryName.MaterialName" (e.g. "Level.CrateWoodFragile0").
+        public string GetMaterialOverride()
+            => RootAttributes.TryGetValue("Material", out var v) && !string.IsNullOrWhiteSpace(v) ? v : null;
+
         static readonly string[] ModelPathKeys =
             { "object_Model", "objModel", "fileModel", "fileModel01", "fileHelmetModel" };
     }
@@ -64,6 +69,15 @@ namespace OpenFarCry.Level.Data
         public readonly Dictionary<string, string> Attributes =
             new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
         public readonly List<Vector3> ShapePoints = new List<Vector3>();
+    }
+
+    // Metadata record for one CryMovie cutscene sequence from moviedata.xml.
+    public sealed class FcMovieSequenceDesc
+    {
+        public string Name;
+        public float StartTime;
+        public float EndTime;
+        public int NodeCount;
     }
 
     public sealed class FcTerrainLayerDesc

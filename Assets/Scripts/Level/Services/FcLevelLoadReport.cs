@@ -41,6 +41,13 @@ namespace OpenFarCry.Level.Services
 
         readonly List<(string phase, double ms)> _phases = new();
 
+        // Runtime spawn stats (filled by FcLevelLoadService spawn methods).
+        public int SpawnedBrushes;
+        public int SpawnedVegetation;
+        public int SpawnedEntities;
+        public int SpawnedEntitiesMesh;
+        public int SpawnedLights;
+
         // Runtime brush load stats (filled by FcBrushLoadService).
         public int BrushesRegistered;
         public int BrushesLoaded;

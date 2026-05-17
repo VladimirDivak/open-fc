@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Importer.Texture;
 using OpenFarCry.Level.Data;
@@ -141,75 +143,6 @@ namespace OpenFarCry.Level.Services
             return TryResolveMaterialDesc(overrideName, materialId, out _, out _);
         }
 
-        public bool TryResolveBrushOverrideMaterial(
-            string overrideName,
-            int materialId,
-            string scopeId,
-            out Material material)
-        {
-            return TryResolveBrushOverrideMaterial(
-                overrideName,
-                materialId,
-                scopeId,
-                out material,
-                out _);
-        }
-
-        public bool TryResolveBrushOverrideMaterial(
-            string overrideName,
-            int materialId,
-            string scopeId,
-            out Material material,
-            out BrushMaterialMetadata metadata)
-        {
-            material = null;
-            TryResolveBrushMaterialMetadata(overrideName, materialId, out metadata);
-
-            string key = NormalizeKey(overrideName);
-            string idKey = $"id:{materialId}";
-
-            if (!string.IsNullOrEmpty(key))
-            {
-                if (_materialCache.TryGetValue(key, out material) && material != null)
-                    return true;
-            }
-            if (materialId >= 0 && _materialCache.TryGetValue(idKey, out material) && material != null)
-                return true;
-
-            if (!string.IsNullOrEmpty(key) && _materialByName.TryGetValue(key, out var descByName))
-            {
-                if (TryBuildMaterialFromLevelDesc(descByName, scopeId, out material))
-                {
-                    _materialCache[key] = material;
-                    if (materialId >= 0)
-                        _materialCache[idKey] = material;
-                    return true;
-                }
-            }
-
-            if (materialId >= 0 &&
-                materialId < _materialsOrdered.Length &&
-                TryBuildMaterialFromLevelDesc(_materialsOrdered[materialId], scopeId, out material))
-            {
-                _materialCache[idKey] = material;
-                if (!string.IsNullOrEmpty(key))
-                    _materialCache[key] = material;
-                return true;
-            }
-
-            if (!string.IsNullOrWhiteSpace(overrideName) &&
-                TryBuildMaterialFromTexturePath(overrideName, scopeId, out material))
-            {
-                if (!string.IsNullOrEmpty(key))
-                    _materialCache[key] = material;
-                if (materialId >= 0)
-                    _materialCache[idKey] = material;
-                return true;
-            }
-
-            return false;
-        }
-
         public bool TryResolveBrushMaterialMetadata(
             string overrideName,
             int materialId,
@@ -300,6 +233,12 @@ namespace OpenFarCry.Level.Services
             bool targetedAny = false;
             bool replacedAny = false;
 
+            // DIAG
+            {
+                string matIdsStr = submeshMaterialIds != null ? string.Join(",", submeshMaterialIds) : "null";
+                Debug.Log($"[OvrDiag] '{overrideName}' req={requestedMaterialId} slots={slots.Length} matIds=[{matIdsStr}]");
+            }
+
             for (int i = 0; i < slots.Length; i++)
             {
                 string inputMaterialName = slots[i] != null ? slots[i].name : string.Empty;
@@ -318,12 +257,18 @@ namespace OpenFarCry.Level.Services
                 }
 
                 targetedAny = true;
+                // CryEngine: MatID=0=root material, MatID=1=first sub-material (children[0]), etc.
+                // submeshMaterialId - 1 maps face MatID to the supplement children list index.
+                // MatID=0 (root) yields -1 which falls through to parent desc (correct for head/root slots).
+                int childLookupId = requestedMaterialId < 0 ? submeshMaterialId - 1 : submeshMaterialId;
+                Debug.Log($"[OvrDiag] slot={i} submeshMatId={submeshMaterialId} childLookupId={childLookupId} name='{slots[i]?.name}'");
                 if (!TryResolveBrushOverrideMaterialForSubmesh(
                         overrideName,
                         requestedMaterialId,
-                        submeshMaterialId,
+                        childLookupId,
                         slots[i] != null ? slots[i].name : string.Empty,
                         scopeId,
+                        slots[i],
                         out var overrideMaterial,
                         out var outcome,
                         out var detail)
@@ -360,45 +305,38 @@ namespace OpenFarCry.Level.Services
             if (!hasOverrideToken || targetedAny)
                 return false;
 
-            if (!TryResolveBrushOverrideMaterial(
-                    overrideName,
-                    requestedMaterialId,
-                    scopeId,
-                    out var fallbackMaterial)
-                || fallbackMaterial == null)
-            {
-                for (int i = 0; i < slots.Length; i++)
-                {
-                    string inputMaterialName = slots[i] != null ? slots[i].name : string.Empty;
-                    diagnostics[i] = new BrushSlotResolutionInfo(
-                        i,
-                        submeshMaterialIds != null && i < submeshMaterialIds.Length ? submeshMaterialIds[i] : i,
-                        targeted: false,
-                        applied: false,
-                        outcome: "fallback-failed",
-                        inputMaterialName: inputMaterialName,
-                        outputMaterialName: inputMaterialName,
-                        detail: "No targeted slots and generic override fallback failed.");
-                }
-                return false;
-            }
-
+            // No targeted slots — apply override textures to each slot's base material.
+            bool anyFallback = false;
+            TryResolveMaterialDesc(overrideName, requestedMaterialId, out var fallbackDesc, out _);
             for (int i = 0; i < slots.Length; i++)
             {
                 string inputMaterialName = slots[i] != null ? slots[i].name : string.Empty;
-                slots[i] = fallbackMaterial;
-                diagnostics[i] = new BrushSlotResolutionInfo(
-                    i,
-                    submeshMaterialIds != null && i < submeshMaterialIds.Length ? submeshMaterialIds[i] : i,
-                    targeted: false,
-                    applied: true,
-                    outcome: "fallback-all-slots",
-                    inputMaterialName: inputMaterialName,
-                    outputMaterialName: fallbackMaterial.name,
-                    detail: "No targeted slots; applied generic override material to all slots.");
-            }
+                int submatId = submeshMaterialIds != null && i < submeshMaterialIds.Length ? submeshMaterialIds[i] : i;
+                Material fb = null;
+                bool ok = false;
+                if (fallbackDesc.Name != null)
+                    ok = TryApplyTextureOverride(slots[i], fallbackDesc, scopeId, out fb);
+                if (!ok && !string.IsNullOrWhiteSpace(overrideName))
+                    ok = TryApplyTexturePathOverride(slots[i], overrideName, scopeId, out fb);
 
-            return true;
+                if (ok && fb != null)
+                {
+                    slots[i] = fb;
+                    anyFallback = true;
+                    diagnostics[i] = new BrushSlotResolutionInfo(
+                        i, submatId, false, true, "fallback-all-slots",
+                        inputMaterialName, fb.name,
+                        "No targeted slots; applied override textures to all slots.");
+                }
+                else
+                {
+                    diagnostics[i] = new BrushSlotResolutionInfo(
+                        i, submatId, false, false, "fallback-failed",
+                        inputMaterialName, inputMaterialName,
+                        "No targeted slots and texture override failed.");
+                }
+            }
+            return anyFallback;
         }
 
         public static bool ApplyOverrideToRendererSlots(
@@ -456,6 +394,15 @@ namespace OpenFarCry.Level.Services
                 return;
             if (!_materialByName.ContainsKey(key))
                 _materialByName.Add(key, desc);
+
+            // Also register with '/' replaced by '.' so entity Material="Lib.Name" lookups work.
+            // Supplement FullName uses '/' separator; entity XML uses '.'.
+            if (key.Contains('/'))
+            {
+                string dotKey = key.Replace('/', '.');
+                if (!_materialByName.ContainsKey(dotKey))
+                    _materialByName.Add(dotKey, desc);
+            }
         }
 
         void AddChildMapping(FcLevelSupplementData.MaterialDesc desc)
@@ -473,58 +420,132 @@ namespace OpenFarCry.Level.Services
             children.Add(desc);
         }
 
-        bool TryBuildMaterialFromLevelDesc(
-            FcLevelSupplementData.MaterialDesc desc,
+        // Preloads all textures referenced by the override (incl. submaterials) into the runtime cache.
+        // Call this before ApplyResult/ApplyLoadResult so override application is a cache-only hit.
+        public async UniTask PreloadOverrideTexturesAsync(
+            string overrideName,
+            int materialId,
             string scopeId,
-            out Material material)
+            CancellationToken ct = default)
         {
-            material = null;
+            if (!TryResolveMaterialDesc(overrideName, materialId, out var desc, out _))
+                return;
 
-            string shaderNorm = string.IsNullOrWhiteSpace(desc.Shader)
-                ? "templmodelcommon"
-                : desc.Shader.Trim().ToLowerInvariant();
-            bool isDecalShader = shaderNorm.Contains("decal") &&
-                                  !shaderNorm.Contains("decalmodulate");
-            float resolvedAlphaTest = isDecalShader ? 0f : Mathf.Max(0f, desc.AlphaTest);
-            if (isDecalShader && desc.AlphaTest > 0.01f)
-                Debug.Log($"[LevelMaterial] '{desc.Name}': decal shader, RGB-only assumed, AlphaTest suppressed ({desc.AlphaTest:F3}→0).");
+            var paths = new List<string>(8);
+            CollectTexturePaths(desc, paths);
 
-            var chunk = new CgfMaterialChunk
+            string parentKey = NormalizeKey(desc.FullName);
+            if (!string.IsNullOrEmpty(parentKey) &&
+                _materialChildrenByParent.TryGetValue(parentKey, out var children))
             {
-                Name = string.IsNullOrWhiteSpace(desc.FullName) ? desc.Name : desc.FullName,
-                ShaderName = shaderNorm,
-                MtlType = CgfMtlType.Standard,
-                DiffuseColor = new Color32(255, 255, 255, 255),
-                AlphaTest = resolvedAlphaTest,
-                Opacity = Mathf.Clamp01(desc.Opacity > 0f ? desc.Opacity : 1f),
-                Flags = (CgfMtlFlags)desc.MtlFlags,
-            };
+                for (int i = 0; i < children.Count; i++)
+                    CollectTexturePaths(children[i], paths);
+            }
 
-            var resolved = ResolveLevelMaterialTextures(desc, scopeId);
-            material = CgfMaterialBuilder.Build(chunk, resolved);
+            if (paths.Count == 0)
+                return;
 
-            if (material != null)
-                material.name = $"LevelMat_{(string.IsNullOrWhiteSpace(desc.FullName) ? desc.Name : desc.FullName)}";
-            return material != null;
+            var tasks = new UniTask[paths.Count];
+            for (int i = 0; i < paths.Count; i++)
+                tasks[i] = PreloadTexturePathAsync(paths[i], scopeId, ct);
+            await UniTask.WhenAll(tasks);
         }
 
-        bool TryBuildMaterialFromTexturePath(string rawPath, string scopeId, out Material material)
+        static void CollectTexturePaths(FcLevelSupplementData.MaterialDesc desc, List<string> paths)
         {
-            material = null;
-            if (string.IsNullOrWhiteSpace(rawPath))
+            if (desc.TextureSlots != null)
+                for (int i = 0; i < desc.TextureSlots.Length; i++)
+                {
+                    string file = desc.TextureSlots[i].File;
+                    if (!string.IsNullOrWhiteSpace(file))
+                        paths.Add(file);
+                }
+
+            if (desc.TextureRefs != null)
+                for (int i = 0; i < desc.TextureRefs.Length; i++)
+                {
+                    if (!string.IsNullOrWhiteSpace(desc.TextureRefs[i]))
+                        paths.Add(desc.TextureRefs[i]);
+                }
+        }
+
+        static async UniTask PreloadTexturePathAsync(string rawPath, string scopeId, CancellationToken ct)
+        {
+            string path = NormalizePath(rawPath);
+            if (string.IsNullOrEmpty(path))
+                return;
+
+            if (TextureImportService.IsSupportedVirtualPath(path))
+            {
+                await TextureImportService.RuntimeService.TryLoadWithInfoAsync(path, scopeId, ct,
+                    new TextureRuntimeImportOptions(
+                        useRuntimeMemoryCache: true,
+                        markNonReadable: true,
+                        linearColorSpace: false,
+                        generateMipmaps: true));
+                return;
+            }
+
+            int dot = path.LastIndexOf('.');
+            if (dot >= 0)
+                return;
+
+            for (int i = 0; i < TextureImportService.SupportedExtensions.Length; i++)
+            {
+                if (ct.IsCancellationRequested) return;
+                string candidate = path + TextureImportService.SupportedExtensions[i];
+                if (!TextureImportService.IsSupportedVirtualPath(candidate))
+                    continue;
+                var result = await TextureImportService.RuntimeService.TryLoadWithInfoAsync(candidate, scopeId, ct,
+                    new TextureRuntimeImportOptions(
+                        useRuntimeMemoryCache: true,
+                        markNonReadable: true,
+                        linearColorSpace: false,
+                        generateMipmaps: true));
+                if (result.Success)
+                    return;
+            }
+        }
+
+        // Instantiates baseMaterial and applies override textures from desc.
+        // Returns false if no textures resolved (nothing to override).
+        bool TryApplyTextureOverride(
+            Material baseMaterial,
+            FcLevelSupplementData.MaterialDesc desc,
+            string scopeId,
+            out Material result)
+        {
+            result = null;
+            if (baseMaterial == null)
+                return false;
+
+            var resolved = ResolveLevelMaterialTextures(desc, scopeId);
+            if (resolved.BaseMap == null && resolved.NormalMap == null &&
+                resolved.SpecularMap == null && resolved.OpacityMap == null && resolved.GlossMap == null)
+                return false;
+
+            result = UnityEngine.Object.Instantiate(baseMaterial);
+            string descName = string.IsNullOrWhiteSpace(desc.FullName) ? desc.Name : desc.FullName;
+            result.name = $"{baseMaterial.name}_ovr_{descName}";
+            CgfMaterialBuilder.ApplyResolvedTextures(result, resolved);
+            return true;
+        }
+
+        // Instantiates baseMaterial and applies a single diffuse texture from rawPath.
+        // Returns false if the texture cannot be loaded.
+        bool TryApplyTexturePathOverride(
+            Material baseMaterial,
+            string rawPath,
+            string scopeId,
+            out Material result)
+        {
+            result = null;
+            if (baseMaterial == null)
                 return false;
 
             string path = NormalizePath(rawPath);
             if (!TryLoadTextureCandidate(path, scopeId, out var tex, out var resolvedPath))
                 return false;
-
-            var chunk = new CgfMaterialChunk
-            {
-                Name = $"override:{rawPath}",
-                ShaderName = "templmodelcommon",
-                MtlType = CgfMtlType.Standard,
-                DiffuseColor = new Color32(255, 255, 255, 255)
-            };
 
             var resolved = new CgfResolvedMaterialTextures(
                 diffuseTextureName: resolvedPath,
@@ -543,10 +564,10 @@ namespace OpenFarCry.Level.Services
                 opacityMap: null,
                 glossMap: null);
 
-            material = CgfMaterialBuilder.Build(chunk, resolved);
-            if (material != null)
-                material.name = $"LevelMatTex_{rawPath}";
-            return material != null;
+            result = UnityEngine.Object.Instantiate(baseMaterial);
+            result.name = $"{baseMaterial.name}_ovrtex";
+            CgfMaterialBuilder.ApplyResolvedTextures(result, resolved);
+            return true;
         }
 
         static CgfResolvedMaterialTextures ResolveLevelMaterialTextures(
@@ -829,6 +850,7 @@ namespace OpenFarCry.Level.Services
             int submeshMaterialId,
             string slotMaterialName,
             string scopeId,
+            Material baseMaterial,
             out Material material,
             out string outcome,
             out string detail)
@@ -837,9 +859,17 @@ namespace OpenFarCry.Level.Services
             outcome = string.Empty;
             detail = string.Empty;
 
+            if (baseMaterial == null)
+            {
+                outcome = "unresolved";
+                detail = "No base material for slot.";
+                return false;
+            }
+
+            string baseName = baseMaterial.name ?? string.Empty;
             string normalizedOverride = NormalizeKey(overrideName);
             string normalizedSlotMaterialName = NormalizeMaterialNameForLookup(slotMaterialName);
-            string slotCacheKey = $"slot:{normalizedOverride}|req:{requestedMaterialId}|sm:{submeshMaterialId}|src:{normalizedSlotMaterialName}";
+            string slotCacheKey = $"slot:{baseName}|{normalizedOverride}|req:{requestedMaterialId}|sm:{submeshMaterialId}|src:{normalizedSlotMaterialName}";
             if (_materialCache.TryGetValue(slotCacheKey, out material) && material != null)
             {
                 outcome = "cache-slot";
@@ -857,7 +887,7 @@ namespace OpenFarCry.Level.Services
                 string selectedDescKey = !string.IsNullOrWhiteSpace(selectedDesc.FullName)
                     ? NormalizeKey(selectedDesc.FullName)
                     : NormalizeKey(selectedDesc.Name);
-                string descCacheKey = $"desc:{selectedDescKey}|sm:{submeshMaterialId}";
+                string descCacheKey = $"desc:{baseName}|{selectedDescKey}|sm:{submeshMaterialId}";
                 if (_materialCache.TryGetValue(descCacheKey, out material) && material != null)
                 {
                     _materialCache[slotCacheKey] = material;
@@ -866,7 +896,7 @@ namespace OpenFarCry.Level.Services
                     return true;
                 }
 
-                if (TryBuildMaterialFromLevelDesc(selectedDesc, scopeId, out material) && material != null)
+                if (TryApplyTextureOverride(baseMaterial, selectedDesc, scopeId, out material) && material != null)
                 {
                     _materialCache[descCacheKey] = material;
                     _materialCache[slotCacheKey] = material;
@@ -876,16 +906,17 @@ namespace OpenFarCry.Level.Services
                 }
             }
 
-            if (TryResolveBrushOverrideMaterial(overrideName, requestedMaterialId, scopeId, out material) && material != null)
+            if (!string.IsNullOrWhiteSpace(overrideName) &&
+                TryApplyTexturePathOverride(baseMaterial, overrideName, scopeId, out material) && material != null)
             {
                 _materialCache[slotCacheKey] = material;
-                outcome = "fallback-generic";
-                detail = "Used generic override material fallback.";
+                outcome = "fallback-tex-path";
+                detail = "Used texture path fallback.";
                 return true;
             }
 
             outcome = "unresolved";
-            detail = "No level material/submaterial match and no generic fallback material.";
+            detail = "No level material/submaterial match and no texture fallback resolved.";
             return false;
         }
 
@@ -913,8 +944,12 @@ namespace OpenFarCry.Level.Services
             if (submeshMaterialId >= 0 && submeshMaterialId < children.Count)
             {
                 selectionMode = "submesh-id";
-                return children[submeshMaterialId];
+                var c = children[submeshMaterialId];
+                Debug.Log($"[OvrDiag] submesh-id pick: sm={submeshMaterialId} children.Count={children.Count} → '{c.FullName ?? c.Name}'");
+                return c;
             }
+
+            Debug.Log($"[OvrDiag] submesh-id miss: sm={submeshMaterialId} children.Count={children.Count} slotName='{normalizedSlotMaterialName}'");
 
             if (TryResolveChildBySourceMaterialName(children, normalizedSlotMaterialName, out var byName))
             {
@@ -1024,6 +1059,23 @@ namespace OpenFarCry.Level.Services
             {
                 source = "override-name";
                 return true;
+            }
+
+            // Entity XML uses "LibraryName.MaterialName" format (e.g. "Mercenaries.Tshirt.Black").
+            // Supplement stores only the material name without the library prefix.
+            // Strip everything up to and including the first '.' and retry.
+            if (!string.IsNullOrEmpty(key))
+            {
+                int dotIdx = key.IndexOf('.');
+                if (dotIdx >= 0 && dotIdx + 1 < key.Length)
+                {
+                    string withoutLib = key.Substring(dotIdx + 1);
+                    if (_materialByName.TryGetValue(withoutLib, out desc))
+                    {
+                        source = "override-name";
+                        return true;
+                    }
+                }
             }
 
             if (materialId >= 0 && materialId < _materialsOrdered.Length)

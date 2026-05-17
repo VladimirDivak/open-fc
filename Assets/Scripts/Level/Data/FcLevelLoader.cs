@@ -128,6 +128,95 @@ namespace OpenFarCry.Level.Data
         public static bool TryLoadTerrainSettings(string levelName, out int heightmapSize, out int heightmapUnitSize)
             => TryLoadTerrainSettings(levelName, out heightmapSize, out heightmapUnitSize, out _);
 
+        // Reads DynamicLight <Object> entries from <LevelName>.cry/Level.editor_xml.
+        // Returns empty list if .cry file is absent or unreadable (not an error — shipped levels may lack it).
+        public static List<FcEntityDesc> LoadEditorXmlDynamicLights(string levelName)
+        {
+            var result = new List<FcEntityDesc>();
+            if (!TryGetInstallPath(out string installPath))
+                return result;
+
+            string resolvedDir = ResolveLevelDirectoryName(installPath, levelName);
+            string cryPath = Path.Combine(installPath, "Levels", resolvedDir, resolvedDir + ".cry");
+            if (!File.Exists(cryPath))
+                return result;
+
+            byte[] xmlBytes;
+            try
+            {
+                using var pak = new OpenFarCry.FileSystem.PakArchive(cryPath);
+                if (!pak.TryRead("level.editor_xml", out xmlBytes))
+                    return result;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[FcLevelLoader] Failed to open .cry for '{levelName}': {e.Message}");
+                return result;
+            }
+
+            try
+            {
+                var doc = LoadXml(xmlBytes);
+                var nodes = doc.GetElementsByTagName("Object");
+                foreach (XmlNode node in nodes)
+                {
+                    if (!string.Equals(node.Attributes?["EntityClass"]?.Value, "DynamicLight",
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var desc = ParseEntityNode(node);
+                    if (desc != null)
+                        result.Add(desc);
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[FcLevelLoader] Failed to parse editor_xml lights for '{levelName}': {e.Message}");
+            }
+
+            return result;
+        }
+
+        // Reads <Sequence> records from moviedata.xml in the level PAK.
+        // Returns empty list if absent — many levels have no sequences.
+        public static List<FcMovieSequenceDesc> LoadMovieSequences(string levelName)
+        {
+            var result = new List<FcMovieSequenceDesc>();
+            EnsureLevelMounted(levelName);
+
+            string xmlPath = LevelXmlPath(levelName, "moviedata.xml");
+            if (!FcFileSystem.Exists(xmlPath))
+                return result;
+
+            try
+            {
+                byte[] bytes = FcFileSystem.ReadAllBytes(xmlPath);
+                var doc = LoadXml(bytes);
+                var sequences = doc.GetElementsByTagName("Sequence");
+                foreach (XmlNode seq in sequences)
+                {
+                    string name = seq.Attributes?["Name"]?.Value;
+                    if (string.IsNullOrEmpty(name))
+                        continue;
+                    float start = ParseFloat(seq.Attributes?["StartTime"]?.Value, 0f);
+                    float end   = ParseFloat(seq.Attributes?["EndTime"]?.Value, 0f);
+                    int nodeCount = seq.SelectNodes("Nodes/Node")?.Count ?? 0;
+                    result.Add(new FcMovieSequenceDesc
+                    {
+                        Name      = name,
+                        StartTime = start,
+                        EndTime   = end,
+                        NodeCount = nodeCount,
+                    });
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[FcLevelLoader] Failed to parse moviedata.xml for '{levelName}': {e.Message}");
+            }
+
+            return result;
+        }
+
         static void ParseSurfaceTypes(XmlDocument doc, string levelName, List<FcTerrainLayerDesc> result)
         {
             XmlNodeList surfaceTypeNodes = doc.GetElementsByTagName("SurfaceType");
@@ -219,6 +308,80 @@ namespace OpenFarCry.Level.Data
         // Cry direction (Z-up) -> Unity scene direction (Y-up).
         public static Vector3 ConvertDirection(float x, float y, float z)
             => new Vector3(x, z, y);
+
+        // CryEngine Matrix34 (row-major, Z-up) -> Unity scene transform.
+        // Static CGF vertices are imported as Cry(x,y,z) -> Unity asset(x,z,-y),
+        // while level placement uses Cry(x,y,z) -> Unity scene(x,z,y). Therefore
+        // instance linear transform is SceneBasis * CryMatrix * Inverse(AssetBasis).
+        public static void ApplyBrushMatrix34(Transform t, float[] m)
+        {
+            float m00 = m[0], m01 = m[1], m02 = m[2], m03 = m[3];
+            float m10 = m[4], m11 = m[5], m12 = m[6], m13 = m[7];
+            float m20 = m[8], m21 = m[9], m22 = m[10], m23 = m[11];
+
+            t.position = new Vector3(m03, m23, m13);
+
+            var colX = new Vector3( m00,  m20,  m10);
+            var colY = new Vector3( m02,  m22,  m12);
+            var colZ = new Vector3(-m01, -m21, -m11);
+
+            float sX = colX.magnitude;
+            float sY = colY.magnitude;
+            float sZ = colZ.magnitude;
+
+            // SceneBasis has opposite handedness from AssetBasis, so the composed
+            // instance matrix contains one reflection. Keep it explicit as -Z scale.
+            if (sZ > 1e-5f && sY > 1e-5f)
+                t.rotation = Quaternion.LookRotation(-colZ / sZ, colY / sY);
+
+            t.localScale = new Vector3(
+                sX > 1e-5f ? sX : 1f,
+                sY > 1e-5f ? sY : 1f,
+                sZ > 1e-5f ? -sZ : -1f);
+        }
+
+        // Cry entity/object rotation: Matrix34::CreateRotationXYZ(Deg2Rad(angles)).
+        // Applies through the same scene/asset basis bridge as ApplyBrushMatrix34.
+        public static void ApplyEntityTransform(Transform t, Vector3 pos, Vector3 cryAngles, float scale)
+        {
+            t.position = pos;
+
+            float sx = Mathf.Sin(cryAngles.x * Mathf.Deg2Rad);
+            float cx = Mathf.Cos(cryAngles.x * Mathf.Deg2Rad);
+            float sy = Mathf.Sin(cryAngles.y * Mathf.Deg2Rad);
+            float cy = Mathf.Cos(cryAngles.y * Mathf.Deg2Rad);
+            float sz = Mathf.Sin(cryAngles.z * Mathf.Deg2Rad);
+            float cz = Mathf.Cos(cryAngles.z * Mathf.Deg2Rad);
+
+            float sycz = sy * cz;
+            float sysz = sy * sz;
+
+            float m00 = cy * cz;
+            float m01 = sycz * sx - cx * sz;
+            float m02 = sycz * cx + sx * sz;
+            float m10 = cy * sz;
+            float m11 = sysz * sx + cx * cz;
+            float m12 = sysz * cx - sx * cz;
+            float m20 = -sy;
+            float m21 = cy * sx;
+            float m22 = cy * cx;
+
+            var colX = new Vector3( m00,  m20,  m10);
+            var colY = new Vector3( m02,  m22,  m12);
+            var colZ = new Vector3(-m01, -m21, -m11);
+
+            float sX = colX.magnitude;
+            float sY = colY.magnitude;
+            float sZ = colZ.magnitude;
+
+            if (sZ > 1e-5f && sY > 1e-5f)
+                t.rotation = Quaternion.LookRotation(-colZ / sZ, colY / sY);
+
+            t.localScale = new Vector3(
+                (sX > 1e-5f ? sX : 1f) * scale,
+                (sY > 1e-5f ? sY : 1f) * scale,
+                (sZ > 1e-5f ? -sZ : -1f) * scale);
+        }
 
         // ── Private ──────────────────────────────────────────────────────────────
 
@@ -317,7 +480,7 @@ namespace OpenFarCry.Level.Data
             desc.AreaId = ParseInt(node.Attributes?["AreaId"]?.Value);
             FlattenObjectChildAttributes(node, desc.Attributes);
 
-            if (type.Equals("Shape", StringComparison.OrdinalIgnoreCase))
+            if (IsTypeWithShapePoints(type))
                 desc.ShapePoints.AddRange(ParseShapePoints(node));
 
             return desc;
@@ -364,6 +527,13 @@ namespace OpenFarCry.Level.Data
             }
             return points.ToArray();
         }
+
+        static bool IsTypeWithShapePoints(string type) =>
+            type.Equals("Shape",        StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("VisArea",      StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("Portal",       StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("OccluderArea", StringComparison.OrdinalIgnoreCase) ||
+            type.Equals("WaterVolume",  StringComparison.OrdinalIgnoreCase);
 
         static void ParseEnvironmentFromMission(XmlDocument doc, FcMissionDesc mission)
         {
