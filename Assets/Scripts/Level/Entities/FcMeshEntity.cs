@@ -17,8 +17,18 @@ namespace OpenFarCry.Level.Entities
         [SerializeField] protected string _virtualPath;
         [SerializeField] protected float _importScale = 0.01f;
         [SerializeField] protected bool _importSkeleton;
+        [SerializeField] protected string _materialOverride;
 
         public string VirtualPath => _virtualPath;
+        public string MaterialOverride => _materialOverride;
+
+        // Runtime-only init: set virtualPath before Start() fires (no SerializedObject).
+        public void Initialize(string virtualPath)
+        {
+            _virtualPath = string.IsNullOrEmpty(virtualPath)
+                ? string.Empty
+                : virtualPath.ToLowerInvariant().Replace('\\', '/');
+        }
 
         protected readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         protected readonly CgfLodImportService _lodService = new CgfLodImportService();
@@ -74,6 +84,15 @@ namespace OpenFarCry.Level.Entities
                 }
 
                 if (ct.IsCancellationRequested) return;
+
+                if (!string.IsNullOrWhiteSpace(_materialOverride))
+                {
+                    var overrideSvc = FcLevelMaterialOverrideService.Current;
+                    if (overrideSvc != null)
+                        await overrideSvc.PreloadOverrideTexturesAsync(_materialOverride, -1, request.LevelScopeId, ct);
+                }
+
+                if (ct.IsCancellationRequested) return;
                 await UniTask.SwitchToMainThread(ct);
                 if (this == null || ct.IsCancellationRequested) return;
                 ApplyLoadedMesh(LoadedMeshArtifact.Completed(result, request.LevelScopeId, sw.Elapsed.TotalMilliseconds));
@@ -124,13 +143,31 @@ namespace OpenFarCry.Level.Entities
             if (result.BuildResult == null || result.Mesh == null) return;
 
             string meshName = Path.GetFileNameWithoutExtension(_virtualPath);
+            string scopeId = ResourceService != null ? ResourceService.LevelScopeId : null;
+
+            Func<Material[], int[], Material[]> materialOverrider = null;
+            if (!string.IsNullOrWhiteSpace(_materialOverride))
+            {
+                var overrideSvc = FcLevelMaterialOverrideService.Current;
+                string overrideName = _materialOverride;
+                if (overrideSvc != null)
+                {
+                    materialOverrider = (mats, submeshIds) =>
+                    {
+                        overrideSvc.TryApplyBrushOverrideToRendererSlots(overrideName, -1, scopeId, mats, submeshIds, out _);
+                        return mats;
+                    };
+                }
+            }
+
             _lastBuildOutput = _goBuilder.Build(new CgfGameObjectBuilder.BuildRequest(
                 result: result.BuildResult,
                 parsedFile: result.ParsedFile,
                 rigDefinition: null,
                 name: meshName,
                 materialService: CgfRuntimeImporter.MaterialService,
-                textureScopeId: ResourceService != null ? ResourceService.LevelScopeId : null));
+                textureScopeId: scopeId,
+                materialOverrider: materialOverrider));
 
             _lastBuildOutput.Root.transform.SetParent(transform, worldPositionStays: false);
 
@@ -144,7 +181,8 @@ namespace OpenFarCry.Level.Entities
             if (lodPaths.Count > 0)
                 _lodService.ConfigureLodGroup(_lastBuildOutput.Root, result.BuildResult.HasSkeleton, _importScale, lodPaths,
                     materialService: CgfRuntimeImporter.MaterialService,
-                    textureScopeId: ResourceService != null ? ResourceService.LevelScopeId : null);
+                    textureScopeId: scopeId,
+                    materialOverrider: materialOverrider);
         }
 
         public override void SetData(FcEntityDesc desc)
@@ -152,6 +190,7 @@ namespace OpenFarCry.Level.Entities
             base.SetData(desc);
             string path = desc.GetModelVirtualPath();
             _virtualPath = string.IsNullOrEmpty(path) ? string.Empty : path.ToLowerInvariant().Replace('\\', '/');
+            _materialOverride = desc.GetMaterialOverride() ?? string.Empty;
         }
 
         protected virtual void OnDestroy()

@@ -115,6 +115,8 @@ MonoBehaviour:
   _entityId: 0
   _layerName: 
   _hiddenInGame: 0
+  _propertyKeys: []
+  _propertyValues: []
   _lightType: 2
   _lightColor: {r: 1, g: 1, b: 1, a: 1}
   _range: 5

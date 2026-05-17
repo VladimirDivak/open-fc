@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using OpenFarCry.Importer.Cgf;
 using UnityEngine;
@@ -10,7 +11,8 @@ namespace OpenFarCry.Level.Services
             GameObject root,
             Renderer lod0Renderer,
             IReadOnlyList<CgfRuntimeImportResult> lodResults,
-            string levelScopeId)
+            string levelScopeId,
+            Func<Material[], int[], Material[]> materialOverrider = null)
         {
             if (root == null || lod0Renderer == null || lodResults == null || lodResults.Count == 0)
                 return;
@@ -28,11 +30,14 @@ namespace OpenFarCry.Level.Services
 
                 lodGo.AddComponent<MeshFilter>().sharedMesh = result.BuildResult.Mesh;
                 var meshRenderer = lodGo.AddComponent<MeshRenderer>();
-                meshRenderer.sharedMaterials = CgfRuntimeImporter.MaterialService.ResolveSubmeshMaterials(
+                var lodMats = CgfRuntimeImporter.MaterialService.ResolveSubmeshMaterials(
                     result.ParsedFile,
                     result.Mesh,
                     result.BuildResult.SubmeshMaterialIds,
                     levelScopeId);
+                meshRenderer.sharedMaterials = materialOverrider != null
+                    ? materialOverrider(lodMats, result.BuildResult.SubmeshMaterialIds) ?? lodMats
+                    : lodMats;
                 renderers.Add(meshRenderer);
             }
 

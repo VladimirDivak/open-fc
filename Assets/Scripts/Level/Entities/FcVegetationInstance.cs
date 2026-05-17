@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Cysharp.Threading.Tasks;
@@ -14,10 +15,19 @@ namespace OpenFarCry.Level.Entities
         [SerializeField] int    _typeIndex;
         [SerializeField] float  _instanceScale = 1f;
         [SerializeField] byte   _brightness    = 255;
+        [SerializeField] string _materialOverride;
 
         public string VirtualPath   => _virtualPath;
         public int    TypeIndex     => _typeIndex;
         public float  InstanceScale => _instanceScale;
+
+        public void Initialize(string virtualPath, int typeIndex, float instanceScale, string materialOverride = null)
+        {
+            _virtualPath      = virtualPath;
+            _typeIndex        = typeIndex;
+            _instanceScale    = instanceScale > 0f ? instanceScale : 1f;
+            _materialOverride = materialOverride ?? string.Empty;
+        }
 
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         CgfRuntimeImportResult              _importResult;
@@ -45,6 +55,21 @@ namespace OpenFarCry.Level.Entities
             _lodResults   = lodResults;
             _releaseImportResultsOnDestroy = releaseImportResultsOnDestroy;
 
+            Func<Material[], int[], Material[]> materialOverrider = null;
+            if (!string.IsNullOrWhiteSpace(_materialOverride))
+            {
+                var overrideSvc = FcLevelMaterialOverrideService.Current;
+                string overrideName = _materialOverride;
+                if (overrideSvc != null)
+                {
+                    materialOverrider = (mats, submeshIds) =>
+                    {
+                        overrideSvc.TryApplyBrushOverrideToRendererSlots(overrideName, -1, levelScopeId, mats, submeshIds, out _);
+                        return mats;
+                    };
+                }
+            }
+
             string meshName = Path.GetFileNameWithoutExtension(_virtualPath);
             var output = _goBuilder.Build(new CgfGameObjectBuilder.BuildRequest(
                 result: result.BuildResult,
@@ -52,7 +77,8 @@ namespace OpenFarCry.Level.Entities
                 rigDefinition: null,
                 name: meshName,
                 materialService: CgfRuntimeImporter.MaterialService,
-                textureScopeId: levelScopeId));
+                textureScopeId: levelScopeId,
+                materialOverrider: materialOverrider));
 
             output.Root.transform.SetParent(transform, worldPositionStays: false);
 
@@ -60,7 +86,8 @@ namespace OpenFarCry.Level.Entities
                 output.Root,
                 output.MeshRenderer,
                 lodResults,
-                levelScopeId);
+                levelScopeId,
+                materialOverrider);
         }
 
         async UniTaskVoid FallbackLoadAsync()
@@ -83,6 +110,15 @@ namespace OpenFarCry.Level.Entities
                 scopeId,
                 lodService: null,
                 ct: ct);
+
+            if (ct.IsCancellationRequested) return;
+
+            if (!string.IsNullOrWhiteSpace(_materialOverride))
+            {
+                var overrideSvc = FcLevelMaterialOverrideService.Current;
+                if (overrideSvc != null)
+                    await overrideSvc.PreloadOverrideTexturesAsync(_materialOverride, -1, scopeId, ct);
+            }
 
             if (ct.IsCancellationRequested) return;
             await UniTask.SwitchToMainThread(ct);

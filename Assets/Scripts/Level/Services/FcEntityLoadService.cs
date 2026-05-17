@@ -415,6 +415,13 @@ namespace OpenFarCry.Level.Services
 
                 _report.RecordEntityCacheResult(artifact.ImportResult?.UsedRuntimeMemoryCache ?? false);
 
+                if (!string.IsNullOrWhiteSpace(entity.MaterialOverride))
+                {
+                    var overrideSvc = FcLevelMaterialOverrideService.Current;
+                    if (overrideSvc != null)
+                        await overrideSvc.PreloadOverrideTexturesAsync(entity.MaterialOverride, -1, scopeId, scopeToken);
+                }
+
                 await UniTask.SwitchToMainThread(scopeToken);
                 if (scopeToken.IsCancellationRequested || entity == null)
                 {

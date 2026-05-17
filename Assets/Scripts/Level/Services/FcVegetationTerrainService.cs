@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer;
 using OpenFarCry.Importer.Cgf;
 using UnityEngine;
@@ -154,31 +155,90 @@ namespace OpenFarCry.Level.Services
         public int TotalCellCount => _totalCellCount;
         public int VisibleCellCount => _visibleCellCount;
         public int VisibleInstanceCount => _visibleInstanceCount;
+
+        // Returns normalized virtual paths of all vegetation types registered in this service.
+        // Used by FcLevelGeometryPreloadPlanner to build preload requests when no FcVegetationInstance objects exist.
+        public IReadOnlyList<string> GetVegetationVirtualPaths()
+        {
+            if (_vegetationTypes == null || _vegetationTypes.Length == 0)
+                return System.Array.Empty<string>();
+
+            var paths = new List<string>(_vegetationTypes.Length);
+            for (int i = 0; i < _vegetationTypes.Length; i++)
+            {
+                var vp = _vegetationTypes[i].VirtualPath;
+                if (!string.IsNullOrWhiteSpace(vp))
+                    paths.Add(vp);
+            }
+            return paths;
+        }
         public int ActiveColliderCount => _activeHostByInstance.Count;
 
         void Start()
         {
+            StartAsync(this.GetCancellationTokenOnDestroy()).Forget();
+        }
+
+        async UniTaskVoid StartAsync(System.Threading.CancellationToken ct)
+        {
             _levelScopeId = ResolveLevelScopeId();
+
+            int typeCount = _vegetationTypes != null ? _vegetationTypes.Length : -1;
+            int instanceCount = _instances != null ? _instances.Length : -1;
+            Debug.Log($"[FcVegetationTerrainService] StartAsync: types={typeCount}, instances={instanceCount}");
+
             if (_vegetationTypes == null || _vegetationTypes.Length == 0)
+            {
+                Debug.LogWarning("[FcVegetationTerrainService] StartAsync: exit — no vegetation types");
                 return;
+            }
             if (_instances == null || _instances.Length == 0)
+            {
+                Debug.LogWarning("[FcVegetationTerrainService] StartAsync: exit — no vegetation instances");
                 return;
+            }
+
+            // Wait only if LoadLevelAsync is actively running (IsLoadInProgress).
+            // If no load in progress (not started or already done), proceed immediately.
+            // If already complete (IsPreloadComplete), BuildRuntimeTypes will find preloaded handles.
+            // If load never called, falls through to direct import fallback below.
+            var levelLoadService = FcLevelLoadService.Current;
+            Debug.Log($"[FcVegetationTerrainService] StartAsync: levelLoadService={(levelLoadService != null ? "found" : "null")}, IsLoadInProgress={levelLoadService?.IsLoadInProgress}, IsPreloadComplete={levelLoadService?.IsPreloadComplete}");
+
+            if (levelLoadService != null && levelLoadService.IsLoadInProgress)
+            {
+                Debug.Log("[FcVegetationTerrainService] StartAsync: waiting for load to complete...");
+                await UniTask.WaitUntil(
+                    () => levelLoadService == null || !levelLoadService.IsLoadInProgress,
+                    cancellationToken: ct);
+                if (ct.IsCancellationRequested)
+                    return;
+                Debug.Log("[FcVegetationTerrainService] StartAsync: wait done, proceeding");
+            }
 
             var lodService = new CgfLodImportService();
             var protoByType = BuildRuntimeTypes(lodService);
+            Debug.Log($"[FcVegetationTerrainService] StartAsync: protoByType={protoByType.Count}, runtimeTypes={_runtimeTypes?.Length ?? -1}");
+
             if (_runtimeTypes == null || _runtimeTypes.Length == 0 || protoByType.Count == 0)
+            {
+                Debug.LogWarning("[FcVegetationTerrainService] StartAsync: exit — BuildRuntimeTypes produced nothing");
                 return;
+            }
 
             ResolveCollisionPolicies();
             BuildRuntimeInstances(protoByType);
             BuildSpatialCells();
             InitializeScratchBuffers();
+            Debug.Log($"[FcVegetationTerrainService] StartAsync: done — positions={_positions?.Length ?? -1}");
         }
 
         void OnEnable()
         {
             _nextColliderUpdateTime = 0f;
         }
+
+        bool _loggedCameraNull;
 
         void Update()
         {
@@ -187,7 +247,15 @@ namespace OpenFarCry.Level.Services
 
             var cam = Camera.main;
             if (cam == null)
+            {
+                if (!_loggedCameraNull)
+                {
+                    _loggedCameraNull = true;
+                    Debug.LogWarning("[FcVegetationTerrainService] Camera.main is null — GPU instancing disabled. Tag your camera as MainCamera.");
+                }
                 return;
+            }
+            _loggedCameraNull = false;
             var camPos = cam.transform.position;
 
             ClearScratchBuckets();

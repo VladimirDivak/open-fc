@@ -98,6 +98,13 @@ namespace OpenFarCry.Level.Services
             {
                 if (TryGetPreloadedHandle(brush, out var preloadedHandle))
                 {
+                    if (!string.IsNullOrWhiteSpace(brush.MaterialOverride) || brush.MaterialId >= 0)
+                    {
+                        var overrideSvc = FcLevelMaterialOverrideService.Current;
+                        if (overrideSvc != null)
+                            await overrideSvc.PreloadOverrideTexturesAsync(brush.MaterialOverride, brush.MaterialId, LevelScopeId, ct);
+                    }
+                    if (ct.IsCancellationRequested) return;
                     await UniTask.SwitchToMainThread(ct);
                     if (brush == null || ct.IsCancellationRequested) return;
                     brush.ApplyLoadResult(
@@ -136,6 +143,15 @@ namespace OpenFarCry.Level.Services
                     _lodService,
                     ct,
                     skipTexturePreload: skipPreload);
+
+                if (ct.IsCancellationRequested) return;
+
+                if (!string.IsNullOrWhiteSpace(brush.MaterialOverride) || brush.MaterialId >= 0)
+                {
+                    var overrideSvc = FcLevelMaterialOverrideService.Current;
+                    if (overrideSvc != null)
+                        await overrideSvc.PreloadOverrideTexturesAsync(brush.MaterialOverride, brush.MaterialId, LevelScopeId, ct);
+                }
 
                 if (ct.IsCancellationRequested) return;
                 await UniTask.SwitchToMainThread(ct);

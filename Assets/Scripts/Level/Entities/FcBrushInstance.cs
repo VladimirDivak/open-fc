@@ -22,6 +22,15 @@ namespace OpenFarCry.Level.Entities
         public string MaterialOverride => _materialOverride;
         public int MaterialId => _materialId;
 
+        // Runtime-only init path: set fields before Start() fires (no SerializedObject).
+        public void Initialize(string virtualPath, bool noPhysics, string materialOverride, int materialId)
+        {
+            _virtualPath = virtualPath;
+            _noPhysics = noPhysics;
+            _materialOverride = materialOverride ?? string.Empty;
+            _materialId = materialId;
+        }
+
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         CgfRuntimeImportResult _importResult;
         IReadOnlyList<CgfRuntimeImportResult> _lodResults;
