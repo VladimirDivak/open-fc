@@ -2,11 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
 
 namespace OpenFarCry.Importer.Cgf
 {
-    public static class CgfParser
+    public static unsafe class CgfParser
     {
         const int FileHeaderSize = 20; // FILE_HEADER with pack(4): char[7] + pad + 3 ints
         const int MaxReasonableEntities = 32768;
@@ -16,153 +20,155 @@ namespace OpenFarCry.Importer.Cgf
             if (data == null || data.Length < FileHeaderSize)
                 throw new InvalidDataException("CGF: file is too small.");
 
-            string signature = ReadSignature(data);
-            if (!signature.StartsWith(CgfConstants.Magic, StringComparison.Ordinal))
-                throw new InvalidDataException($"CGF: bad signature '{signature}', expected '{CgfConstants.Magic}'.");
-
-            int fileType = BitConverter.ToInt32(data, 8);
-            int version = BitConverter.ToInt32(data, 12);
-            int chunkTableOffset = BitConverter.ToInt32(data, 16);
-
-            // Far Cry 1 geometry path uses these values for both CGF and CGA containers.
-            const int FileTypeGeom = unchecked((int)0xFFFF0000);
-            const int FileTypeAnim = unchecked((int)0xFFFF0001);
-            if (fileType != FileTypeGeom && fileType != FileTypeAnim)
-                throw new InvalidDataException($"CGF: unsupported FileType 0x{fileType:X8}.");
-
-            if (version != CgfConstants.FileVersion)
-                throw new InvalidDataException($"CGF: unsupported file version 0x{version:X}, expected 0x{CgfConstants.FileVersion:X}.");
-
-            var chunks = ReadChunkTable(data, chunkTableOffset);
-            var file = new CgfFile
+            fixed (byte* ptr = data)
             {
-                FileType = fileType,
-                Version = version
-            };
+                var r = new BinaryBufferReader(ptr, data.Length);
 
-            foreach (var h in chunks)
-            {
-                try
+                string signature = ReadSignature(ptr, data.Length);
+                if (!signature.StartsWith(CgfConstants.Magic, StringComparison.Ordinal))
+                    throw new InvalidDataException($"CGF: bad signature '{signature}', expected '{CgfConstants.Magic}'.");
+
+                r.Offset = 8;
+                int fileType = r.ReadInt32();
+                int version = r.ReadInt32();
+                int chunkTableOffset = r.ReadInt32();
+
+                // Far Cry 1 geometry path uses these values for both CGF and CGA containers.
+                const int FileTypeGeom = unchecked((int)0xFFFF0000);
+                const int FileTypeAnim = unchecked((int)0xFFFF0001);
+                if (fileType != FileTypeGeom && fileType != FileTypeAnim)
+                    throw new InvalidDataException($"CGF: unsupported FileType 0x{fileType:X8}.");
+
+                if (version != CgfConstants.FileVersion)
+                    throw new InvalidDataException($"CGF: unsupported file version 0x{version:X}, expected 0x{CgfConstants.FileVersion:X}.");
+
+                var chunks = ReadChunkTable(ptr, data.Length, chunkTableOffset);
+                var file = new CgfFile
                 {
-                    switch (h.ChunkType)
+                    FileType = fileType,
+                    Version = version
+                };
+
+                foreach (var h in chunks)
+                {
+                    try
                     {
-                        case CgfConstants.ChunkBoneNameList:
-                            if (file.BoneNames == null)
-                                file.BoneNames = ReadBoneNameList(data, h);
-                            break;
+                        switch (h.ChunkType)
+                        {
+                            case CgfConstants.ChunkBoneNameList:
+                                if (file.BoneNames == null)
+                                    file.BoneNames = ReadBoneNameList(ptr, data.Length, h);
+                                break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidDataException(
+                            $"Error in chunk type=0x{h.ChunkType:X} ver=0x{h.ChunkVersion:X} offset=0x{h.FileOffset:X}: {ex.Message}", ex);
                     }
                 }
-                catch (Exception ex)
-                {
-                    throw new InvalidDataException(
-                        $"Error in chunk type=0x{h.ChunkType:X} ver=0x{h.ChunkVersion:X} offset=0x{h.FileOffset:X}: {ex.Message}", ex);
-                }
-            }
 
-            int boneCount = file.BoneNames?.Names.Length ?? 0;
-            var unsupportedChunks = new Dictionary<uint, List<int>>();
-            foreach (var h in chunks)
-            {
-                try
+                int boneCount = file.BoneNames?.Names.Length ?? 0;
+                var unsupportedChunks = new Dictionary<uint, List<int>>();
+                foreach (var h in chunks)
                 {
-                    switch (h.ChunkType)
+                    try
                     {
-                        case CgfConstants.ChunkMesh:
+                        switch (h.ChunkType)
                         {
-                            var mesh = ReadMesh(data, h);
-                            file.MeshChunks.Add(mesh);
-                            file.MeshByChunkID[mesh.ChunkID] = mesh;
-                            break;
+                            case CgfConstants.ChunkMesh:
+                            {
+                                var mesh = ReadMesh(ptr, data.Length, h);
+                                file.MeshChunks.Add(mesh);
+                                file.MeshByChunkID[mesh.ChunkID] = mesh;
+                                break;
+                            }
+                            case CgfConstants.ChunkNode:
+                            {
+                                var node = ReadNode(ptr, data.Length, h);
+                                file.NodeChunks.Add(node);
+                                file.NodeByChunkID[node.ChunkID] = node;
+                                break;
+                            }
+                            case CgfConstants.ChunkBoneAnim:
+                                if (file.BoneAnim == null)
+                                    file.BoneAnim = ReadBoneAnim(ptr, data.Length, h);
+                                break;
+                            case CgfConstants.ChunkBoneInitPos:
+                            {
+                                var boneInit = ReadBoneInitPos(ptr, data.Length, h, boneCount);
+                                file.BoneInitPosByMeshChunkID[boneInit.MeshChunkID] = boneInit;
+                                break;
+                            }
+                            case CgfConstants.ChunkBoneMesh:
+                            {
+                                var boneMesh = ReadBoneMesh(ptr, data.Length, h);
+                                file.BoneMeshChunks.Add(boneMesh);
+                                file.BoneMeshByChunkID[boneMesh.ChunkID] = boneMesh;
+                                break;
+                            }
+                            case CgfConstants.ChunkMtl:
+                            {
+                                var mtl = ReadMaterialChunk(ptr, data.Length, h);
+                                mtl.TableIndex = file.MaterialChunks.Count;
+                                file.MaterialChunks.Add(mtl);
+                                file.MaterialByChunkID[mtl.ChunkID] = mtl;
+                                break;
+                            }
+                            case CgfConstants.ChunkBoneLightBinding:
+                            case CgfConstants.ChunkMeshMorphTarget:
+                                RecordUnsupportedChunk(unsupportedChunks, h);
+                                break;
                         }
-                        case CgfConstants.ChunkNode:
-                        {
-                            var node = ReadNode(data, h);
-                            file.NodeChunks.Add(node);
-                            file.NodeByChunkID[node.ChunkID] = node;
-                            break;
-                        }
-                        case CgfConstants.ChunkBoneAnim:
-                            if (file.BoneAnim == null)
-                                file.BoneAnim = ReadBoneAnim(data, h);
-                            break;
-                        case CgfConstants.ChunkBoneInitPos:
-                        {
-                            var boneInit = ReadBoneInitPos(data, h, boneCount);
-                            file.BoneInitPosByMeshChunkID[boneInit.MeshChunkID] = boneInit;
-                            break;
-                        }
-                        case CgfConstants.ChunkBoneMesh:
-                        {
-                            var boneMesh = ReadBoneMesh(data, h);
-                            file.BoneMeshChunks.Add(boneMesh);
-                            file.BoneMeshByChunkID[boneMesh.ChunkID] = boneMesh;
-                            break;
-                        }
-                        case CgfConstants.ChunkMtl:
-                        {
-                            var mtl = ReadMaterialChunk(data, h);
-                            mtl.TableIndex = file.MaterialChunks.Count;
-                            file.MaterialChunks.Add(mtl);
-                            file.MaterialByChunkID[mtl.ChunkID] = mtl;
-                            break;
-                        }
-                        case CgfConstants.ChunkBoneLightBinding:
-                        case CgfConstants.ChunkMeshMorphTarget:
-                            RecordUnsupportedChunk(unsupportedChunks, h);
-                            break;
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidDataException(
+                            $"Error in chunk type=0x{h.ChunkType:X} ver=0x{h.ChunkVersion:X} offset=0x{h.FileOffset:X}: {ex.Message}", ex);
                     }
                 }
-                catch (Exception ex)
-                {
-                    throw new InvalidDataException(
-                        $"Error in chunk type=0x{h.ChunkType:X} ver=0x{h.ChunkVersion:X} offset=0x{h.FileOffset:X}: {ex.Message}", ex);
-                }
+
+                LogUnsupportedChunks(unsupportedChunks);
+                SelectPrimaryMesh(file);
+
+                foreach (var mtl in file.MaterialChunks)
+                    if (mtl.MtlType != CgfMtlType.Multi)
+                        file.LeafMaterials.Add(mtl);
+                BuildMaterialHierarchy(file);
+
+                return file;
             }
-
-            LogUnsupportedChunks(unsupportedChunks);
-            SelectPrimaryMesh(file);
-
-            foreach (var mtl in file.MaterialChunks)
-                if (mtl.MtlType != CgfMtlType.Multi)
-                    file.LeafMaterials.Add(mtl);
-            BuildMaterialHierarchy(file);
-
-            return file;
         }
 
-        static string ReadSignature(byte[] data)
+        static string ReadSignature(byte* data, int length)
         {
             // FILE_HEADER.Signature is char[7], usually "CryTek\0".
-            var sigRaw = Encoding.ASCII.GetString(data, 0, 7);
+            byte[] sigBytes = new byte[7];
+            for (int i = 0; i < 7; i++) sigBytes[i] = data[i];
+            var sigRaw = Encoding.ASCII.GetString(sigBytes);
             int nullPos = sigRaw.IndexOf('\0');
             return nullPos >= 0 ? sigRaw.Substring(0, nullPos) : sigRaw;
         }
 
-        static ChunkHeader[] ReadChunkTable(byte[] data, int tableOffset)
+        static ChunkHeader[] ReadChunkTable(byte* data, int length, int tableOffset)
         {
-            if (tableOffset <= FileHeaderSize || tableOffset > data.Length - 4)
+            if (tableOffset <= FileHeaderSize || tableOffset > length - 4)
                 throw new InvalidDataException($"CGF: invalid ChunkTableOffset {tableOffset}.");
 
-            uint countU = BitConverter.ToUInt32(data, tableOffset);
+            uint countU = *(uint*)(data + tableOffset);
             if (countU > int.MaxValue)
                 throw new InvalidDataException("CGF: chunk count is too large.");
             int count = (int)countU;
 
             long tableBytes = 4L + (long)count * CgfConstants.ChunkHeaderSize;
-            if (tableOffset + tableBytes > data.Length)
+            if (tableOffset + tableBytes > length)
                 throw new InvalidDataException("CGF: chunk table exceeds file bounds.");
 
             var headers = new ChunkHeader[count];
             int p = tableOffset + 4;
             for (int i = 0; i < count; i++)
             {
-                headers[i] = new ChunkHeader
-                {
-                    ChunkType = BitConverter.ToUInt32(data, p + 0),
-                    ChunkVersion = BitConverter.ToInt32(data, p + 4),
-                    FileOffset = BitConverter.ToInt32(data, p + 8),
-                    ChunkID = BitConverter.ToInt32(data, p + 12),
-                };
+                headers[i] = *(ChunkHeader*)(data + p);
                 p += CgfConstants.ChunkHeaderSize;
             }
 
@@ -193,13 +199,13 @@ namespace OpenFarCry.Importer.Cgf
             return headers;
         }
 
-        static CgfMeshChunk ReadMesh(byte[] data, ChunkHeader h)
+        static CgfMeshChunk ReadMesh(byte* data, int length, ChunkHeader h)
         {
             if (h.ChunkVersion != CgfConstants.FileVersion)
                 throw new InvalidDataException($"Mesh: unsupported chunk version 0x{h.ChunkVersion:X}.");
 
-            using var r = OpenChunkReader(data, h);
-            SkipEmbeddedChunkHeader(r);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
+            r.Skip(CgfConstants.ChunkHeaderSize);
 
             var mesh = new CgfMeshChunk
             {
@@ -209,7 +215,7 @@ namespace OpenFarCry.Importer.Cgf
                 HasVertexColor = r.ReadByte() != 0
             };
 
-            Align4(r);
+            r.Align(4);
 
             int nVerts = r.ReadInt32();
             int nTVerts = r.ReadInt32();
@@ -220,68 +226,71 @@ namespace OpenFarCry.Importer.Cgf
             ValidateCount(nTVerts, "Mesh.nTVerts");
             ValidateCount(nFaces, "Mesh.nFaces");
 
-            mesh.Vertices = new CryVertex[nVerts];
-            for (int i = 0; i < nVerts; i++)
+            mesh.Vertices = new NativeArray<CryVertex>(nVerts, Allocator.Persistent);
+            if (nVerts > 0)
             {
-                mesh.Vertices[i] = new CryVertex
-                {
-                    PX = r.ReadSingle(), PY = r.ReadSingle(), PZ = r.ReadSingle(),
-                    NX = r.ReadSingle(), NY = r.ReadSingle(), NZ = r.ReadSingle(),
-                };
+                UnsafeUtility.MemCpy(mesh.Vertices.GetUnsafePtr(), r.ReadBytesPtr(nVerts * sizeof(CryVertex)), nVerts * sizeof(CryVertex));
             }
 
-            mesh.Faces = new CryFace[nFaces];
-            for (int i = 0; i < nFaces; i++)
+            mesh.Faces = new NativeArray<CryFace>(nFaces, Allocator.Persistent);
+            if (nFaces > 0)
             {
-                mesh.Faces[i] = new CryFace
-                {
-                    V0 = r.ReadInt32(), V1 = r.ReadInt32(), V2 = r.ReadInt32(),
-                    MatID = r.ReadInt32(),
-                    SmGroup = r.ReadInt32(),
-                };
+                UnsafeUtility.MemCpy(mesh.Faces.GetUnsafePtr(), r.ReadBytesPtr(nFaces * sizeof(CryFace)), nFaces * sizeof(CryFace));
             }
 
-            mesh.UVs = new CryUV[nTVerts];
-            for (int i = 0; i < nTVerts; i++)
-                mesh.UVs[i] = new CryUV { U = r.ReadSingle(), V = r.ReadSingle() };
+            mesh.UVs = new NativeArray<CryUV>(nTVerts, Allocator.Persistent);
+            if (nTVerts > 0)
+            {
+                UnsafeUtility.MemCpy(mesh.UVs.GetUnsafePtr(), r.ReadBytesPtr(nTVerts * sizeof(CryUV)), nTVerts * sizeof(CryUV));
+            }
 
             if (nTVerts > 0)
             {
-                mesh.TexFaces = new CryTexFace[nFaces];
-                for (int i = 0; i < nFaces; i++)
+                mesh.TexFaces = new NativeArray<CryTexFace>(nFaces, Allocator.Persistent);
+                if (nFaces > 0)
                 {
-                    mesh.TexFaces[i] = new CryTexFace
-                    {
-                        T0 = r.ReadInt32(), T1 = r.ReadInt32(), T2 = r.ReadInt32()
-                    };
+                    UnsafeUtility.MemCpy(mesh.TexFaces.GetUnsafePtr(), r.ReadBytesPtr(nFaces * sizeof(CryTexFace)), nFaces * sizeof(CryTexFace));
                 }
             }
             else
             {
-                mesh.TexFaces = Array.Empty<CryTexFace>();
+                mesh.TexFaces = new NativeArray<CryTexFace>(0, Allocator.Persistent);
             }
 
             if (mesh.HasBoneInfo)
             {
-                mesh.BoneLinks = new CryLink[nVerts][];
+                mesh.BoneLinkOffsets = new NativeArray<int>(nVerts, Allocator.Persistent);
+                mesh.BoneLinkCounts  = new NativeArray<int>(nVerts, Allocator.Persistent);
+
+                // First pass: count links to allocate flattened buffer
+                int totalLinks = 0;
+                int savedOffset = r.Offset;
                 for (int i = 0; i < nVerts; i++)
                 {
                     uint numLinksU = r.ReadUInt32();
                     if (numLinksU > 32u)
                         throw new InvalidDataException($"Mesh: invalid number of links ({numLinksU}) for vertex {i}.");
-                    int numLinks = (int)numLinksU;
-                    mesh.BoneLinks[i] = new CryLink[numLinks];
+                    totalLinks += (int)numLinksU;
+                    r.Skip((int)numLinksU * sizeof(CryLink));
+                }
 
-                    for (int j = 0; j < numLinks; j++)
+                mesh.BoneLinks = new NativeArray<CryLink>(totalLinks, Allocator.Persistent);
+                r.Offset = savedOffset;
+
+                int currentLink = 0;
+                for (int i = 0; i < nVerts; i++)
+                {
+                    int numLinks = (int)r.ReadUInt32();
+                    mesh.BoneLinkCounts[i] = numLinks;
+                    mesh.BoneLinkOffsets[i] = currentLink;
+
+                    if (numLinks > 0)
                     {
-                        mesh.BoneLinks[i][j] = new CryLink
-                        {
-                            BoneID = r.ReadInt32(),
-                            OX = r.ReadSingle(),
-                            OY = r.ReadSingle(),
-                            OZ = r.ReadSingle(),
-                            Blending = r.ReadSingle(),
-                        };
+                        UnsafeUtility.MemCpy(
+                            (CryLink*)mesh.BoneLinks.GetUnsafePtr() + currentLink,
+                            r.ReadBytesPtr(numLinks * sizeof(CryLink)),
+                            numLinks * sizeof(CryLink));
+                        currentLink += numLinks;
                     }
                 }
             }
@@ -289,25 +298,24 @@ namespace OpenFarCry.Importer.Cgf
             // CryIRGB is 3 bytes per vertex.
             if (mesh.HasVertexColor)
             {
-                int bytes = checked(nVerts * 3);
-                ReadBytesExact(r, bytes);
+                r.Skip(nVerts * 3);
             }
 
             return mesh;
         }
 
-        static CgfNodeChunk ReadNode(byte[] data, ChunkHeader h)
+        static CgfNodeChunk ReadNode(byte* data, int length, ChunkHeader h)
         {
             if (h.ChunkVersion != 0x0823)
                 throw new InvalidDataException($"Node: unsupported chunk version 0x{h.ChunkVersion:X}.");
 
-            using var r = OpenChunkReader(data, h);
-            SkipEmbeddedChunkHeader(r);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
+            r.Skip(CgfConstants.ChunkHeaderSize);
 
             var node = new CgfNodeChunk
             {
                 ChunkID = h.ChunkID,
-                Name = ReadFixedString(r, 64),
+                Name = ReadFixedString(ref r, 64),
                 ObjectID = r.ReadInt32(),
                 ParentID = r.ReadInt32(),
             };
@@ -319,12 +327,12 @@ namespace OpenFarCry.Importer.Cgf
             _ = r.ReadByte(); // IsGroupHead
             _ = r.ReadByte(); // IsGroupMember
 
-            Align4(r);
+            r.Align(4);
 
-            node.Transform = ReadMatrix44(r);
-            node.Pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-            node.Rot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-            node.Scale = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+            node.Transform = r.ReadMatrix44();
+            node.Pos = r.ReadVector3();
+            node.Rot = r.ReadQuaternion();
+            node.Scale = r.ReadVector3();
 
             _ = r.ReadInt32(); // pos_cont_id
             _ = r.ReadInt32(); // rot_cont_id
@@ -335,7 +343,7 @@ namespace OpenFarCry.Importer.Cgf
                 throw new InvalidDataException($"Node: invalid property length {propLen}.");
 
             node.Properties = propLen > 0
-                ? Encoding.ASCII.GetString(ReadBytesExact(r, propLen))
+                ? Encoding.ASCII.GetString(ReadBytesExact(ref r, propLen))
                 : string.Empty;
 
             node.ChildrenIDs = new int[nChildren];
@@ -345,13 +353,13 @@ namespace OpenFarCry.Importer.Cgf
             return node;
         }
 
-        static CgfBoneAnimChunk ReadBoneAnim(byte[] data, ChunkHeader h)
+        static CgfBoneAnimChunk ReadBoneAnim(byte* data, int length, ChunkHeader h)
         {
             if (h.ChunkVersion != 0x0290)
                 throw new InvalidDataException($"BoneAnim: unsupported chunk version 0x{h.ChunkVersion:X}.");
 
-            using var r = OpenChunkReader(data, h);
-            SkipEmbeddedChunkHeader(r);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
+            r.Skip(CgfConstants.ChunkHeaderSize);
 
             int boneCount = r.ReadInt32();
             ValidateCount(boneCount, "BoneAnim.nBones");
@@ -370,7 +378,6 @@ namespace OpenFarCry.Importer.Cgf
             if (boneEntitySize < BoneEntityHeadBytes)
                 throw new InvalidDataException($"BoneAnim: invalid BONE_ENTITY size {boneEntitySize}.");
             int boneEntityTailBytes = boneEntitySize - BoneEntityHeadBytes;
-            Debug.Log($"[CgfImporter] BoneAnim chunk {h.ChunkID}: nBones={boneCount}, BONE_ENTITY size={boneEntitySize} bytes.");
 
             for (int i = 0; i < boneCount; i++)
             {
@@ -389,7 +396,7 @@ namespace OpenFarCry.Importer.Cgf
 
                 if (boneEntityTailBytes > 0)
                 {
-                    var tail = ReadBytesExact(r, boneEntityTailBytes);
+                    var tail = ReadBytesExact(ref r, boneEntityTailBytes);
                     ParseBoneEntityTail(tail, ref entity);
                 }
 
@@ -403,11 +410,9 @@ namespace OpenFarCry.Importer.Cgf
             };
         }
 
-        static CgfBoneMeshChunk ReadBoneMesh(byte[] data, ChunkHeader h)
+        static CgfBoneMeshChunk ReadBoneMesh(byte* data, int length, ChunkHeader h)
         {
-            // BoneMesh has the same chunk layout as Mesh (MESH_CHUNK_DESC_0744),
-            // but it is used for limb/collision geometry.
-            var mesh = ReadMesh(data, h);
+            var mesh = ReadMesh(data, length, h);
             return new CgfBoneMeshChunk
             {
                 ChunkID = h.ChunkID,
@@ -420,60 +425,62 @@ namespace OpenFarCry.Importer.Cgf
             if (tailBytes == null || tailBytes.Length == 0)
                 return;
 
-            using var ms = new MemoryStream(tailBytes, writable: false);
-            using var r = new BinaryReader(ms, Encoding.ASCII, leaveOpen: false);
-
-            // BONE_ENTITY tail in FC 1:
-            // prop[32], BONE_PHYSICS_COMP { int nPhysGeom, int flags, ... }.
-            if (ms.Length >= 32)
+            fixed (byte* ptr = tailBytes)
             {
-                entity.Properties = ReadFixedString(r, 32);
+                var r = new BinaryBufferReader(ptr, tailBytes.Length);
+
+                // BONE_ENTITY tail in FC 1:
+                // prop[32], BONE_PHYSICS_COMP { int nPhysGeom, int flags, ... }.
+                if (tailBytes.Length >= 32)
+                {
+                    entity.Properties = ReadFixedString(ref r, 32);
+                }
+                else
+                {
+                    entity.Properties = string.Empty;
+                    return;
+                }
+
+                if (tailBytes.Length - r.Offset < 8)
+                    return;
+
+                var phys = new CgfBonePhysics
+                {
+                    PhysGeomChunkID = r.ReadInt32(),
+                    Flags = r.ReadInt32(),
+                    FrameMatrix = Matrix4x4.identity
+                };
+
+                if (tailBytes.Length - r.Offset >= 96)
+                {
+                    phys.MinAngles = r.ReadVector3();
+                    phys.MaxAngles = r.ReadVector3();
+                    phys.SpringAngle = r.ReadVector3();
+                    phys.SpringTension = r.ReadVector3();
+                    phys.Damping = r.ReadVector3();
+                    phys.FrameMatrix = ReadMatrix33(ref r);
+                }
+
+                entity.Physics = phys;
             }
-            else
-            {
-                entity.Properties = string.Empty;
-                return;
-            }
-
-            if (ms.Length - ms.Position < 8)
-                return;
-
-            var phys = new CgfBonePhysics
-            {
-                PhysGeomChunkID = r.ReadInt32(),
-                Flags = r.ReadInt32(),
-                FrameMatrix = Matrix4x4.identity
-            };
-
-            if (ms.Length - ms.Position >= 96)
-            {
-                phys.MinAngles = ReadVector3(r);
-                phys.MaxAngles = ReadVector3(r);
-                phys.SpringAngle = ReadVector3(r);
-                phys.SpringTension = ReadVector3(r);
-                phys.Damping = ReadVector3(r);
-                phys.FrameMatrix = ReadMatrix33(r);
-            }
-
-            entity.Physics = phys;
         }
 
-        static CgfBoneNameListChunk ReadBoneNameList(byte[] data, ChunkHeader h)
+        static CgfBoneNameListChunk ReadBoneNameList(byte* data, int length, ChunkHeader h)
         {
-            using var r = OpenChunkReader(data, h);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
             var names = new List<string>();
 
             switch (h.ChunkVersion)
             {
                 case 0x0744:
                 {
-                    SkipEmbeddedChunkHeader(r);
+                    r.Skip(CgfConstants.ChunkHeaderSize);
                     int nEntities = r.ReadInt32();
                     ValidateCount(nEntities, "BoneNameList.nEntities");
 
                     names.Capacity = nEntities;
                     for (int i = 0; i < nEntities; i++)
-                        names.Add(ReadFixedString(r, CgfConstants.BoneNameEntitySize0744));
+                        names.Add(ReadFixedString(ref r, CgfConstants.BoneNameEntitySize0744));
                     break;
                 }
 
@@ -484,7 +491,7 @@ namespace OpenFarCry.Importer.Cgf
 
                     names.Capacity = nEntities;
                     for (int i = 0; i < nEntities; i++)
-                        names.Add(ReadCString(r));
+                        names.Add(ReadCString(ref r));
                     break;
                 }
 
@@ -495,12 +502,12 @@ namespace OpenFarCry.Importer.Cgf
             return new CgfBoneNameListChunk { Names = names.ToArray() };
         }
 
-        static CgfBoneInitPosChunk ReadBoneInitPos(byte[] data, ChunkHeader h, int fallbackBoneCount)
+        static CgfBoneInitPosChunk ReadBoneInitPos(byte* data, int length, ChunkHeader h, int fallbackBoneCount)
         {
             if (h.ChunkVersion != 0x0001)
                 throw new InvalidDataException($"BoneInitialPos: unsupported chunk version 0x{h.ChunkVersion:X}.");
 
-            using var r = OpenChunkReader(data, h);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
 
             uint meshChunkIdU = r.ReadUInt32();
             uint numBonesU = r.ReadUInt32();
@@ -513,7 +520,7 @@ namespace OpenFarCry.Importer.Cgf
 
             for (int i = 0; i < numBones; i++)
             {
-                var m = ReadMatrix43(r);
+                var m = ReadMatrix43(ref r);
                 if (i < boneCount)
                     matrices[i] = m;
             }
@@ -525,16 +532,11 @@ namespace OpenFarCry.Importer.Cgf
             };
         }
 
-        // Parses MTL_CHUNK_DESC_0744 / 0745 / 0746 (packed structs, no alignment padding).
-        // TextureMap sizes: 0x0744 = 92 bytes (name[32]+60), 0x0745 = 108 bytes (name[32]+76),
-        // 0x0746 = 236 bytes (name[128]+108). TextureMap3 has 1 byte of compiler padding between
-        // its 4 bool fields (ending at struct offset 167) and int nthFrame (4-byte aligned → offset 168).
-        // With #pragma pack(push, 4) from CryHeaders.h, this padding is present.
         // Texture order in 0x0745/0746: a, d, s, o, b, g, c/fl, rl, subsurf, det.
-        static CgfMaterialChunk ReadMaterialChunk(byte[] data, ChunkHeader h)
+        static CgfMaterialChunk ReadMaterialChunk(byte* data, int length, ChunkHeader h)
         {
-            using var r = OpenChunkReader(data, h);
-            SkipEmbeddedChunkHeader(r);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
+            r.Skip(CgfConstants.ChunkHeaderSize);
 
             var chunk = new CgfMaterialChunk
             {
@@ -545,9 +547,9 @@ namespace OpenFarCry.Importer.Cgf
 
             if (h.ChunkVersion == 0x0746)
             {
-                chunk.Name       = ReadFixedString(r, 64);
+                chunk.Name       = ReadFixedString(ref r, 64);
                 chunk.ShaderName = ExtractShaderName(chunk.Name);
-                r.ReadBytes(60);                          // Reserved[60]
+                r.Skip(60);                          // Reserved[60]
                 chunk.AlphaTest  = r.ReadSingle();
                 chunk.MtlType    = (CgfMtlType)r.ReadInt32();
                 if (chunk.MtlType == CgfMtlType.Multi)
@@ -555,32 +557,32 @@ namespace OpenFarCry.Importer.Cgf
                     chunk.ChildCount = r.ReadInt32();
                     return chunk;
                 }
-                chunk.DiffuseColor  = ReadCryIRGB(r);
-                chunk.SpecularColor = ReadCryIRGB(r);     // col_s[3]
-                r.ReadBytes(3);                            // col_a[3]
-                r.ReadBytes(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
+                chunk.DiffuseColor  = ReadCryIRGB(ref r);
+                chunk.SpecularColor = ReadCryIRGB(ref r);     // col_s[3]
+                r.Skip(3);                            // col_a[3]
+                r.Skip(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
                 chunk.SpecLevel     = r.ReadSingle();
                 chunk.SpecShininess = r.ReadSingle();
                 r.ReadSingle();                            // selfIllum
                 chunk.Opacity = r.ReadSingle();
                 // TextureMap3 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), tex_b(4), tex_g(5), ...
-                r.ReadBytes(236);                          // skip tex_a (full 236 bytes)
-                chunk.DiffuseTextureName  = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(108);                          // skip rest of tex_d TextureMap3
-                chunk.SpecularTextureName = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(108);                          // skip rest of tex_s TextureMap3
-                chunk.OpacityTextureName  = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(108);                          // skip rest of tex_o TextureMap3
-                chunk.NormalTextureName   = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(108);                          // skip rest of tex_b TextureMap3
-                chunk.GlossTextureName    = NormalizeTextureName(ReadFixedString(r, 128));
-                r.ReadBytes(108);                          // skip rest of tex_g TextureMap3
-                r.ReadBytes(4 * 236);                      // skip tex_fl, tex_rl, tex_subsurf, tex_det
+                r.Skip(236);                          // skip tex_a (full 236 bytes)
+                chunk.DiffuseTextureName  = NormalizeTextureName(ReadFixedString(ref r, 128));
+                r.Skip(108);                          // skip rest of tex_d TextureMap3
+                chunk.SpecularTextureName = NormalizeTextureName(ReadFixedString(ref r, 128));
+                r.Skip(108);                          // skip rest of tex_s TextureMap3
+                chunk.OpacityTextureName  = NormalizeTextureName(ReadFixedString(ref r, 128));
+                r.Skip(108);                          // skip rest of tex_o TextureMap3
+                chunk.NormalTextureName   = NormalizeTextureName(ReadFixedString(ref r, 128));
+                r.Skip(108);                          // skip rest of tex_b TextureMap3
+                chunk.GlossTextureName    = NormalizeTextureName(ReadFixedString(ref r, 128));
+                r.Skip(108);                          // skip rest of tex_g TextureMap3
+                r.Skip(4 * 236);                      // skip tex_fl, tex_rl, tex_subsurf, tex_det
                 chunk.Flags = (CgfMtlFlags)r.ReadInt32();
             }
             else if (h.ChunkVersion == 0x0745)
             {
-                chunk.Name       = ReadFixedString(r, 64);
+                chunk.Name       = ReadFixedString(ref r, 64);
                 chunk.ShaderName = ExtractShaderName(chunk.Name);
                 chunk.MtlType    = (CgfMtlType)r.ReadInt32();
                 if (chunk.MtlType == CgfMtlType.Multi)
@@ -588,32 +590,32 @@ namespace OpenFarCry.Importer.Cgf
                     chunk.ChildCount = r.ReadInt32();
                     return chunk;
                 }
-                chunk.DiffuseColor  = ReadCryIRGB(r);
-                chunk.SpecularColor = ReadCryIRGB(r);     // col_s[3]
-                r.ReadBytes(3);                            // col_a[3]
-                r.ReadBytes(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
+                chunk.DiffuseColor  = ReadCryIRGB(ref r);
+                chunk.SpecularColor = ReadCryIRGB(ref r);     // col_s[3]
+                r.Skip(3);                            // col_a[3]
+                r.Skip(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
                 chunk.SpecLevel     = r.ReadSingle();
                 chunk.SpecShininess = r.ReadSingle();
                 r.ReadSingle();                            // selfIllum
                 chunk.Opacity = r.ReadSingle();
                 // TextureMap2 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), tex_b(4), tex_g(5), ...
-                r.ReadBytes(108);                          // skip tex_a
-                chunk.DiffuseTextureName  = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                           // skip rest of tex_d TextureMap2
-                chunk.SpecularTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                           // skip rest of tex_s TextureMap2
-                chunk.OpacityTextureName  = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                           // skip rest of tex_o TextureMap2
-                chunk.NormalTextureName   = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                           // skip rest of tex_b TextureMap2
-                chunk.GlossTextureName    = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(76);                           // skip rest of tex_g TextureMap2
-                r.ReadBytes(4 * 108);                      // skip tex_fl, tex_rl, tex_subsurf, tex_det
+                r.Skip(108);                          // skip tex_a
+                chunk.DiffuseTextureName  = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(76);                           // skip rest of tex_d TextureMap2
+                chunk.SpecularTextureName = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(76);                           // skip rest of tex_s TextureMap2
+                chunk.OpacityTextureName  = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(76);                           // skip rest of tex_o TextureMap2
+                chunk.NormalTextureName   = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(76);                           // skip rest of tex_b TextureMap2
+                chunk.GlossTextureName    = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(76);                           // skip rest of tex_g TextureMap2
+                r.Skip(4 * 108);                      // skip tex_fl, tex_rl, tex_subsurf, tex_det
                 chunk.Flags = (CgfMtlFlags)r.ReadInt32();
             }
             else if (h.ChunkVersion == 0x0744)
             {
-                chunk.Name       = ReadFixedString(r, 64);
+                chunk.Name       = ReadFixedString(ref r, 64);
                 chunk.ShaderName = ExtractShaderName(chunk.Name);
                 chunk.MtlType    = (CgfMtlType)r.ReadInt32();
                 if (chunk.MtlType == CgfMtlType.Multi)
@@ -621,23 +623,23 @@ namespace OpenFarCry.Importer.Cgf
                     chunk.ChildCount = r.ReadInt32();
                     return chunk;
                 }
-                chunk.DiffuseColor  = ReadCryIRGB(r);
-                chunk.SpecularColor = ReadCryIRGB(r);     // col_s[3]
-                r.ReadBytes(3);                            // col_a[3]
+                chunk.DiffuseColor  = ReadCryIRGB(ref r);
+                chunk.SpecularColor = ReadCryIRGB(ref r);     // col_s[3]
+                r.Skip(3);                            // col_a[3]
                 // TextureMap order: tex_d(0), tex_o(1), tex_b(2); each 92 bytes (name[32]+60)
-                chunk.DiffuseTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(60);                           // skip rest of tex_d TextureMap
-                chunk.OpacityTextureName = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(60);                           // skip rest of tex_o TextureMap
-                chunk.NormalTextureName  = NormalizeTextureName(ReadFixedString(r, 32));
-                r.ReadBytes(60);                           // skip rest of tex_b TextureMap
+                chunk.DiffuseTextureName = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(60);                           // skip rest of tex_d TextureMap
+                chunk.OpacityTextureName = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(60);                           // skip rest of tex_o TextureMap
+                chunk.NormalTextureName  = NormalizeTextureName(ReadFixedString(ref r, 32));
+                r.Skip(60);                           // skip rest of tex_b TextureMap
             }
             else
             {
                 // Unknown version — try to read at least the name.
                 if (h.SizeBytes > CgfConstants.ChunkHeaderSize + 64)
                 {
-                    chunk.Name       = ReadFixedString(r, 64);
+                    chunk.Name       = ReadFixedString(ref r, 64);
                     chunk.ShaderName = ExtractShaderName(chunk.Name);
                 }
                 Debug.LogWarning($"[CgfImporter] MTL chunk {h.ChunkID}: unknown version 0x{h.ChunkVersion:X}, material name only.");
@@ -646,9 +648,6 @@ namespace OpenFarCry.Importer.Cgf
             return chunk;
         }
 
-        // Extracts the shader id from a material name like "cncrwall(TemplBumpDiffuse)/mat_concrete".
-        // Returns lowercase shader name, e.g. "templbumpdiffuse". Falls back to the full
-        // name-before-slash when no parentheses are present (handles bare names like "nodraw").
         static string ExtractShaderName(string mtlName)
         {
             if (string.IsNullOrEmpty(mtlName))
@@ -660,14 +659,6 @@ namespace OpenFarCry.Importer.Cgf
             int slash = mtlName.IndexOf('/');
             string raw = slash > 0 ? mtlName.Substring(0, slash) : mtlName;
             return raw.Trim().ToLowerInvariant();
-        }
-
-        static Color32 ReadCryIRGB(BinaryReader r)
-        {
-            byte red   = r.ReadByte();
-            byte green = r.ReadByte();
-            byte blue  = r.ReadByte();
-            return new Color32(red, green, blue, 255);
         }
 
         static string NormalizeTextureName(string raw)
@@ -745,8 +736,6 @@ namespace OpenFarCry.Importer.Cgf
 
         static void SelectPrimaryMesh(CgfFile file)
         {
-            // Prefer non-proxy nodes. CGF files sometimes list a `_proxy` node before the visual
-            // node; picking it as primary breaks material resolution and cache compatibility.
             int selectedMeshId = -1;
             int proxyFallbackId = -1;
             foreach (var node in file.NodeChunks)
@@ -870,59 +859,39 @@ namespace OpenFarCry.Importer.Cgf
             return sb.ToString();
         }
 
-        static BinaryReader OpenChunkReader(byte[] data, ChunkHeader h)
+        static Color32 ReadCryIRGB(ref BinaryBufferReader r)
         {
-            if (h.FileOffset < 0 || h.SizeBytes <= 0 || h.FileOffset + h.SizeBytes > data.Length)
-                throw new InvalidDataException($"Chunk {h.ChunkID}: out-of-bounds range offset={h.FileOffset}, size={h.SizeBytes}.");
-
-            var ms = new MemoryStream(data, h.FileOffset, h.SizeBytes, writable: false);
-            return new BinaryReader(ms, Encoding.ASCII, leaveOpen: false);
+            byte red   = r.ReadByte();
+            byte green = r.ReadByte();
+            byte blue  = r.ReadByte();
+            return new Color32(red, green, blue, 255);
         }
 
-        static void SkipEmbeddedChunkHeader(BinaryReader r)
+        static string ReadFixedString(ref BinaryBufferReader r, int length)
         {
-            ReadBytesExact(r, CgfConstants.ChunkHeaderSize);
+            byte* ptr = r.ReadBytesPtr(length);
+            int len = 0;
+            while (len < length && ptr[len] != 0) len++;
+            return Encoding.ASCII.GetString(ptr, len);
         }
 
-        static void Align4(BinaryReader r)
+        static string ReadCString(ref BinaryBufferReader r)
         {
-            long pos = r.BaseStream.Position;
-            long aligned = (pos + 3L) & ~3L;
-            if (aligned > r.BaseStream.Length)
-                throw new EndOfStreamException("Alignment moved past chunk end.");
-            r.BaseStream.Position = aligned;
+            byte* start = r.ReadBytesPtr(0);
+            int len = 0;
+            while (!r.IsAtEnd && r.ReadByte() != 0) len++;
+            return Encoding.ASCII.GetString(start, len);
         }
 
-        static string ReadFixedString(BinaryReader r, int length)
+        static byte[] ReadBytesExact(ref BinaryBufferReader r, int count)
         {
-            var bytes = ReadBytesExact(r, length);
-            int nullPos = Array.IndexOf(bytes, (byte)0);
-            int strLen = nullPos >= 0 ? nullPos : bytes.Length;
-            return Encoding.ASCII.GetString(bytes, 0, strLen);
-        }
-
-        static string ReadCString(BinaryReader r)
-        {
-            using var ms = new MemoryStream(64);
-            while (true)
+            byte* src = r.ReadBytesPtr(count);
+            byte[] dst = new byte[count];
+            fixed (byte* d = dst)
             {
-                byte b = r.ReadByte();
-                if (b == 0)
-                    break;
-                ms.WriteByte(b);
-                if (ms.Length > 4096)
-                    throw new InvalidDataException("CString is too long.");
+                Unity.Collections.LowLevel.Unsafe.UnsafeUtility.MemCpy(d, src, count);
             }
-
-            return Encoding.ASCII.GetString(ms.ToArray());
-        }
-
-        static byte[] ReadBytesExact(BinaryReader r, int count)
-        {
-            var bytes = r.ReadBytes(count);
-            if (bytes.Length != count)
-                throw new EndOfStreamException($"Truncated chunk data: expected {count} bytes, got {bytes.Length}.");
-            return bytes;
+            return dst;
         }
 
         static void ValidateCount(int value, string label)
@@ -931,60 +900,31 @@ namespace OpenFarCry.Importer.Cgf
                 throw new InvalidDataException($"{label} has invalid value {value}.");
         }
 
-        // Row-major 4x4 -> Unity Matrix4x4 (column-major constructor).
-        static Matrix4x4 ReadMatrix44(BinaryReader r)
-        {
-            float[,] m = new float[4, 4];
-            for (int row = 0; row < 4; row++)
-                for (int col = 0; col < 4; col++)
-                    m[row, col] = r.ReadSingle();
-
-            return new Matrix4x4(
-                new Vector4(m[0, 0], m[1, 0], m[2, 0], m[3, 0]),
-                new Vector4(m[0, 1], m[1, 1], m[2, 1], m[3, 1]),
-                new Vector4(m[0, 2], m[1, 2], m[2, 2], m[3, 2]),
-                new Vector4(m[0, 3], m[1, 3], m[2, 3], m[3, 3])
-            );
-        }
-
         // Row-major 4x3 (12 floats) -> Unity Matrix4x4.
-        static Matrix4x4 ReadMatrix43(BinaryReader r)
+        static Matrix4x4 ReadMatrix43(ref BinaryBufferReader r)
         {
-            float[,] m = new float[4, 3];
-            for (int row = 0; row < 4; row++)
-                for (int col = 0; col < 3; col++)
-                    m[row, col] = r.ReadSingle();
-
-            // SBoneInitPosMatrix stores a 3x3 basis plus translation in the 4th row:
-            // [ r00 r01 r02 ]
-            // [ r10 r11 r12 ]
-            // [ r20 r21 r22 ]
-            // [ tx  ty  tz  ]
-            return new Matrix4x4(
-                new Vector4(m[0, 0], m[1, 0], m[2, 0], 0f),
-                new Vector4(m[0, 1], m[1, 1], m[2, 1], 0f),
-                new Vector4(m[0, 2], m[1, 2], m[2, 2], 0f),
-                new Vector4(m[3, 0], m[3, 1], m[3, 2], 1f)
-            );
+            // Row-major 4x3: row 0, row 1, row 2, row 3
+            var m = Matrix4x4.identity;
+            m.m00 = r.ReadSingle(); m.m01 = r.ReadSingle(); m.m02 = r.ReadSingle();
+            m.m10 = r.ReadSingle(); m.m11 = r.ReadSingle(); m.m12 = r.ReadSingle();
+            m.m20 = r.ReadSingle(); m.m21 = r.ReadSingle(); m.m22 = r.ReadSingle();
+            m.m30 = r.ReadSingle(); m.m31 = r.ReadSingle(); m.m32 = r.ReadSingle();
+            return m;
         }
 
-        static Vector3 ReadVector3(BinaryReader r)
+        static Vector3 ReadVector3(ref BinaryBufferReader r)
         {
             return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
         }
 
-        static Matrix4x4 ReadMatrix33(BinaryReader r)
+        static Matrix4x4 ReadMatrix33(ref BinaryBufferReader r)
         {
-            float m00 = r.ReadSingle(); float m01 = r.ReadSingle(); float m02 = r.ReadSingle();
-            float m10 = r.ReadSingle(); float m11 = r.ReadSingle(); float m12 = r.ReadSingle();
-            float m20 = r.ReadSingle(); float m21 = r.ReadSingle(); float m22 = r.ReadSingle();
-
-            return new Matrix4x4(
-                new Vector4(m00, m10, m20, 0f),
-                new Vector4(m01, m11, m21, 0f),
-                new Vector4(m02, m12, m22, 0f),
-                new Vector4(0f, 0f, 0f, 1f)
-            );
+            // Row-major 3x3
+            var m = Matrix4x4.identity;
+            m.m00 = r.ReadSingle(); m.m01 = r.ReadSingle(); m.m02 = r.ReadSingle();
+            m.m10 = r.ReadSingle(); m.m11 = r.ReadSingle(); m.m12 = r.ReadSingle();
+            m.m20 = r.ReadSingle(); m.m21 = r.ReadSingle(); m.m22 = r.ReadSingle();
+            return m;
         }
     }
 }

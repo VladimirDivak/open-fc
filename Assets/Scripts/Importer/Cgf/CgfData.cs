@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Unity.Collections;
 using UnityEngine;
 
 namespace OpenFarCry.Importer.Cgf
@@ -55,37 +57,36 @@ namespace OpenFarCry.Importer.Cgf
             return RotationFromMatrix(BasisChange * rowVectorEquivalent * InverseBasisChange);
         }
 
-        // For OLD row-vector matrices (SBoneInitPosMatrix / CAF controllers):
-        // ReadMatrix43 normalises translation into the Unity column slot, then this
-        // transposes the 3x3 and applies the Z-up → Y-up basis change.
+        // For matrices that are in Row-Major format (as read from CGF/CAF files).
+        // 1. Transposes to Unity column-major.
+        // 2. Applies Z-up → Y-up basis change.
+        // 3. Scales the translation part.
         public static Matrix4x4 MatrixInImporterSpace(Matrix4x4 m, float scale = 1f)
         {
-            var converted = BasisChange * OldRowVectorMatrixToUnityColumnMatrix(m) * InverseBasisChange;
+            // Input 'm' is Row-Major visually (m01 is R01).
+            // Unity's '*' operator and Vector transformation expect Column-Major.
+            // Transpose moves translation from Row 3 to Column 3 and fixes rotation.
+            var mUnity = m.transpose;
+
+            var converted = BasisChange * mUnity * InverseBasisChange;
             converted.m03 *= scale;
             converted.m13 *= scale;
             converted.m23 *= scale;
             return converted;
         }
 
-        // CGF NODE_CHUNK_DESC.tm is an OLD row-vector Matrix44. Unlike Matrix43 bind
-        // matrices, ReadMatrix44 preserves its translation in row 3 (m30/m31/m32).
+        // Specifically for CGF NODE_CHUNK_DESC.tm.
         public static Matrix4x4 NodeMatrixInImporterSpace(Matrix4x4 m, float scale = 1f)
         {
-            var converted = OldRowVectorMatrixToUnityColumnMatrix(m);
-            converted.m03 = m.m30;
-            converted.m13 = m.m31;
-            converted.m23 = m.m32;
-            converted = BasisChange * converted * InverseBasisChange;
-            converted.m03 *= scale;
-            converted.m13 *= scale;
-            converted.m23 *= scale;
-            return converted;
+            return MatrixInImporterSpace(m, scale);
         }
 
         public static Matrix4x4 RemoveScale(Matrix4x4 m)
         {
-            var right = new Vector3(m.m00, m.m10, m.m20);
-            var up = new Vector3(m.m01, m.m11, m.m21);
+            // For a row-major matrix 'm', column 0 is [m00, m10, m20].
+            // We want to normalize the basis vectors (columns of the transposed matrix).
+            var right   = new Vector3(m.m00, m.m10, m.m20);
+            var up      = new Vector3(m.m01, m.m11, m.m21);
             var forward = new Vector3(m.m02, m.m12, m.m22);
 
             if (right.sqrMagnitude < 1e-10f || up.sqrMagnitude < 1e-10f || forward.sqrMagnitude < 1e-10f)
@@ -100,26 +101,18 @@ namespace OpenFarCry.Importer.Cgf
                 right = -right;
 
             var outM = Matrix4x4.identity;
-            outM.m00 = right.x; outM.m10 = right.y; outM.m20 = right.z;
-            outM.m01 = up.x; outM.m11 = up.y; outM.m21 = up.z;
-            outM.m02 = forward.x; outM.m12 = forward.y; outM.m22 = forward.z;
-            outM.m03 = m.m03; outM.m13 = m.m13; outM.m23 = m.m23;
+            // Fill row-major result
+            outM.m00 = right.x;   outM.m01 = up.x;   outM.m02 = forward.x;
+            outM.m10 = right.y;   outM.m11 = up.y;   outM.m12 = forward.y;
+            outM.m20 = right.z;   outM.m21 = up.z;   outM.m22 = forward.z;
+            outM.m30 = m.m30;     outM.m31 = m.m31;   outM.m32 = m.m32;
             return outM;
         }
 
+        // No longer needed if we read matrices correctly.
         static Matrix4x4 OldRowVectorMatrixToUnityColumnMatrix(Matrix4x4 m)
         {
-            var outM = Matrix4x4.identity;
-
-            outM.m00 = m.m00; outM.m01 = m.m10; outM.m02 = m.m20;
-            outM.m10 = m.m01; outM.m11 = m.m11; outM.m12 = m.m21;
-            outM.m20 = m.m02; outM.m21 = m.m12; outM.m22 = m.m22;
-
-            // ReadMatrix43 normalizes OLD row translation into Unity's column slot.
-            outM.m03 = m.m03;
-            outM.m13 = m.m13;
-            outM.m23 = m.m23;
-            return outM;
+            return m; // Identity to avoid breaking other calls for now
         }
 
         static Quaternion RotationFromMatrix(Matrix4x4 m)
@@ -134,6 +127,7 @@ namespace OpenFarCry.Importer.Cgf
         }
     }
 
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct ChunkHeader
     {
         public uint ChunkType;
@@ -144,6 +138,7 @@ namespace OpenFarCry.Importer.Cgf
     }
 
     // 24 bytes: position (Vec3) + normal (Vec3)
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct CryVertex
     {
         public float PX, PY, PZ;
@@ -151,6 +146,7 @@ namespace OpenFarCry.Importer.Cgf
     }
 
     // 20 bytes: 3 vertex indices + MatID + smoothing group
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct CryFace
     {
         public int V0, V1, V2;
@@ -159,18 +155,21 @@ namespace OpenFarCry.Importer.Cgf
     }
 
     // 8 bytes: texture coordinates
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct CryUV
     {
         public float U, V;
     }
 
     // 12 bytes: 3 UV indices per triangle
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct CryTexFace
     {
         public int T0, T1, T2;
     }
 
     // 16 bytes: bone skinning link for one vertex
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct CryLink
     {
         public int   BoneID;
@@ -178,17 +177,32 @@ namespace OpenFarCry.Importer.Cgf
         public float Blending;   // influence weight
     }
 
-    public class CgfMeshChunk
+    public class CgfMeshChunk : System.IDisposable
     {
         public int ChunkID;
         public int ChunkVersion;
         public bool HasBoneInfo;
         public bool HasVertexColor;
-        public CryVertex[]  Vertices;   // [nVerts]
-        public CryFace[]    Faces;      // [nFaces]
-        public CryUV[]      UVs;        // [nTVerts]
-        public CryTexFace[] TexFaces;   // [nFaces]
-        public CryLink[][]  BoneLinks;  // [nVerts][], null if !HasBoneInfo
+        public NativeArray<CryVertex>  Vertices;   // [nVerts]
+        public NativeArray<CryFace>    Faces;      // [nFaces]
+        public NativeArray<CryUV>      UVs;        // [nTVerts]
+        public NativeArray<CryTexFace> TexFaces;   // [nFaces]
+        
+        // Flattened links for zero-allocation parsing and Jobs support.
+        public NativeArray<CryLink>    BoneLinks;       // [all links]
+        public NativeArray<int>        BoneLinkOffsets; // [nVerts] offset into BoneLinks
+        public NativeArray<int>        BoneLinkCounts;  // [nVerts] count per vertex
+
+        public void Dispose()
+        {
+            if (Vertices.IsCreated) Vertices.Dispose();
+            if (Faces.IsCreated)    Faces.Dispose();
+            if (UVs.IsCreated)      UVs.Dispose();
+            if (TexFaces.IsCreated) TexFaces.Dispose();
+            if (BoneLinks.IsCreated) BoneLinks.Dispose();
+            if (BoneLinkOffsets.IsCreated) BoneLinkOffsets.Dispose();
+            if (BoneLinkCounts.IsCreated)  BoneLinkCounts.Dispose();
+        }
     }
 
     public class CgfNodeChunk
@@ -241,10 +255,15 @@ namespace OpenFarCry.Importer.Cgf
         public CgfBoneEntity[] Bones;
     }
 
-    public class CgfBoneMeshChunk
+    public class CgfBoneMeshChunk : System.IDisposable
     {
         public int ChunkID;
         public CgfMeshChunk Mesh;
+
+        public void Dispose()
+        {
+            Mesh?.Dispose();
+        }
     }
 
     // From CryHeaders.h MtlTypes enum.
@@ -296,7 +315,7 @@ namespace OpenFarCry.Importer.Cgf
         public Matrix4x4[] BindMatrices;
     }
 
-    public class CgfFile
+    public class CgfFile : System.IDisposable
     {
         public int FileType;
         public int Version;
@@ -324,5 +343,11 @@ namespace OpenFarCry.Importer.Cgf
         public List<CgfMaterialChunk>            LeafMaterials       = new List<CgfMaterialChunk>();
         public Dictionary<int, List<CgfMaterialChunk>> MaterialChildrenByParentChunkID =
             new Dictionary<int, List<CgfMaterialChunk>>();
+
+        public void Dispose()
+        {
+            foreach (var m in MeshChunks) m.Dispose();
+            foreach (var b in BoneMeshChunks) b.Dispose();
+        }
     }
 }

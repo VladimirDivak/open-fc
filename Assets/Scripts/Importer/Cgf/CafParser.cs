@@ -1,27 +1,44 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
 
 namespace OpenFarCry.Importer.Cgf
 {
-    public sealed class CafControllerTrack
+    public sealed class CafControllerTrack : IDisposable
     {
         public uint ControllerID;
-        public int[] Ticks;
-        public Vector3[] Positions;
-        public Quaternion[] Rotations;
+        public NativeArray<int> Ticks;
+        public NativeArray<Vector3> Positions;
+        public NativeArray<Quaternion> Rotations;
+
+        public void Dispose()
+        {
+            if (Ticks.IsCreated) Ticks.Dispose();
+            if (Positions.IsCreated) Positions.Dispose();
+            if (Rotations.IsCreated) Rotations.Dispose();
+        }
     }
 
-    public sealed class CafFile
+    public sealed class CafFile : IDisposable
     {
         public float SecsPerTick = 1f / 30f;
         public int GlobalStartTick;
         public int GlobalEndTick;
         public readonly List<CafControllerTrack> Tracks = new List<CafControllerTrack>();
+
+        public void Dispose()
+        {
+            foreach (var t in Tracks) t.Dispose();
+        }
     }
 
-    public static class CafParser
+    public static unsafe class CafParser
     {
         const int FileHeaderSize = 20;
         const int MaxReasonableEntities = 32768;
@@ -33,85 +50,87 @@ namespace OpenFarCry.Importer.Cgf
             if (data == null || data.Length < FileHeaderSize)
                 throw new InvalidDataException("CAF: file is too small.");
 
-            string signature = ReadSignature(data);
-            if (!signature.StartsWith(CgfConstants.Magic, StringComparison.Ordinal))
-                throw new InvalidDataException($"CAF: bad signature '{signature}', expected '{CgfConstants.Magic}'.");
-
-            int fileType = BitConverter.ToInt32(data, 8);
-            int version = BitConverter.ToInt32(data, 12);
-            int chunkTableOffset = BitConverter.ToInt32(data, 16);
-
-            const int FileTypeGeom = unchecked((int)0xFFFF0000);
-            const int FileTypeAnim = unchecked((int)0xFFFF0001);
-            if (fileType != FileTypeGeom && fileType != FileTypeAnim)
-                throw new InvalidDataException($"CAF: unsupported FileType 0x{fileType:X8}.");
-
-            if (version != CgfConstants.FileVersion)
-                throw new InvalidDataException($"CAF: unsupported file version 0x{version:X}, expected 0x{CgfConstants.FileVersion:X}.");
-
-            var headers = ReadChunkTable(data, chunkTableOffset);
-            var caf = new CafFile();
-            int unsupportedControllerChunks = 0;
-
-            foreach (var h in headers)
+            fixed (byte* ptr = data)
             {
-                switch (h.ChunkType)
+                var r = new BinaryBufferReader(ptr, data.Length);
+
+                string signature = ReadSignature(ptr, data.Length);
+                if (!signature.StartsWith(CgfConstants.Magic, StringComparison.Ordinal))
+                    throw new InvalidDataException($"CAF: bad signature '{signature}', expected '{CgfConstants.Magic}'.");
+
+                r.Offset = 8;
+                int fileType = r.ReadInt32();
+                int version = r.ReadInt32();
+                int chunkTableOffset = r.ReadInt32();
+
+                const int FileTypeGeom = unchecked((int)0xFFFF0000);
+                const int FileTypeAnim = unchecked((int)0xFFFF0001);
+                if (fileType != FileTypeGeom && fileType != FileTypeAnim)
+                    throw new InvalidDataException($"CAF: unsupported FileType 0x{fileType:X8}.");
+
+                if (version != CgfConstants.FileVersion)
+                    throw new InvalidDataException($"CAF: unsupported file version 0x{version:X}, expected 0x{CgfConstants.FileVersion:X}.");
+
+                var headers = ReadChunkTable(ptr, data.Length, chunkTableOffset);
+                var caf = new CafFile();
+                int unsupportedControllerChunks = 0;
+
+                foreach (var h in headers)
                 {
-                    case CgfConstants.ChunkTiming:
-                        ReadTiming(data, h, caf);
-                        break;
-                    case CgfConstants.ChunkController:
-                        var track = ReadController(data, h, 1f);
-                        if (track != null)
-                            caf.Tracks.Add(track);
-                        else
-                            unsupportedControllerChunks++;
-                        break;
+                    switch (h.ChunkType)
+                    {
+                        case CgfConstants.ChunkTiming:
+                            ReadTiming(ptr, data.Length, h, caf);
+                            break;
+                        case CgfConstants.ChunkController:
+                            var track = ReadController(ptr, data.Length, h, 1f);
+                            if (track != null)
+                                caf.Tracks.Add(track);
+                            else
+                                unsupportedControllerChunks++;
+                            break;
+                    }
                 }
-            }
 
-            if (unsupportedControllerChunks > 0)
-            {
-                Debug.LogWarning(
-                    $"[CgfImporter] CAF skipped {unsupportedControllerChunks} unsupported controller chunk(s). " +
-                    "Animations may be incomplete until packed/TCB controller formats are implemented.");
-            }
+                if (unsupportedControllerChunks > 0)
+                {
+                    Debug.LogWarning(
+                        $"[CgfImporter] CAF skipped {unsupportedControllerChunks} unsupported controller chunk(s). " +
+                        "Animations may be incomplete until packed/TCB controller formats are implemented.");
+                }
 
-            return caf;
+                return caf;
+            }
         }
 
-        static string ReadSignature(byte[] data)
+        static string ReadSignature(byte* data, int length)
         {
-            var sigRaw = System.Text.Encoding.ASCII.GetString(data, 0, 7);
+            byte[] sigBytes = new byte[7];
+            for (int i = 0; i < 7; i++) sigBytes[i] = data[i];
+            var sigRaw = Encoding.ASCII.GetString(sigBytes);
             int nullPos = sigRaw.IndexOf('\0');
             return nullPos >= 0 ? sigRaw.Substring(0, nullPos) : sigRaw;
         }
 
-        static ChunkHeader[] ReadChunkTable(byte[] data, int tableOffset)
+        static ChunkHeader[] ReadChunkTable(byte* data, int length, int tableOffset)
         {
-            if (tableOffset <= FileHeaderSize || tableOffset > data.Length - 4)
+            if (tableOffset <= FileHeaderSize || tableOffset > length - 4)
                 throw new InvalidDataException($"CAF: invalid ChunkTableOffset {tableOffset}.");
 
-            uint countU = BitConverter.ToUInt32(data, tableOffset);
+            uint countU = *(uint*)(data + tableOffset);
             if (countU > int.MaxValue)
                 throw new InvalidDataException("CAF: chunk count is too large.");
             int count = (int)countU;
 
             long tableBytes = 4L + (long)count * CgfConstants.ChunkHeaderSize;
-            if (tableOffset + tableBytes > data.Length)
+            if (tableOffset + tableBytes > length)
                 throw new InvalidDataException("CAF: chunk table exceeds file bounds.");
 
             var headers = new ChunkHeader[count];
             int p = tableOffset + 4;
             for (int i = 0; i < count; i++)
             {
-                headers[i] = new ChunkHeader
-                {
-                    ChunkType = BitConverter.ToUInt32(data, p + 0),
-                    ChunkVersion = BitConverter.ToInt32(data, p + 4),
-                    FileOffset = BitConverter.ToInt32(data, p + 8),
-                    ChunkID = BitConverter.ToInt32(data, p + 12),
-                };
+                headers[i] = *(ChunkHeader*)(data + p);
                 p += CgfConstants.ChunkHeaderSize;
             }
 
@@ -142,40 +161,40 @@ namespace OpenFarCry.Importer.Cgf
             return headers;
         }
 
-        static void ReadTiming(byte[] data, ChunkHeader h, CafFile caf)
+        static void ReadTiming(byte* data, int length, ChunkHeader h, CafFile caf)
         {
             if (h.ChunkVersion != 0x0918)
                 return;
 
-            using var r = OpenChunkReader(data, h);
-            if (LooksLikeEmbeddedChunkHeader(r, h))
-                SkipEmbeddedChunkHeader(r);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
+            if (LooksLikeEmbeddedChunkHeader(ref r, h))
+                r.Skip(CgfConstants.ChunkHeaderSize);
 
             caf.SecsPerTick = r.ReadSingle();
             _ = r.ReadInt32(); // TicksPerFrame
 
-            ReadBytesExact(r, 32); // RANGE_ENTITY name
+            r.Skip(32); // RANGE_ENTITY name
             caf.GlobalStartTick = r.ReadInt32();
             caf.GlobalEndTick = r.ReadInt32();
             _ = r.ReadInt32(); // nSubRanges
         }
 
-        static CafControllerTrack ReadController(byte[] data, ChunkHeader h, float scale)
+        static CafControllerTrack ReadController(byte* data, int length, ChunkHeader h, float scale)
         {
             switch (h.ChunkVersion)
             {
                 case 0x0827:
-                    return ReadController0827(data, h, scale);
+                    return ReadController0827(data, length, h, scale);
                 case 0x0826:
-                    return ReadController0826(data, h, scale);
+                    return ReadController0826(data, length, h, scale);
                 default:
                     return null;
             }
         }
 
-        static CafControllerTrack ReadController0827(byte[] data, ChunkHeader h, float scale)
+        static CafControllerTrack ReadController0827(byte* data, int length, ChunkHeader h, float scale)
         {
-            using var r = OpenChunkReader(data, h);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
 
             uint numKeysU = r.ReadUInt32();
             if (numKeysU > MaxReasonableEntities)
@@ -183,21 +202,31 @@ namespace OpenFarCry.Importer.Cgf
             int numKeys = (int)numKeysU;
             uint controllerId = r.ReadUInt32();
 
-            var ticks = new int[numKeys];
-            var positions = new Vector3[numKeys];
-            var rotations = new Quaternion[numKeys];
+            var ticks = new NativeArray<int>(numKeys, Allocator.Persistent);
+            var positions = new NativeArray<Vector3>(numKeys, Allocator.Persistent);
+            var rotations = new NativeArray<Quaternion>(numKeys, Allocator.Persistent);
+
+            var rawRotLogs = new NativeArray<float3>(numKeys, Allocator.TempJob);
 
             for (int i = 0; i < numKeys; i++)
             {
                 ticks[i] = r.ReadInt32();
-                var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-                var rotLog = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-
-                positions[i] = pos * scale;
-                rotations[i] = QuaternionFromRotationLog(rotLog);
+                positions[i] = r.ReadVector3() * scale;
+                rawRotLogs[i] = r.ReadVector3();
             }
 
-            EnsureQuaternionContinuity(rotations);
+            var rotJob = new CafRotationJob
+            {
+                RawRotationLogs = rawRotLogs,
+                OutRotations = rotations.Reinterpret<quaternion>(UnsafeUtility.SizeOf<Quaternion>())
+            }.Schedule(numKeys, 64);
+
+            new CafEnsureContinuityJob
+            {
+                Rotations = rotations.Reinterpret<quaternion>(UnsafeUtility.SizeOf<Quaternion>())
+            }.Schedule(rotJob).Complete();
+
+            rawRotLogs.Dispose();
 
             return new CafControllerTrack
             {
@@ -208,11 +237,11 @@ namespace OpenFarCry.Importer.Cgf
             };
         }
 
-        static CafControllerTrack ReadController0826(byte[] data, ChunkHeader h, float scale)
+        static CafControllerTrack ReadController0826(byte* data, int length, ChunkHeader h, float scale)
         {
-            using var r = OpenChunkReader(data, h);
-            if (LooksLikeEmbeddedChunkHeader(r, h))
-                SkipEmbeddedChunkHeader(r);
+            var r = new BinaryBufferReader(data + h.FileOffset, h.SizeBytes);
+            if (LooksLikeEmbeddedChunkHeader(ref r, h))
+                r.Skip(CgfConstants.ChunkHeaderSize);
 
             int ctrlType = r.ReadInt32();
             int numKeys = r.ReadInt32();
@@ -228,32 +257,22 @@ namespace OpenFarCry.Importer.Cgf
                 return null;
             }
 
-            var ticks = new int[numKeys];
-            var positions = new Vector3[numKeys];
-            var rotations = new Quaternion[numKeys];
+            var ticks = new NativeArray<int>(numKeys, Allocator.Persistent);
+            var positions = new NativeArray<Vector3>(numKeys, Allocator.Persistent);
+            var rotations = new NativeArray<Quaternion>(numKeys, Allocator.Persistent);
 
-            Quaternion last = Quaternion.identity;
-            bool haveLast = false;
             for (int i = 0; i < numKeys; i++)
             {
                 ticks[i] = r.ReadInt32();
-
-                // abspos is present in file but not required for local pose tracks.
-                _ = r.ReadSingle();
-                _ = r.ReadSingle();
-                _ = r.ReadSingle();
-
-                var relPos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-                var relRot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-
-                if (haveLast && Quaternion.Dot(last, relRot) < 0f)
-                    relRot = new Quaternion(-relRot.x, -relRot.y, -relRot.z, -relRot.w);
-
-                positions[i] = relPos * scale;
-                rotations[i] = relRot.normalized;
-                last = rotations[i];
-                haveLast = true;
+                r.Skip(12); // abspos
+                positions[i] = r.ReadVector3() * scale;
+                rotations[i] = r.ReadQuaternion().normalized;
             }
+
+            new CafEnsureContinuityJob
+            {
+                Rotations = rotations.Reinterpret<quaternion>(UnsafeUtility.SizeOf<Quaternion>())
+            }.Run();
 
             return new CafControllerTrack
             {
@@ -293,41 +312,17 @@ namespace OpenFarCry.Importer.Cgf
             return new Quaternion(logVec.x, logVec.y, logVec.z, (float)(1.0 - d * d)).normalized;
         }
 
-        static BinaryReader OpenChunkReader(byte[] data, ChunkHeader h)
+        static bool LooksLikeEmbeddedChunkHeader(ref BinaryBufferReader r, ChunkHeader expected)
         {
-            if (h.FileOffset < 0 || h.SizeBytes <= 0 || h.FileOffset + h.SizeBytes > data.Length)
-                throw new InvalidDataException($"Chunk {h.ChunkID}: out-of-bounds range offset={h.FileOffset}, size={h.SizeBytes}.");
-
-            var ms = new MemoryStream(data, h.FileOffset, h.SizeBytes, writable: false);
-            return new BinaryReader(ms, System.Text.Encoding.ASCII, leaveOpen: false);
-        }
-
-        static bool LooksLikeEmbeddedChunkHeader(BinaryReader r, ChunkHeader expected)
-        {
-            long start = r.BaseStream.Position;
-            if (r.BaseStream.Length - start < CgfConstants.ChunkHeaderSize)
+            int start = r.Offset;
+            if (r.Length - start < CgfConstants.ChunkHeaderSize)
                 return false;
 
             uint type = r.ReadUInt32();
             int version = r.ReadInt32();
-            _ = r.ReadInt32();
-            _ = r.ReadInt32();
-            r.BaseStream.Position = start;
+            r.Offset = start;
 
             return type == expected.ChunkType && version == expected.ChunkVersion;
-        }
-
-        static void SkipEmbeddedChunkHeader(BinaryReader r)
-        {
-            ReadBytesExact(r, CgfConstants.ChunkHeaderSize);
-        }
-
-        static byte[] ReadBytesExact(BinaryReader r, int count)
-        {
-            var bytes = r.ReadBytes(count);
-            if (bytes.Length != count)
-                throw new EndOfStreamException($"Truncated chunk data: expected {count} bytes, got {bytes.Length}.");
-            return bytes;
         }
     }
 }
