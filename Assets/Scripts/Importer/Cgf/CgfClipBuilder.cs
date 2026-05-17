@@ -1,5 +1,9 @@
 using System;
 using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
 
 namespace OpenFarCry.Importer.Cgf
@@ -22,28 +26,56 @@ namespace OpenFarCry.Importer.Cgf
 
             int baseTick = caf.GlobalStartTick;
             var semanticTracks = new List<SemanticClipTrack>(caf.Tracks.Count);
-            for (int i = 0; i < caf.Tracks.Count; i++)
+            
+            var jobHandles = new NativeList<JobHandle>(caf.Tracks.Count, Allocator.Temp);
+            var results = new List<(CafControllerTrack track, NativeArray<float3> pos, NativeArray<quaternion> rot)>();
+
+            foreach (var track in caf.Tracks)
             {
-                var track = caf.Tracks[i];
-                if (track == null || track.Ticks == null || track.Ticks.Length == 0)
+                if (track == null || !track.Ticks.IsCreated || track.Ticks.Length == 0)
                     continue;
 
                 int keyCount = 0;
-                if (track.Ticks != null && track.Positions != null && track.Rotations != null)
+                if (track.Ticks.IsCreated && track.Positions.IsCreated && track.Rotations.IsCreated)
                     keyCount = Mathf.Min(track.Ticks.Length, track.Positions.Length, track.Rotations.Length);
-                if (keyCount <= 0)
-                    continue;
 
+                if (keyCount == 0) continue;
+
+                var outPositions = new NativeArray<float3>(keyCount, Allocator.TempJob);
+                var outRotations = new NativeArray<quaternion>(keyCount, Allocator.TempJob);
+
+                var job = new CafTrackNormalizationJob
+                {
+                    RawPositions = track.Positions.Reinterpret<float3>(UnsafeUtility.SizeOf<Vector3>()),
+                    RawRotations = track.Rotations.Reinterpret<quaternion>(UnsafeUtility.SizeOf<Quaternion>()),
+                    OutPositions = outPositions,
+                    OutRotations = outRotations,
+                    ImportScale  = importScale
+                };
+
+                jobHandles.Add(job.Schedule(keyCount, 64));
+                results.Add((track, outPositions, outRotations));
+            }
+
+            JobHandle.CompleteAll(jobHandles);
+
+            foreach (var res in results)
+            {
+                var track = res.track;
+                int keyCount = res.pos.Length;
+                
                 var times = new float[keyCount];
                 var positions = new Vector3[keyCount];
                 var rotations = new Quaternion[keyCount];
+
                 for (int k = 0; k < keyCount; k++)
                 {
-                    float t = Mathf.Max(0f, (track.Ticks[k] - baseTick) * caf.SecsPerTick);
-                    times[k] = t;
-                    positions[k] = CryTransformConversion.PositionInImporterSpace(track.Positions[k], importScale);
-                    rotations[k] = CryTransformConversion.LocalRotationInImporterSpace(track.Rotations[k]);
+                    times[k] = Mathf.Max(0f, (track.Ticks[k] - baseTick) * caf.SecsPerTick);
                 }
+
+                // Copy from NativeArray to managed arrays
+                res.pos.Reinterpret<Vector3>(UnsafeUtility.SizeOf<float3>()).CopyTo(positions);
+                res.rot.Reinterpret<Quaternion>(UnsafeUtility.SizeOf<quaternion>()).CopyTo(rotations);
 
                 semanticTracks.Add(new SemanticClipTrack
                 {
@@ -52,6 +84,9 @@ namespace OpenFarCry.Importer.Cgf
                     Positions = positions,
                     Rotations = rotations
                 });
+
+                res.pos.Dispose();
+                res.rot.Dispose();
             }
 
             if (semanticTracks.Count == 0)
@@ -142,7 +177,7 @@ namespace OpenFarCry.Importer.Cgf
             for (int i = 0; i < caf.Tracks.Count; i++)
             {
                 var track = caf.Tracks[i];
-                if (track?.Ticks == null || track.Positions == null || track.Rotations == null)
+                if (track == null || !track.Ticks.IsCreated || !track.Positions.IsCreated || !track.Rotations.IsCreated)
                     continue;
                 if (track.Ticks.Length < 2 || track.Positions.Length < 2 || track.Rotations.Length < 2)
                     continue;
