@@ -240,13 +240,17 @@ namespace OpenFarCry.Importer.Cgf
             var nativeUvIdx  = new NativeArray<int>(remap.UniqueUvIdx,  Allocator.TempJob);
             var nativeBoneIdToIndex = new NativeArray<int>(boneIdToIndex, Allocator.TempJob);
 
+            var safeLinks       = chunk.BoneLinks.IsCreated ? chunk.BoneLinks : new NativeArray<CryLink>(1, Allocator.TempJob);
+            var safeLinkOffsets = chunk.BoneLinkOffsets.IsCreated ? chunk.BoneLinkOffsets : new NativeArray<int>(1, Allocator.TempJob);
+            var safeLinkCounts  = chunk.BoneLinkCounts.IsCreated ? chunk.BoneLinkCounts : new NativeArray<int>(1, Allocator.TempJob);
+
             var transformJob = new SkinnedVertexTransformJob
             {
                 UniquePosIdx = nativePosIdx,
                 RawVertices = chunk.Vertices,
-                RawLinks = chunk.BoneLinks,
-                LinkOffsets = chunk.BoneLinkOffsets,
-                LinkCounts = chunk.BoneLinkCounts,
+                RawLinks = safeLinks,
+                LinkOffsets = safeLinkOffsets,
+                LinkCounts = safeLinkCounts,
                 BindGlobalsByBoneId = nativeBindGlobals,
                 ImportScale = importScale,
                 OutPositions = data.Positions,
@@ -256,9 +260,9 @@ namespace OpenFarCry.Importer.Cgf
             var weightJob = new BoneWeightBuildJob
             {
                 UniquePosIdx = nativePosIdx,
-                RawLinks = chunk.BoneLinks,
-                LinkOffsets = chunk.BoneLinkOffsets,
-                LinkCounts = chunk.BoneLinkCounts,
+                RawLinks = safeLinks,
+                LinkOffsets = safeLinkOffsets,
+                LinkCounts = safeLinkCounts,
                 BoneIdToIndex = nativeBoneIdToIndex,
                 BoneCount = boneNames.Names.Length,
                 OutWeights = data.BoneWeights
@@ -267,13 +271,15 @@ namespace OpenFarCry.Importer.Cgf
             var dummyPos = new NativeArray<float3>(n, Allocator.TempJob);
             var dummyNrm = new NativeArray<float3>(n, Allocator.TempJob);
 
+            var safeUvs = chunk.UVs.IsCreated ? chunk.UVs : new NativeArray<CryUV>(1, Allocator.TempJob);
+
             // UVs and Index remap
             new StaticVertexTransformJob
             {
                 UniquePosIdx = nativePosIdx,
                 UniqueUvIdx = nativeUvIdx,
                 RawVertices = chunk.Vertices,
-                RawUVs = chunk.UVs,
+                RawUVs = safeUvs,
                 NodeMatrix = float4x4.identity, // Already baked into positions for skinned
                 ImportScale = 1f,
                 UvCount = chunk.UVs.IsCreated ? chunk.UVs.Length : 0,
@@ -283,6 +289,11 @@ namespace OpenFarCry.Importer.Cgf
             }.Schedule(n, 64).Complete();
 
             JobHandle.CombineDependencies(transformJob, weightJob).Complete();
+
+            if (!chunk.UVs.IsCreated) safeUvs.Dispose();
+            if (!chunk.BoneLinks.IsCreated) safeLinks.Dispose();
+            if (!chunk.BoneLinkOffsets.IsCreated) safeLinkOffsets.Dispose();
+            if (!chunk.BoneLinkCounts.IsCreated) safeLinkCounts.Dispose();
 
             foreach (var kv in remap.SubmeshMap)
             {
@@ -400,12 +411,14 @@ namespace OpenFarCry.Importer.Cgf
                     if (!data.SubmeshTriangles.TryGetValue(kv.Key, out var existing))
                     {
                         var arr = new NativeArray<int>(kv.Value.Count, Allocator.Persistent);
+                        var srcIndices = new NativeArray<int>(kv.Value.ToArray(), Allocator.TempJob);
                         new StaticIndexRemapJob
                         {
-                            SourceIndices = new NativeArray<int>(kv.Value.ToArray(), Allocator.TempJob),
+                            SourceIndices = srcIndices,
                             OutIndices = arr,
                             VertexOffset = vertexOffset
                         }.Run();
+                        srcIndices.Dispose();
                         data.SubmeshTriangles[kv.Key] = arr;
                     }
                     else
@@ -414,12 +427,14 @@ namespace OpenFarCry.Importer.Cgf
                         var old = existing;
                         var combined = new NativeArray<int>(old.Length + kv.Value.Count, Allocator.Persistent);
                         NativeArray<int>.Copy(old, combined, old.Length);
+                        var srcIndices = new NativeArray<int>(kv.Value.ToArray(), Allocator.TempJob);
                         new StaticIndexRemapJob
                         {
-                            SourceIndices = new NativeArray<int>(kv.Value.ToArray(), Allocator.TempJob),
+                            SourceIndices = srcIndices,
                             OutIndices = combined.GetSubArray(old.Length, kv.Value.Count),
                             VertexOffset = vertexOffset
                         }.Run();
+                        srcIndices.Dispose();
                         data.SubmeshTriangles[kv.Key] = combined;
                         old.Dispose();
                     }
@@ -501,13 +516,14 @@ namespace OpenFarCry.Importer.Cgf
 
             var nativePosIdx = new NativeArray<int>(remap.UniquePosIdx, Allocator.TempJob);
             var nativeUvIdx  = new NativeArray<int>(remap.UniqueUvIdx,  Allocator.TempJob);
+            var safeUvs      = rawUVs.IsCreated ? rawUVs : new NativeArray<CryUV>(1, Allocator.TempJob);
 
             new StaticVertexTransformJob
             {
                 UniquePosIdx = nativePosIdx,
                 UniqueUvIdx  = nativeUvIdx,
                 RawVertices  = verts,
-                RawUVs       = rawUVs,
+                RawUVs       = safeUvs,
                 NodeMatrix   = (float4x4)unityNodeTransform,
                 ImportScale  = importScale,
                 UvCount      = uvCount,
@@ -518,6 +534,7 @@ namespace OpenFarCry.Importer.Cgf
 
             nativePosIdx.Dispose();
             nativeUvIdx.Dispose();
+            if (!rawUVs.IsCreated) safeUvs.Dispose();
         }
 
         static Mesh CreateUnityMesh(MeshBuildData data, out int[] submeshMaterialIds)
@@ -597,10 +614,13 @@ namespace OpenFarCry.Importer.Cgf
 
         static Matrix4x4[] BuildBindPoseGlobalMatricesByBoneId(CgfBoneInitPosChunk initPos, int boneCount, float scaleFactor)
         {
-            var globals = new Matrix4x4[boneCount];
-            for (int boneId = 0; boneId < boneCount; boneId++)
+            int matrixCount = initPos?.BindMatrices?.Length ?? 0;
+            int totalBones = Math.Max(boneCount, matrixCount);
+            var globals = new Matrix4x4[totalBones];
+
+            for (int boneId = 0; boneId < totalBones; boneId++)
             {
-                var defaultGlobal = initPos != null && boneId >= 0 && boneId < initPos.BindMatrices.Length
+                var defaultGlobal = (initPos != null && boneId >= 0 && boneId < initPos.BindMatrices.Length)
                     ? initPos.BindMatrices[boneId]
                     : Matrix4x4.identity;
 
@@ -768,20 +788,30 @@ namespace OpenFarCry.Importer.Cgf
             out int[] boneIdToIndex,
             out int[] boneIndexToId)
         {
-            var idToIndex = new int[boneCount];
-            var indexToId = new int[boneCount];
-            for (int i = 0; i < boneCount; i++)
+            var entities = boneAnim?.Bones;
+            
+            // Determine required map size based on max BoneID
+            int maxBoneId = -1;
+            if (entities != null)
             {
-                idToIndex[i] = -1;
-                indexToId[i] = -1;
+                for (int i = 0; i < entities.Length; i++)
+                    if (entities[i].BoneID > maxBoneId) maxBoneId = entities[i].BoneID;
             }
+            int idMapSize = Math.Max(boneCount, maxBoneId + 1);
+
+            var idToIndex = new int[idMapSize];
+            var indexToId = new int[boneCount];
+            for (int i = 0; i < idMapSize; i++) idToIndex[i] = -1;
+            for (int i = 0; i < boneCount; i++) indexToId[i] = -1;
 
             boneIdToIndex = idToIndex;
             boneIndexToId = indexToId;
 
-            var entities = boneAnim?.Bones;
-            if (entities == null || entities.Length != boneCount || boneCount == 0)
+            if (entities == null || entities.Length == 0 || boneCount == 0)
+            {
+                FallbackToIdentity(boneCount, idMapSize, idToIndex, indexToId);
                 return false;
+            }
 
             int cursor = 0;
             int nextBoneIndex = 0;
@@ -803,7 +833,7 @@ namespace OpenFarCry.Importer.Cgf
 
                 var entity = entities[cursor++];
                 int boneId = entity.BoneID;
-                if (boneId < 0 || boneId >= boneCount)
+                if (boneId < 0 || boneId >= idMapSize)
                     return false;
 
                 idToIndex[boneId] = boneIndex;
@@ -827,7 +857,27 @@ namespace OpenFarCry.Importer.Cgf
             }
 
             int rootIndex = Allocate(1);
-            return rootIndex == 0 && LoadSubtree(rootIndex) && cursor == entities.Length;
+            if (rootIndex == 0 && LoadSubtree(rootIndex) && cursor == entities.Length)
+            {
+                return true;
+            }
+
+            // Fallback if hierarchical map fails
+            FallbackToIdentity(boneCount, idMapSize, idToIndex, indexToId);
+            return false;
+        }
+
+        static void FallbackToIdentity(int boneCount, int idMapSize, int[] idToIndex, int[] indexToId)
+        {
+            for (int i = 0; i < idMapSize; i++) idToIndex[i] = -1;
+            for (int i = 0; i < boneCount; i++) indexToId[i] = -1;
+
+            for (int i = 0; i < boneCount; i++)
+            {
+                if (i < idMapSize)
+                    idToIndex[i] = i;
+                indexToId[i] = i;
+            }
         }
     }
 }

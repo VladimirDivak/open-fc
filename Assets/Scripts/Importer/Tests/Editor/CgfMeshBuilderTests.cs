@@ -252,17 +252,28 @@ namespace OpenFarCry.Importer.Tests.Editor
         }
 
         [Test]
-        public void TryBuildBoneIndexMaps_CountMismatch_ReturnsFalse()
+        public void TryBuildBoneIndexMaps_FewerEntitiesThanBoneCount_BuildsValidMap()
         {
+            // One animation bone but boneCount 3: counts may legitimately diverge.
+            // Map is sized to max(boneCount, maxBoneId + 1); mapped slots are filled,
+            // unused slots stay -1.
             var boneAnim = new CgfBoneAnimChunk
             {
                 Bones = new[] { new CgfBoneEntity { BoneID = 0, ChildrenCount = 0 } }
             };
 
             bool ok = CgfMeshBuilder.TryBuildBoneIndexMaps(boneAnim, boneCount: 3,
-                out _, out _);
+                out var idToIndex, out var indexToId);
 
-            Assert.That(ok, Is.False);
+            Assert.That(ok, Is.True);
+            Assert.That(idToIndex.Length, Is.EqualTo(3));
+            Assert.That(indexToId.Length, Is.EqualTo(3));
+            Assert.That(idToIndex[0], Is.EqualTo(0));
+            Assert.That(idToIndex[1], Is.EqualTo(-1));
+            Assert.That(idToIndex[2], Is.EqualTo(-1));
+            Assert.That(indexToId[0], Is.EqualTo(0));
+            Assert.That(indexToId[1], Is.EqualTo(-1));
+            Assert.That(indexToId[2], Is.EqualTo(-1));
         }
 
         [Test]
