@@ -225,7 +225,6 @@ namespace OpenFarCry.Importer.Cgf
             var nativeBindGlobals = new NativeArray<float4x4>(bindGlobalsByBoneId.Length, Allocator.TempJob);
             for (int i = 0; i < bindGlobalsByBoneId.Length; i++) nativeBindGlobals[i] = (float4x4)bindGlobalsByBoneId[i];
 
-            bool hasTexFaces = chunk.TexFaces.IsCreated && chunk.TexFaces.Length == chunk.Faces.Length;
             var remap = BuildVertexRemapping(chunk.Faces, chunk.TexFaces, chunk.Vertices.Length,
                 chunk.UVs.IsCreated ? chunk.UVs.Length : 0);
             int n = remap.UniquePosIdx.Length;
@@ -315,29 +314,6 @@ namespace OpenFarCry.Importer.Cgf
             data.BindPoses = result.BindPoses;
 
             return data;
-        }
-
-        static BoneWeight BuildOneBoneWeight(CryLink[] links, int boneCount, int[] boneIdToIndex)
-        {
-            if (links == null || links.Length == 0)
-                return new BoneWeight { boneIndex0 = 0, weight0 = 1f };
-
-            int used = Mathf.Min(4, links.Length);
-
-            float topTotal = 0f;
-            for (int i = 0; i < used; i++)
-                topTotal += links[i].Blending;
-            if (topTotal < float.Epsilon) topTotal = 1f;
-            float norm = 1f / topTotal;
-
-            var bw = new BoneWeight();
-
-            if (used > 0) { bw.boneIndex0 = RemapBone(links[0].BoneID, boneCount, boneIdToIndex); bw.weight0 = links[0].Blending * norm; }
-            if (used > 1) { bw.boneIndex1 = RemapBone(links[1].BoneID, boneCount, boneIdToIndex); bw.weight1 = links[1].Blending * norm; }
-            if (used > 2) { bw.boneIndex2 = RemapBone(links[2].BoneID, boneCount, boneIdToIndex); bw.weight2 = links[2].Blending * norm; }
-            if (used > 3) { bw.boneIndex3 = RemapBone(links[3].BoneID, boneCount, boneIdToIndex); bw.weight3 = links[3].Blending * norm; }
-
-            return bw;
         }
 
         static MeshBuildData BuildStaticMeshData(CgfMeshChunk chunk, Matrix4x4 nodeTransform, float importScale)
@@ -490,20 +466,6 @@ namespace OpenFarCry.Importer.Cgf
             return new VertexRemappingResult(submeshMap, uniquePosIdx.ToArray(), uniqueUvIdx.ToArray());
         }
 
-        static void MergeSubmeshMap(Dictionary<int, List<int>> target, Dictionary<int, List<int>> source, int vertexOffset)
-        {
-            foreach (var kv in source)
-            {
-                if (!target.TryGetValue(kv.Key, out var targetList))
-                {
-                    targetList = new List<int>(kv.Value.Count);
-                    target[kv.Key] = targetList;
-                }
-                foreach (int idx in kv.Value)
-                    targetList.Add(idx + vertexOffset);
-            }
-        }
-
         static void RunStaticVertexTransformJob(
             VertexRemappingResult remap,
             NativeArray<CryVertex> verts, NativeArray<CryUV> rawUVs,
@@ -629,104 +591,6 @@ namespace OpenFarCry.Importer.Cgf
             }
 
             return globals;
-        }
-
-        static bool TryBuildBindPositionFromLinks(
-            CryLink[] links,
-            Matrix4x4[] bindGlobalsByBoneId,
-            float importScale,
-            out Vector3 position)
-        {
-            position = Vector3.zero;
-            if (links == null || links.Length == 0 || bindGlobalsByBoneId == null || bindGlobalsByBoneId.Length == 0)
-                return false;
-
-            // CryEngine skins from per-link bone-local offsets:
-            //   vertex = sum(boneGlobal.TransformPointOLD(link.offset) * link.Blending)
-            // Unity stores one bind vertex plus up to four BoneWeight entries, so build
-            // the imported vertex from the same top-four normalized influences we assign.
-            int used = Mathf.Min(4, links.Length);
-
-            float topTotal = 0f;
-            for (int i = 0; i < used; i++)
-            {
-                int boneId = links[i].BoneID;
-                if (boneId >= 0 && boneId < bindGlobalsByBoneId.Length)
-                    topTotal += links[i].Blending;
-            }
-
-            if (topTotal < float.Epsilon)
-                return false;
-
-            float norm = 1f / topTotal;
-            for (int i = 0; i < used; i++)
-            {
-                var link = links[i];
-                int boneId = link.BoneID;
-                if (boneId < 0 || boneId >= bindGlobalsByBoneId.Length)
-                    continue;
-
-                var offset = CryTransformConversion.PositionInImporterSpace(new Vector3(link.OX, link.OY, link.OZ), importScale);
-                position += bindGlobalsByBoneId[boneId].MultiplyPoint3x4(offset) * (link.Blending * norm);
-            }
-
-            return true;
-        }
-
-        static BoneWeight[] BuildBoneWeights(List<CryLink[]> weightsList, int boneCount, int[] boneIdToIndex)
-        {
-            var boneWeights = new BoneWeight[weightsList.Count];
-            for (int vi = 0; vi < weightsList.Count; vi++)
-            {
-                var links = weightsList[vi];
-                if (links == null || links.Length == 0)
-                {
-                    boneWeights[vi] = new BoneWeight { boneIndex0 = 0, weight0 = 1f };
-                    continue;
-                }
-
-                int used = Mathf.Min(4, links.Length);
-
-                float topTotal = 0f;
-                for (int i = 0; i < used; i++)
-                    topTotal += links[i].Blending;
-                if (topTotal < float.Epsilon) topTotal = 1f;
-                float norm = 1f / topTotal;
-
-                var bw = new BoneWeight();
-
-                if (used > 0) { bw.boneIndex0 = RemapBone(links[0].BoneID, boneCount, boneIdToIndex); bw.weight0 = links[0].Blending * norm; }
-                if (used > 1) { bw.boneIndex1 = RemapBone(links[1].BoneID, boneCount, boneIdToIndex); bw.weight1 = links[1].Blending * norm; }
-                if (used > 2) { bw.boneIndex2 = RemapBone(links[2].BoneID, boneCount, boneIdToIndex); bw.weight2 = links[2].Blending * norm; }
-                if (used > 3) { bw.boneIndex3 = RemapBone(links[3].BoneID, boneCount, boneIdToIndex); bw.weight3 = links[3].Blending * norm; }
-
-                boneWeights[vi] = bw;
-            }
-            return boneWeights;
-        }
-
-        static CryLink[] SortLinksByDescendingWeight(CryLink[] links)
-        {
-            if (links == null || links.Length <= 1)
-                return links;
-
-            var sorted = new CryLink[links.Length];
-            Array.Copy(links, sorted, links.Length);
-            Array.Sort(sorted, CompareLinkWeightDescending);
-            return sorted;
-        }
-
-        static int CompareLinkWeightDescending(CryLink x, CryLink y)
-        {
-            return y.Blending.CompareTo(x.Blending);
-        }
-
-        static int RemapBone(int boneId, int count, int[] boneIdToIndex)
-        {
-            if (boneIdToIndex != null && boneId >= 0 && boneId < boneIdToIndex.Length && boneIdToIndex[boneId] >= 0)
-                return boneIdToIndex[boneId];
-
-            return Mathf.Clamp(boneId, 0, count - 1);
         }
 
         // ------------------------------------------------------------------ bind poses

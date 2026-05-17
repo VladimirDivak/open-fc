@@ -283,35 +283,6 @@ namespace OpenFarCry.Importer.Cgf
             };
         }
 
-        static void EnsureQuaternionContinuity(Quaternion[] rotations)
-        {
-            if (rotations == null || rotations.Length < 2)
-                return;
-
-            for (int i = 1; i < rotations.Length; i++)
-            {
-                if (Quaternion.Dot(rotations[i - 1], rotations[i]) < 0f)
-                    rotations[i] = new Quaternion(-rotations[i].x, -rotations[i].y, -rotations[i].z, -rotations[i].w);
-            }
-        }
-
-        static Quaternion QuaternionFromRotationLog(Vector3 logVec)
-        {
-            double d = Math.Sqrt(logVec.x * logVec.x + logVec.y * logVec.y + logVec.z * logVec.z);
-            if (d > 1e-4)
-            {
-                double m = Math.Sin(d) / d;
-                var q = new Quaternion(
-                    (float)(logVec.x * m),
-                    (float)(logVec.y * m),
-                    (float)(logVec.z * m),
-                    (float)Math.Cos(d));
-                return q.normalized;
-            }
-
-            return new Quaternion(logVec.x, logVec.y, logVec.z, (float)(1.0 - d * d)).normalized;
-        }
-
         static bool LooksLikeEmbeddedChunkHeader(ref BinaryBufferReader r, ChunkHeader expected)
         {
             int start = r.Offset;
