@@ -764,119 +764,96 @@ namespace OpenFarCry.Importer.Texture
             return true;
         }
 
-        static bool TryDecodeBc1(byte[] bytes, int offset, int width, int height, out Color32[] pixels)
+        static unsafe bool TryDecodeBc1(byte[] bytes, int offset, int width, int height, out Color32[] pixels)
         {
-            pixels = new Color32[width * height];
+            pixels = null;
             int blocksX = (width + 3) / 4;
             int blocksY = (height + 3) / 4;
-            int blockSize = 8;
-            int required = blocksX * blocksY * blockSize;
-            if (!CanRead(bytes, offset, required))
+            int numBlocks = blocksX * blocksY;
+            int sliceLen = numBlocks * 8;
+            if (!CanRead(bytes, offset, sliceLen))
                 return false;
 
-            int src = offset;
-            var palette = new Color32[4];
-            for (int by = 0; by < blocksY; by++)
+            var source = new NativeArray<byte>(sliceLen, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            fixed (byte* src = bytes)
+                UnsafeUtility.MemCpy(source.GetUnsafePtr(), src + offset, sliceLen);
+
+            var output = new NativeArray<Color32>(width * height, Allocator.TempJob);
+
+            new Bc1DecompressJob
             {
-                for (int bx = 0; bx < blocksX; bx++)
-                {
-                    ushort c0 = ReadUInt16LE(bytes, src + 0);
-                    ushort c1 = ReadUInt16LE(bytes, src + 2);
-                    uint indices = ReadUInt32LE(bytes, src + 4);
-                    src += blockSize;
+                Source = source,
+                BlocksX = blocksX,
+                Width = width,
+                Height = height,
+                Output = output,
+            }.Schedule(numBlocks, 32).Complete();
 
-                    BuildBc1Palette(c0, c1, palette, forceFourColor: false);
-                    WriteColorBlock(pixels, width, height, bx, by, palette, indices);
-                }
-            }
-
+            pixels = output.ToArray();
+            source.Dispose();
+            output.Dispose();
             return true;
         }
 
-        static bool TryDecodeBc2(byte[] bytes, int offset, int width, int height, out Color32[] pixels)
+        static unsafe bool TryDecodeBc2(byte[] bytes, int offset, int width, int height, out Color32[] pixels)
         {
-            pixels = new Color32[width * height];
+            pixels = null;
             int blocksX = (width + 3) / 4;
             int blocksY = (height + 3) / 4;
-            int blockSize = 16;
-            int required = blocksX * blocksY * blockSize;
-            if (!CanRead(bytes, offset, required))
+            int numBlocks = blocksX * blocksY;
+            int sliceLen = numBlocks * 16;
+            if (!CanRead(bytes, offset, sliceLen))
                 return false;
 
-            int src = offset;
-            var palette = new Color32[4];
-            for (int by = 0; by < blocksY; by++)
+            var source = new NativeArray<byte>(sliceLen, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            fixed (byte* src = bytes)
+                UnsafeUtility.MemCpy(source.GetUnsafePtr(), src + offset, sliceLen);
+
+            var output = new NativeArray<Color32>(width * height, Allocator.TempJob);
+
+            new Bc2DecompressJob
             {
-                for (int bx = 0; bx < blocksX; bx++)
-                {
-                    ulong alphaBits = ReadUInt64LE(bytes, src + 0);
-                    ushort c0 = ReadUInt16LE(bytes, src + 8);
-                    ushort c1 = ReadUInt16LE(bytes, src + 10);
-                    uint colorIndices = ReadUInt32LE(bytes, src + 12);
-                    src += blockSize;
+                Source = source,
+                BlocksX = blocksX,
+                Width = width,
+                Height = height,
+                Output = output,
+            }.Schedule(numBlocks, 32).Complete();
 
-                    BuildBc1Palette(c0, c1, palette, forceFourColor: true);
-                    WriteColorBlockWithExplicitAlpha(
-                        pixels,
-                        width,
-                        height,
-                        bx,
-                        by,
-                        palette,
-                        colorIndices,
-                        alphaBits);
-                }
-            }
-
+            pixels = output.ToArray();
+            source.Dispose();
+            output.Dispose();
             return true;
         }
 
-        static bool TryDecodeBc3(byte[] bytes, int offset, int width, int height, out Color32[] pixels)
+        static unsafe bool TryDecodeBc3(byte[] bytes, int offset, int width, int height, out Color32[] pixels)
         {
-            pixels = new Color32[width * height];
+            pixels = null;
             int blocksX = (width + 3) / 4;
             int blocksY = (height + 3) / 4;
-            int blockSize = 16;
-            int required = blocksX * blocksY * blockSize;
-            if (!CanRead(bytes, offset, required))
+            int numBlocks = blocksX * blocksY;
+            int sliceLen = numBlocks * 16;
+            if (!CanRead(bytes, offset, sliceLen))
                 return false;
 
-            int src = offset;
-            var alphaPalette = new byte[8];
-            var palette = new Color32[4];
-            for (int by = 0; by < blocksY; by++)
+            var source = new NativeArray<byte>(sliceLen, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            fixed (byte* src = bytes)
+                UnsafeUtility.MemCpy(source.GetUnsafePtr(), src + offset, sliceLen);
+
+            var output = new NativeArray<Color32>(width * height, Allocator.TempJob);
+
+            new Bc3DecompressJob
             {
-                for (int bx = 0; bx < blocksX; bx++)
-                {
-                    byte a0 = bytes[src + 0];
-                    byte a1 = bytes[src + 1];
-                    ulong alphaIndexBits =
-                        (ulong)bytes[src + 2] |
-                        ((ulong)bytes[src + 3] << 8) |
-                        ((ulong)bytes[src + 4] << 16) |
-                        ((ulong)bytes[src + 5] << 24) |
-                        ((ulong)bytes[src + 6] << 32) |
-                        ((ulong)bytes[src + 7] << 40);
-                    ushort c0 = ReadUInt16LE(bytes, src + 8);
-                    ushort c1 = ReadUInt16LE(bytes, src + 10);
-                    uint colorIndices = ReadUInt32LE(bytes, src + 12);
-                    src += blockSize;
+                Source = source,
+                BlocksX = blocksX,
+                Width = width,
+                Height = height,
+                Output = output,
+            }.Schedule(numBlocks, 32).Complete();
 
-                    BuildBc3AlphaPalette(a0, a1, alphaPalette);
-                    BuildBc1Palette(c0, c1, palette, forceFourColor: true);
-                    WriteColorBlockWithInterpolatedAlpha(
-                        pixels,
-                        width,
-                        height,
-                        bx,
-                        by,
-                        palette,
-                        colorIndices,
-                        alphaPalette,
-                        alphaIndexBits);
-                }
-            }
-
+            pixels = output.ToArray();
+            source.Dispose();
+            output.Dispose();
             return true;
         }
 
@@ -954,307 +931,6 @@ namespace OpenFarCry.Importer.Texture
             source.Dispose();
             output.Dispose();
             return true;
-        }
-
-        static void WriteColorBlock(
-            Color32[] pixels,
-            int width,
-            int height,
-            int blockX,
-            int blockY,
-            Color32[] palette,
-            uint indices)
-        {
-            int startX = blockX * 4;
-            int startY = blockY * 4;
-            for (int py = 0; py < 4; py++)
-            {
-                int y = startY + py;
-                if (y >= height)
-                    continue;
-
-                for (int px = 0; px < 4; px++)
-                {
-                    int x = startX + px;
-                    if (x >= width)
-                        continue;
-
-                    int p = py * 4 + px;
-                    int colorIndex = (int)((indices >> (p * 2)) & 0x3);
-                    pixels[y * width + x] = palette[colorIndex];
-                }
-            }
-        }
-
-        static void WriteColorBlockWithExplicitAlpha(
-            Color32[] pixels,
-            int width,
-            int height,
-            int blockX,
-            int blockY,
-            Color32[] palette,
-            uint colorIndices,
-            ulong alphaBits)
-        {
-            int startX = blockX * 4;
-            int startY = blockY * 4;
-            for (int py = 0; py < 4; py++)
-            {
-                int y = startY + py;
-                if (y >= height)
-                    continue;
-
-                for (int px = 0; px < 4; px++)
-                {
-                    int x = startX + px;
-                    if (x >= width)
-                        continue;
-
-                    int p = py * 4 + px;
-                    int colorIndex = (int)((colorIndices >> (p * 2)) & 0x3);
-                    byte alpha = (byte)(((alphaBits >> (p * 4)) & 0xF) * 17);
-
-                    var c = palette[colorIndex];
-                    c.a = alpha;
-                    pixels[y * width + x] = c;
-                }
-            }
-        }
-
-        static void WriteColorBlockWithInterpolatedAlpha(
-            Color32[] pixels,
-            int width,
-            int height,
-            int blockX,
-            int blockY,
-            Color32[] palette,
-            uint colorIndices,
-            byte[] alphaPalette,
-            ulong alphaIndexBits)
-        {
-            int startX = blockX * 4;
-            int startY = blockY * 4;
-            for (int py = 0; py < 4; py++)
-            {
-                int y = startY + py;
-                if (y >= height)
-                    continue;
-
-                for (int px = 0; px < 4; px++)
-                {
-                    int x = startX + px;
-                    if (x >= width)
-                        continue;
-
-                    int p = py * 4 + px;
-                    int colorIndex = (int)((colorIndices >> (p * 2)) & 0x3);
-                    int alphaIndex = (int)((alphaIndexBits >> (p * 3)) & 0x7);
-                    byte alpha = alphaPalette[alphaIndex];
-
-                    var c = palette[colorIndex];
-                    c.a = alpha;
-                    pixels[y * width + x] = c;
-                }
-            }
-        }
-
-        static void DecodeBc4UNormBlock(byte[] bytes, int offset, byte[] outValues)
-        {
-            byte a0 = bytes[offset + 0];
-            byte a1 = bytes[offset + 1];
-            ulong bits =
-                (ulong)bytes[offset + 2] |
-                ((ulong)bytes[offset + 3] << 8) |
-                ((ulong)bytes[offset + 4] << 16) |
-                ((ulong)bytes[offset + 5] << 24) |
-                ((ulong)bytes[offset + 6] << 32) |
-                ((ulong)bytes[offset + 7] << 40);
-
-            var palette = new byte[8];
-            BuildBc3AlphaPalette(a0, a1, palette);
-            for (int i = 0; i < 16; i++)
-            {
-                int idx = (int)((bits >> (i * 3)) & 0x7);
-                outValues[i] = palette[idx];
-            }
-        }
-
-        static void DecodeBc4SNormBlock(byte[] bytes, int offset, byte[] outValues)
-        {
-            int s0 = (sbyte)bytes[offset + 0];
-            int s1 = (sbyte)bytes[offset + 1];
-            ulong bits =
-                (ulong)bytes[offset + 2] |
-                ((ulong)bytes[offset + 3] << 8) |
-                ((ulong)bytes[offset + 4] << 16) |
-                ((ulong)bytes[offset + 5] << 24) |
-                ((ulong)bytes[offset + 6] << 32) |
-                ((ulong)bytes[offset + 7] << 40);
-
-            var palette = new int[8];
-            BuildBc4SNormPalette(s0, s1, palette);
-            for (int i = 0; i < 16; i++)
-            {
-                int idx = (int)((bits >> (i * 3)) & 0x7);
-                outValues[i] = SignedNormToByte(palette[idx]);
-            }
-        }
-
-        static void BuildBc4SNormPalette(int s0, int s1, int[] palette)
-        {
-            palette[0] = s0;
-            palette[1] = s1;
-            if (s0 > s1)
-            {
-                palette[2] = (6 * s0 + 1 * s1) / 7;
-                palette[3] = (5 * s0 + 2 * s1) / 7;
-                palette[4] = (4 * s0 + 3 * s1) / 7;
-                palette[5] = (3 * s0 + 4 * s1) / 7;
-                palette[6] = (2 * s0 + 5 * s1) / 7;
-                palette[7] = (1 * s0 + 6 * s1) / 7;
-            }
-            else
-            {
-                palette[2] = (4 * s0 + 1 * s1) / 5;
-                palette[3] = (3 * s0 + 2 * s1) / 5;
-                palette[4] = (2 * s0 + 3 * s1) / 5;
-                palette[5] = (1 * s0 + 4 * s1) / 5;
-                palette[6] = -128;
-                palette[7] = 127;
-            }
-        }
-
-        static byte SignedNormToByte(int value)
-        {
-            if (value < -128)
-                value = -128;
-            if (value > 127)
-                value = 127;
-            return (byte)(value + 128);
-        }
-
-        static void WriteSingleChannelBlock(
-            Color32[] pixels,
-            int width,
-            int height,
-            int blockX,
-            int blockY,
-            byte[] channelValues,
-            int channel)
-        {
-            int startX = blockX * 4;
-            int startY = blockY * 4;
-            for (int py = 0; py < 4; py++)
-            {
-                int y = startY + py;
-                if (y >= height)
-                    continue;
-
-                for (int px = 0; px < 4; px++)
-                {
-                    int x = startX + px;
-                    if (x >= width)
-                        continue;
-
-                    int i = py * 4 + px;
-                    byte v = channelValues[i];
-                    var c = new Color32(v, v, v, 255);
-                    if (channel == 1)
-                        c = new Color32(0, v, 0, 255);
-                    pixels[y * width + x] = c;
-                }
-            }
-        }
-
-        static void WriteRgBlock(
-            Color32[] pixels,
-            int width,
-            int height,
-            int blockX,
-            int blockY,
-            byte[] reds,
-            byte[] greens)
-        {
-            int startX = blockX * 4;
-            int startY = blockY * 4;
-            for (int py = 0; py < 4; py++)
-            {
-                int y = startY + py;
-                if (y >= height)
-                    continue;
-
-                for (int px = 0; px < 4; px++)
-                {
-                    int x = startX + px;
-                    if (x >= width)
-                        continue;
-
-                    int i = py * 4 + px;
-                    pixels[y * width + x] = new Color32(reds[i], greens[i], 0, 255);
-                }
-            }
-        }
-
-        static void BuildBc1Palette(ushort c0, ushort c1, Color32[] palette, bool forceFourColor)
-        {
-            palette[0] = Rgb565ToColor(c0, 255);
-            palette[1] = Rgb565ToColor(c1, 255);
-
-            if (c0 > c1 || forceFourColor)
-            {
-                palette[2] = LerpColor(palette[0], palette[1], 2, 1, 3);
-                palette[3] = LerpColor(palette[0], palette[1], 1, 2, 3);
-            }
-            else
-            {
-                palette[2] = LerpColor(palette[0], palette[1], 1, 1, 2);
-                palette[3] = new Color32(0, 0, 0, 0);
-            }
-        }
-
-        static void BuildBc3AlphaPalette(byte a0, byte a1, byte[] palette)
-        {
-            palette[0] = a0;
-            palette[1] = a1;
-            if (a0 > a1)
-            {
-                palette[2] = (byte)((6 * a0 + 1 * a1) / 7);
-                palette[3] = (byte)((5 * a0 + 2 * a1) / 7);
-                palette[4] = (byte)((4 * a0 + 3 * a1) / 7);
-                palette[5] = (byte)((3 * a0 + 4 * a1) / 7);
-                palette[6] = (byte)((2 * a0 + 5 * a1) / 7);
-                palette[7] = (byte)((1 * a0 + 6 * a1) / 7);
-            }
-            else
-            {
-                palette[2] = (byte)((4 * a0 + 1 * a1) / 5);
-                palette[3] = (byte)((3 * a0 + 2 * a1) / 5);
-                palette[4] = (byte)((2 * a0 + 3 * a1) / 5);
-                palette[5] = (byte)((1 * a0 + 4 * a1) / 5);
-                palette[6] = 0;
-                palette[7] = 255;
-            }
-        }
-
-        static Color32 LerpColor(Color32 a, Color32 b, int wa, int wb, int div)
-        {
-            return new Color32(
-                (byte)((a.r * wa + b.r * wb) / div),
-                (byte)((a.g * wa + b.g * wb) / div),
-                (byte)((a.b * wa + b.b * wb) / div),
-                255);
-        }
-
-        static Color32 Rgb565ToColor(ushort c, byte alpha)
-        {
-            int r5 = (c >> 11) & 0x1F;
-            int g6 = (c >> 5) & 0x3F;
-            int b5 = c & 0x1F;
-
-            byte r = (byte)((r5 * 255 + 15) / 31);
-            byte g = (byte)((g6 * 255 + 31) / 63);
-            byte b = (byte)((b5 * 255 + 15) / 31);
-            return new Color32(r, g, b, alpha);
         }
 
         static uint ReadPackedPixel(byte[] bytes, int offset, int bytesPerPixel)
