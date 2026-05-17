@@ -37,9 +37,19 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
-        sealed class CachedPathEntry
+        // A single parsed CafFile is shared between one semantic entry and any
+        // number of path entries. Ownership is reference-counted so the underlying
+        // Persistent NativeArrays are disposed exactly once — when the last
+        // referencing cache entry is removed.
+        sealed class CafHandle
         {
             public CafFile Caf;
+            public int RefCount;
+        }
+
+        sealed class CachedPathEntry
+        {
+            public CafHandle Handle;
             public string SourceBytesHash;
             public string ContentHash;
             public long LastAccessTick;
@@ -47,7 +57,7 @@ namespace OpenFarCry.Importer.Cgf
 
         sealed class CachedSemanticEntry
         {
-            public CafFile Caf;
+            public CafHandle Handle;
             public long LastAccessTick;
         }
 
@@ -82,27 +92,21 @@ namespace OpenFarCry.Importer.Cgf
                     s_pathHits++;
                     cached.LastAccessTick = ++s_tick;
                     contentHash = cached.ContentHash;
-                    return cached.Caf;
+                    return cached.Handle.Caf;
                 }
                 s_pathMisses++;
 
                 if (s_contentHashBySource.TryGetValue(sourceBytesHash, out var knownContentHash) &&
                     !string.IsNullOrEmpty(knownContentHash) &&
                     s_bySemantic.TryGetValue(knownContentHash, out var cachedSemantic) &&
-                    cachedSemantic?.Caf != null)
+                    cachedSemantic?.Handle?.Caf != null)
                 {
                     s_semanticHits++;
                     cachedSemantic.LastAccessTick = ++s_tick;
                     contentHash = knownContentHash;
-                    s_byPath[virtualPath] = new CachedPathEntry
-                    {
-                        Caf = cachedSemantic.Caf,
-                        SourceBytesHash = sourceBytesHash,
-                        ContentHash = contentHash,
-                        LastAccessTick = s_tick
-                    };
+                    SetPathEntryUnsafe(virtualPath, cachedSemantic.Handle, sourceBytesHash, contentHash);
                     EvictOldestUnsafe();
-                    return cachedSemantic.Caf;
+                    return cachedSemantic.Handle.Caf;
                 }
             }
 
@@ -112,36 +116,31 @@ namespace OpenFarCry.Importer.Cgf
             lock (s_sync)
             {
                 if (s_bySemantic.TryGetValue(contentHash, out var existingSemantic) &&
-                    existingSemantic?.Caf != null)
+                    existingSemantic?.Handle?.Caf != null)
                 {
+                    // Another thread/path produced the same semantic content while we
+                    // parsed. The freshly-parsed CafFile owns Persistent NativeArrays
+                    // (tracks); discard it explicitly or it leaks.
+                    parsed.Dispose();
+
                     s_semanticHits++;
                     existingSemantic.LastAccessTick = ++s_tick;
                     s_contentHashBySource[sourceBytesHash] = contentHash;
-                    s_byPath[virtualPath] = new CachedPathEntry
-                    {
-                        Caf = existingSemantic.Caf,
-                        SourceBytesHash = sourceBytesHash,
-                        ContentHash = contentHash,
-                        LastAccessTick = s_tick
-                    };
+                    SetPathEntryUnsafe(virtualPath, existingSemantic.Handle, sourceBytesHash, contentHash);
                     EvictOldestUnsafe();
-                    return existingSemantic.Caf;
+                    return existingSemantic.Handle.Caf;
                 }
 
                 s_semanticMisses++;
+                var handle = new CafHandle { Caf = parsed, RefCount = 0 };
+                handle.RefCount++; // semantic entry reference
                 s_bySemantic[contentHash] = new CachedSemanticEntry
                 {
-                    Caf = parsed,
+                    Handle = handle,
                     LastAccessTick = ++s_tick
                 };
                 s_contentHashBySource[sourceBytesHash] = contentHash;
-                s_byPath[virtualPath] = new CachedPathEntry
-                {
-                    Caf = parsed,
-                    SourceBytesHash = sourceBytesHash,
-                    ContentHash = contentHash,
-                    LastAccessTick = s_tick
-                };
+                SetPathEntryUnsafe(virtualPath, handle, sourceBytesHash, contentHash);
                 EvictOldestUnsafe();
             }
 
@@ -159,9 +158,11 @@ namespace OpenFarCry.Importer.Cgf
         {
             lock (s_sync)
             {
+                foreach (var entry in s_byPath.Values)
+                    ReleaseHandleUnsafe(entry.Handle);
                 s_byPath.Clear();
                 foreach (var entry in s_bySemantic.Values)
-                    entry.Caf?.Dispose();
+                    ReleaseHandleUnsafe(entry.Handle);
                 s_bySemantic.Clear();
                 s_contentHashBySource.Clear();
                 s_tick = 0;
@@ -170,6 +171,41 @@ namespace OpenFarCry.Importer.Cgf
                 s_semanticHits = 0;
                 s_semanticMisses = 0;
             }
+        }
+
+        // Decrements a handle's reference count and disposes the underlying
+        // CafFile once no cache entry references it any more.
+        // Must be called under s_sync.
+        static void ReleaseHandleUnsafe(CafHandle handle)
+        {
+            if (handle == null)
+                return;
+
+            handle.RefCount--;
+            if (handle.RefCount <= 0)
+            {
+                handle.Caf?.Dispose();
+                handle.Caf = null;
+            }
+        }
+
+        // Inserts or replaces a path entry, retaining the new handle and
+        // releasing the handle of any entry it overwrites.
+        // Must be called under s_sync.
+        static void SetPathEntryUnsafe(
+            string virtualPath, CafHandle handle, string sourceBytesHash, string contentHash)
+        {
+            if (s_byPath.TryGetValue(virtualPath, out var prev))
+                ReleaseHandleUnsafe(prev.Handle);
+
+            handle.RefCount++;
+            s_byPath[virtualPath] = new CachedPathEntry
+            {
+                Handle = handle,
+                SourceBytesHash = sourceBytesHash,
+                ContentHash = contentHash,
+                LastAccessTick = s_tick
+            };
         }
 
         // Must be called under s_sync.
@@ -188,6 +224,10 @@ namespace OpenFarCry.Importer.Cgf
                     }
                 }
                 if (oldest == null) break;
+
+                if (s_byPath.TryGetValue(oldest, out var pathEntry))
+                    ReleaseHandleUnsafe(pathEntry.Handle);
+
                 s_byPath.Remove(oldest);
             }
 
@@ -204,9 +244,9 @@ namespace OpenFarCry.Importer.Cgf
                     }
                 }
                 if (oldest == null) break;
-                
+
                 if (s_bySemantic.TryGetValue(oldest, out var entry))
-                    entry.Caf?.Dispose();
+                    ReleaseHandleUnsafe(entry.Handle);
 
                 s_bySemantic.Remove(oldest);
             }
@@ -327,13 +367,8 @@ namespace OpenFarCry.Importer.Cgf
         {
             lock (s_sync)
             {
-                s_byPath[path] = new CachedPathEntry
-                {
-                    Caf = caf,
-                    SourceBytesHash = sourceBytesHash,
-                    ContentHash = contentHash,
-                    LastAccessTick = ++s_tick
-                };
+                ++s_tick;
+                SetPathEntryUnsafe(path, new CafHandle { Caf = caf, RefCount = 0 }, sourceBytesHash, contentHash);
             }
         }
 
@@ -341,9 +376,12 @@ namespace OpenFarCry.Importer.Cgf
         {
             lock (s_sync)
             {
+                if (s_bySemantic.TryGetValue(contentHash, out var prev))
+                    ReleaseHandleUnsafe(prev.Handle);
+
                 s_bySemantic[contentHash] = new CachedSemanticEntry
                 {
-                    Caf = caf,
+                    Handle = new CafHandle { Caf = caf, RefCount = 1 },
                     LastAccessTick = ++s_tick
                 };
             }

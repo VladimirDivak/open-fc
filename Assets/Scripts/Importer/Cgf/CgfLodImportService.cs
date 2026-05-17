@@ -110,10 +110,11 @@ namespace OpenFarCry.Importer.Cgf
                 for (int i = 0; i < siblingLodPaths.Count; i++)
                 {
                     string lodPath = siblingLodPaths[i];
+                    CgfFile parsedLod = null;
                     try
                     {
                         byte[] bytes = CgfResourceImportService.Instance.LoadRuntimeResourceBytes(lodPath);
-                        var parsedLod = CgfParser.Parse(bytes);
+                        parsedLod = CgfParser.Parse(bytes);
                         parsedLod.SourceVirtualPath = lodPath;
                         var buildLod = CgfMeshBuilder.Build(parsedLod, hasSkeleton, importScale);
                         if (buildLod?.Mesh == null)
@@ -162,6 +163,12 @@ namespace OpenFarCry.Importer.Cgf
                     catch (Exception e)
                     {
                         Debug.LogWarning($"[CgfImporter] Failed to build LOD from '{lodPath}': {e.Message}");
+                    }
+                    finally
+                    {
+                        // parsedLod owns Persistent NativeArrays (mesh chunks); the built
+                        // Unity Mesh is independent, so the CgfFile can be released here.
+                        parsedLod?.Dispose();
                     }
                 }
             }
