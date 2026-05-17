@@ -384,6 +384,12 @@ namespace OpenFarCry.Importer.Cgf
             anim.clip = defaultClip ?? imported[0].Clip;
             anim.playAutomatically = true;
 
+            // playAutomatically only auto-plays at the Animation component's first
+            // enable. This component is added at runtime to an already-active object
+            // and 'clip' is assigned afterwards, so play it explicitly.
+            if (anim.clip != null)
+                anim.Play();
+
             return imported;
         }
 
