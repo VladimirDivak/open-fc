@@ -101,11 +101,10 @@ namespace OpenFarCry.Importer.Cgf
                 right = -right;
 
             var outM = Matrix4x4.identity;
-            // Fill row-major result
             outM.m00 = right.x;   outM.m01 = up.x;   outM.m02 = forward.x;
             outM.m10 = right.y;   outM.m11 = up.y;   outM.m12 = forward.y;
             outM.m20 = right.z;   outM.m21 = up.z;   outM.m22 = forward.z;
-            outM.m30 = m.m30;     outM.m31 = m.m31;   outM.m32 = m.m32;
+            outM.m03 = m.m03;     outM.m13 = m.m13;  outM.m23 = m.m23;
             return outM;
         }
 

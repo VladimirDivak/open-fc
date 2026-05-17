@@ -101,6 +101,7 @@ namespace OpenFarCry.Importer.Cgf
             int linkOffset = LinkOffsets[pi];
 
             float3 pos = float3.zero;
+            float3 nrm = float3.zero;
             bool linked = false;
 
             if (linkCount > 0)
@@ -123,16 +124,22 @@ namespace OpenFarCry.Importer.Cgf
                         if (link.BoneID < 0 || link.BoneID >= BindGlobalsByBoneId.Length)
                             continue;
 
+                        float4x4 boneMatrix = BindGlobalsByBoneId[link.BoneID];
+                        float weight = link.Blending * norm;
+
                         // Link offset is already in Cry space, needs conversion
                         float3 offset = new float3(link.OX, link.OZ, -link.OY) * ImportScale;
-                        pos += math.mul(BindGlobalsByBoneId[link.BoneID], new float4(offset, 1f)).xyz * (link.Blending * norm);
+                        pos += math.mul(boneMatrix, new float4(offset, 1f)).xyz * weight;
+                        
+                        // Normal rotation (RemoveScale ensures rotation is normalized)
+                        nrm += math.mul((float3x3)boneMatrix, rawNrm) * weight;
                     }
                     linked = true;
                 }
             }
 
             OutPositions[i] = linked ? pos : rawPos;
-            OutNormals[i]   = math.normalizesafe(rawNrm);
+            OutNormals[i]   = math.normalizesafe(linked ? nrm : rawNrm);
         }
     }
 

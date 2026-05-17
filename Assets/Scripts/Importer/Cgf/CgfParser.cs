@@ -515,14 +515,11 @@ namespace OpenFarCry.Importer.Cgf
                 throw new InvalidDataException($"BoneInitialPos: unreasonable bone count {numBonesU}.");
 
             int numBones = (int)numBonesU;
-            int boneCount = fallbackBoneCount > 0 ? fallbackBoneCount : numBones;
-            var matrices = new Matrix4x4[boneCount];
+            var matrices = new Matrix4x4[numBones];
 
             for (int i = 0; i < numBones; i++)
             {
-                var m = ReadMatrix43(ref r);
-                if (i < boneCount)
-                    matrices[i] = m;
+                matrices[i] = ReadMatrix43(ref r);
             }
 
             return new CgfBoneInitPosChunk

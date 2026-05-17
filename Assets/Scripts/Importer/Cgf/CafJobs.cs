@@ -70,8 +70,8 @@ namespace OpenFarCry.Importer.Cgf
             OutPositions[i] = new float3(p.x, p.z, -p.y) * ImportScale;
 
             // LocalRotationInImporterSpace: q_basis * conjugate(q_cry) * q_basis_inv
-            // BasisChange is 90 deg around X
-            quaternion qBasis = quaternion.RotateX(math.radians(90f));
+            // BasisChange maps Cry (x,y,z) -> importer (x,z,-y): RotateX(-90 deg).
+            quaternion qBasis = quaternion.RotateX(math.radians(-90f));
             quaternion qCry = RawRotations[i];
             
             // Cry quaternions might not be normalized in raw block
