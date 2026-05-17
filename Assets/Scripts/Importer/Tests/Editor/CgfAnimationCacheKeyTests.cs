@@ -12,11 +12,11 @@ namespace OpenFarCry.Importer.Tests.Editor
             const string alias = "idle";
             const float scale = 0.01f;
             const string compatibility = "fp:anim-fp";
-            string loopKey = CgfAnimationSetCache.BuildLoopPolicyKey(alias, shouldLoop: true);
+            string loopKey = CgfCacheKeys.BuildLoopPolicyKey(alias, shouldLoop: true);
 
-            string keyA = CgfAnimationSetCache.BuildClipCacheKey(
+            string keyA = CgfCacheKeys.BuildClipCacheKey(
                 cafHash, alias, scale, compatibility, "layout-A", loopKey);
-            string keyB = CgfAnimationSetCache.BuildClipCacheKey(
+            string keyB = CgfCacheKeys.BuildClipCacheKey(
                 cafHash, alias, scale, compatibility, "layout-B", loopKey);
 
             Assert.That(keyA, Is.Not.EqualTo(keyB));
@@ -33,13 +33,13 @@ namespace OpenFarCry.Importer.Tests.Editor
             const string alias = "walk";
             const float scale = 0.01f;
             const string compat = "fp:anim-fp";
-            string loopKey = CgfAnimationSetCache.BuildLoopPolicyKey(alias, shouldLoop: true);
+            string loopKey = CgfCacheKeys.BuildLoopPolicyKey(alias, shouldLoop: true);
 
-            string semLayoutA = CgfAnimationSetCache.BuildSemanticClipCacheKey(cafHash, alias, scale, loopKey);
-            string semLayoutB = CgfAnimationSetCache.BuildSemanticClipCacheKey(cafHash, alias, scale, loopKey);
+            string semLayoutA = CgfCacheKeys.BuildSemanticClipCacheKey(cafHash, alias, scale, loopKey);
+            string semLayoutB = CgfCacheKeys.BuildSemanticClipCacheKey(cafHash, alias, scale, loopKey);
 
-            string clipKeyA = CgfAnimationSetCache.BuildClipCacheKey(cafHash, alias, scale, compat, "layout-A", loopKey);
-            string clipKeyB = CgfAnimationSetCache.BuildClipCacheKey(cafHash, alias, scale, compat, "layout-B", loopKey);
+            string clipKeyA = CgfCacheKeys.BuildClipCacheKey(cafHash, alias, scale, compat, "layout-A", loopKey);
+            string clipKeyB = CgfCacheKeys.BuildClipCacheKey(cafHash, alias, scale, compat, "layout-B", loopKey);
 
             Assert.That(semLayoutA, Is.EqualTo(semLayoutB),
                 "Semantic key must be identical regardless of model layout");
@@ -53,17 +53,17 @@ namespace OpenFarCry.Importer.Tests.Editor
             const string animFp = "anim-fp";
             const float scale = 0.01f;
 
-            string keyA = CgfAnimationSetCache.BuildAnimationSetModelLayoutKey(
+            string keyA = CgfCacheKeys.BuildAnimationSetModelLayoutKey(
                 "objects/characters/mercenaries/merc_cover/merc_cover.cgf",
                 animFp,
                 "layout-A",
                 scale);
-            string keyB = CgfAnimationSetCache.BuildAnimationSetModelLayoutKey(
+            string keyB = CgfCacheKeys.BuildAnimationSetModelLayoutKey(
                 "objects/characters/mercenaries/merc_tshirt/merc_tshirt.cgf",
                 animFp,
                 "layout-A",
                 scale);
-            string keyC = CgfAnimationSetCache.BuildAnimationSetModelLayoutKey(
+            string keyC = CgfCacheKeys.BuildAnimationSetModelLayoutKey(
                 "objects/characters/mercenaries/merc_cover/merc_cover.cgf",
                 animFp,
                 "layout-B",
@@ -77,22 +77,22 @@ namespace OpenFarCry.Importer.Tests.Editor
         public void AnimationSetCacheKey_UsesAnimFingerprintLayoutAndSet()
         {
             const float scale = 0.01f;
-            string keyA = CgfAnimationSetCache.BuildAnimationSetCacheKey(
+            string keyA = CgfCacheKeys.BuildAnimationSetCacheKey(
                 animationFingerprint: "anim-fp",
                 pathLayoutHash: "layout-A",
                 animationSetHash: "set-A",
                 importScale: scale);
-            string keyB = CgfAnimationSetCache.BuildAnimationSetCacheKey(
+            string keyB = CgfCacheKeys.BuildAnimationSetCacheKey(
                 animationFingerprint: "anim-fp",
                 pathLayoutHash: "layout-A",
                 animationSetHash: "set-A",
                 importScale: scale);
-            string keyC = CgfAnimationSetCache.BuildAnimationSetCacheKey(
+            string keyC = CgfCacheKeys.BuildAnimationSetCacheKey(
                 animationFingerprint: "anim-fp",
                 pathLayoutHash: "layout-B",
                 animationSetHash: "set-A",
                 importScale: scale);
-            string keyD = CgfAnimationSetCache.BuildAnimationSetCacheKey(
+            string keyD = CgfCacheKeys.BuildAnimationSetCacheKey(
                 animationFingerprint: "anim-fp",
                 pathLayoutHash: "layout-A",
                 animationSetHash: "set-B",

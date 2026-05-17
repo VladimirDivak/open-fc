@@ -74,10 +74,6 @@ namespace OpenFarCry.Importer.Cgf
         const int MaxAnimationSetEntries = 256;
         const int MaxAnimationSetModelLinks = 2048;
         const int MaxSemanticClipEntries = 4096;
-        const string ClipBuildVersion = "clip-v2";
-        const string LoopPolicyVersion = "loop-v1";
-        const string AnimationSetVersion = "animset-v1";
-        const string SemanticClipVersion = "semclip-v1";
 
         // ── Stats ─────────────────────────────────────────────────────────────
 
@@ -117,88 +113,7 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
-        // ── Key builders ──────────────────────────────────────────────────────
-
-        internal static string BuildCompatibilityCacheKey(string animationFingerprint, string controllerMapKey)
-        {
-            if (!string.IsNullOrWhiteSpace(animationFingerprint) &&
-                !string.Equals(animationFingerprint, "none", StringComparison.OrdinalIgnoreCase))
-            {
-                return "fp:" + animationFingerprint;
-            }
-
-            return "map:" + (controllerMapKey ?? "<empty>");
-        }
-
-        internal static string BuildLoopPolicyKey(string alias, bool shouldLoop)
-        {
-            string aliasKey = string.IsNullOrWhiteSpace(alias) ? "<empty>" : alias.ToLowerInvariant();
-            return $"{LoopPolicyVersion}|alias:{aliasKey}|loop:{(shouldLoop ? 1 : 0)}";
-        }
-
-        internal static string BuildClipCacheKey(
-            string cafContentHash,
-            string alias,
-            float importScale,
-            string compatibilityKey,
-            string pathLayoutHash,
-            string loopPolicyKey)
-        {
-            string aliasKey = string.IsNullOrWhiteSpace(alias) ? "<empty>" : alias.ToLowerInvariant();
-            return
-                $"v:{ClipBuildVersion}|caf:{cafContentHash}|alias:{aliasKey}|scale:{importScale:R}|compat:{compatibilityKey}|layout:{pathLayoutHash}|loop:{loopPolicyKey}";
-        }
-
-        internal static string BuildAnimationSetModelLayoutKey(
-            string modelVirtualPath,
-            string animationFingerprint,
-            string pathLayoutHash,
-            float importScale)
-        {
-            string modelKey = string.IsNullOrWhiteSpace(modelVirtualPath) ? "<none>" : modelVirtualPath.ToLowerInvariant();
-            string fpKey = string.IsNullOrWhiteSpace(animationFingerprint) ? "none" : animationFingerprint;
-            string layoutKey = string.IsNullOrWhiteSpace(pathLayoutHash) ? "none" : pathLayoutHash;
-            return $"model:{modelKey}|fp:{fpKey}|layout:{layoutKey}|scale:{importScale:R}";
-        }
-
-        internal static string BuildAnimationSetCacheKey(
-            string animationFingerprint,
-            string pathLayoutHash,
-            string animationSetHash,
-            float importScale)
-        {
-            string fpKey = string.IsNullOrWhiteSpace(animationFingerprint) ? "none" : animationFingerprint;
-            string layoutKey = string.IsNullOrWhiteSpace(pathLayoutHash) ? "none" : pathLayoutHash;
-            string setKey = string.IsNullOrWhiteSpace(animationSetHash) ? "none" : animationSetHash;
-            return $"v:{AnimationSetVersion}|fp:{fpKey}|layout:{layoutKey}|set:{setKey}|scale:{importScale:R}|clip:{ClipBuildVersion}";
-        }
-
-        internal static string BuildSemanticClipCacheKey(
-            string cafContentHash,
-            string alias,
-            float importScale,
-            string loopPolicyKey)
-        {
-            string aliasKey = string.IsNullOrWhiteSpace(alias) ? "<empty>" : alias.ToLowerInvariant();
-            string loopKey = string.IsNullOrWhiteSpace(loopPolicyKey) ? "<none>" : loopPolicyKey;
-            return $"v:{SemanticClipVersion}|caf:{cafContentHash}|alias:{aliasKey}|scale:{importScale:R}|loop:{loopKey}";
-        }
-
-        internal static string ExtractAnimationSetHashFromCacheKey(string cacheKey)
-        {
-            if (string.IsNullOrEmpty(cacheKey))
-                return "none";
-
-            const string marker = "|set:";
-            int start = cacheKey.IndexOf(marker, StringComparison.Ordinal);
-            if (start < 0)
-                return "none";
-            start += marker.Length;
-            int end = cacheKey.IndexOf("|scale:", start, StringComparison.Ordinal);
-            if (end < 0 || end <= start)
-                end = cacheKey.Length;
-            return cacheKey.Substring(start, end - start);
-        }
+        // Cache-key builders moved to CgfCacheKeys — single key contract.
 
         // ── Semantic clip cache ───────────────────────────────────────────────
 

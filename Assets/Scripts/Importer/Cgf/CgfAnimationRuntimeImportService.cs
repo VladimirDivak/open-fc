@@ -143,6 +143,52 @@ namespace OpenFarCry.Importer.Cgf
             if (smr == null || smr.bones == null || smr.bones.Length == 0)
                 return null;
 
+            if (!HasAnimationData(parsedFile, rigDefinition))
+                return null;
+
+            var controllerToPath = BuildControllerPathMap(go.transform, smr.bones, parsedFile, rigDefinition);
+            if (controllerToPath.Count == 0)
+                return null;
+
+            string controllerMapKey = BuildControllerMapKey(controllerToPath);
+            string pathLayoutHash = BuildPathLayoutHash(controllerToPath);
+            string animationFingerprint = BuildAnimationFingerprintForDiagnostics(
+                controllerToPath, rigDefinition, out bool usedRigDefinitionFingerprint);
+
+            var sources = CollectAnimationSources(modelVirtualPath);
+            if (sources.Count == 0)
+                return null;
+
+            string modelLayoutKey = CgfCacheKeys.BuildAnimationSetModelLayoutKey(
+                modelVirtualPath, animationFingerprint, pathLayoutHash, importScale);
+
+            // The diagnostics scope snapshots cache stats now and turns them into
+            // hit/miss deltas in Record() — keeping that bookkeeping out of here.
+            var diagnostics = new CgfAnimAttachDiagnosticsScope();
+            var set = BuildOrFetchAnimationSet(
+                sources, controllerToPath, controllerMapKey,
+                pathLayoutHash, animationFingerprint, modelLayoutKey, importScale);
+            diagnostics.Record(
+                modelVirtualPath, animationFingerprint, pathLayoutHash,
+                sources.Count, usedRigDefinitionFingerprint, set);
+
+            if (!set.UsedAnimationSetCache && set.MissingControllerTrackCount > 0)
+            {
+                warningMessage =
+                    $"[CgfImporter] Animation import skipped {set.MissingControllerTrackCount} controller track(s) " +
+                    $"across {set.ClipsWithMissingControllers} clip(s) because they were not mapped to skeleton bones. " +
+                    $"Unique controller ids: {CgfAnimationDiagnostics.FormatControllerIdSummary(set.MissingControllerIds)}.";
+            }
+
+            if (set.Imported.Count == 0)
+                return null;
+
+            ApplyAnimationsToGameObject(go, set.Imported);
+            return set.Imported;
+        }
+
+        static bool HasAnimationData(CgfFile parsedFile, CgfRigDefinition rigDefinition)
+        {
             bool hasRigSnapshotControllers = rigDefinition != null &&
                 rigDefinition.IsValid &&
                 rigDefinition.ControllerIdsByBoneIndex != null &&
@@ -151,219 +197,160 @@ namespace OpenFarCry.Importer.Cgf
                 parsedFile.BoneNames.Names.Length > 0 &&
                 parsedFile.BoneAnim?.Bones != null &&
                 parsedFile.BoneAnim.Bones.Length > 0;
-            if (!hasRigSnapshotControllers && !hasParsedBoneAnim)
-                return null;
+            return hasRigSnapshotControllers || hasParsedBoneAnim;
+        }
 
-            var controllerToPath = BuildControllerPathMap(go.transform, smr.bones, parsedFile, rigDefinition);
-            if (controllerToPath.Count == 0)
-                return null;
-            string controllerMapKey = BuildControllerMapKey(controllerToPath);
-            string pathLayoutHash = BuildPathLayoutHash(controllerToPath);
-            string animationFingerprint = BuildAnimationFingerprintForDiagnostics(controllerToPath, rigDefinition, out bool usedRigDefinitionFingerprint);
+        // Result of resolving the full animation set for one model — the imported
+        // clips plus the counters the diagnostics scope reports.
+        sealed class AnimationSetResult
+        {
+            public List<CgfRuntimeAnimationClip> Imported;
+            public Dictionary<uint, int> MissingControllerIds;
+            public int ExistingSourceCount;
+            public int MissingControllerTrackCount;
+            public int ClipsWithMissingControllers;
+            public int ClipBuiltFromSemanticCache;
+            public int ClipBuiltFromSemanticFresh;
+            public string AnimationSetHash;
+            public bool UsedAnimationSetCache;
+        }
 
-            var sources = CollectAnimationSources(modelVirtualPath);
-            if (sources.Count == 0)
-                return null;
-
-            var imported = new List<CgfRuntimeAnimationClip>(sources.Count);
-            var missingControllerIds = new Dictionary<uint, int>();
-            var animationSetComponents = new List<KeyValuePair<string, string>>(sources.Count);
-            string modelLayoutKey = CgfAnimationSetCache.BuildAnimationSetModelLayoutKey(
-                modelVirtualPath,
-                animationFingerprint,
-                pathLayoutHash,
-                importScale);
-            string animationSetHash = "none";
-            int clipsWithMissingControllers = 0;
-            int missingControllerTrackCount = 0;
-            int existingSourceCount = 0;
-            int clipBuiltFromSemanticCache = 0;
-            int clipBuiltFromSemanticFresh = 0;
-            bool usedAnimationSetCache = false;
-            var cafStatsBefore = CafLoader.GetStats();
-            var cacheStatsBefore = CgfAnimationSetCache.GetStats();
-            int cafHitBefore = cafStatsBefore.TotalHitCount;
-            int cafMissBefore = cafStatsBefore.SemanticMissCount;
-            int clipHitBefore = cacheStatsBefore.ClipHitCount;
-            int clipMissBefore = cacheStatsBefore.ClipMissCount;
-            int setHitBefore = cacheStatsBefore.AnimationSetHitCount;
-            int setMissBefore = cacheStatsBefore.AnimationSetMissCount;
-            int semClipHitBefore = cacheStatsBefore.SemanticClipHitCount;
-            int semClipMissBefore = cacheStatsBefore.SemanticClipMissCount;
+        // Returns the cached animation set for this model layout, or builds it
+        // from the CAF sources and caches it.
+        static AnimationSetResult BuildOrFetchAnimationSet(
+            List<AnimSourceEntry> sources,
+            Dictionary<uint, string> controllerToPath,
+            string controllerMapKey,
+            string pathLayoutHash,
+            string animationFingerprint,
+            string modelLayoutKey,
+            float importScale)
+        {
+            var result = new AnimationSetResult
+            {
+                Imported = new List<CgfRuntimeAnimationClip>(sources.Count),
+                MissingControllerIds = new Dictionary<uint, int>(),
+                AnimationSetHash = "none",
+            };
 
             bool hasCachedSetKeyForLayout =
                 CgfAnimationSetCache.TryGetAnimationSetKeyForModelLayout(modelLayoutKey, out string cachedAnimationSetKey);
             if (hasCachedSetKeyForLayout &&
                 CgfAnimationSetCache.TryGetCachedAnimationSet(cachedAnimationSetKey, out var cachedAnimationSet))
             {
-                usedAnimationSetCache = true;
-                imported = CgfAnimationSetCache.CloneCachedAnimationSet(cachedAnimationSet);
-                existingSourceCount = cachedAnimationSet.ExistingSourceCount;
-                missingControllerTrackCount = cachedAnimationSet.MissingControllerTrackCount;
-                animationSetHash = CgfAnimationSetCache.ExtractAnimationSetHashFromCacheKey(cachedAnimationSetKey);
+                result.UsedAnimationSetCache = true;
+                result.Imported = CgfAnimationSetCache.CloneCachedAnimationSet(cachedAnimationSet);
+                result.ExistingSourceCount = cachedAnimationSet.ExistingSourceCount;
+                result.MissingControllerTrackCount = cachedAnimationSet.MissingControllerTrackCount;
+                result.AnimationSetHash = CgfCacheKeys.ExtractAnimationSetHashFromCacheKey(cachedAnimationSetKey);
+                return result;
             }
-            else
-            {
-                if (hasCachedSetKeyForLayout)
-                    CgfAnimationSetCache.InvalidateAnimationSetKeyForModelLayout(modelLayoutKey, cachedAnimationSetKey);
 
-                for (int i = 0; i < sources.Count; i++)
+            if (hasCachedSetKeyForLayout)
+                CgfAnimationSetCache.InvalidateAnimationSetKeyForModelLayout(modelLayoutKey, cachedAnimationSetKey);
+
+            var animationSetComponents = new List<KeyValuePair<string, string>>(sources.Count);
+            for (int i = 0; i < sources.Count; i++)
+            {
+                var source = sources[i];
+                try
                 {
-                    var source = sources[i];
-                    try
+                    if (!FcFileSystem.Exists(source.VirtualPath))
                     {
-                        if (!FcFileSystem.Exists(source.VirtualPath))
+                        animationSetComponents.Add(new KeyValuePair<string, string>(source.Alias, "<missing>"));
+                        continue;
+                    }
+
+                    result.ExistingSourceCount++;
+
+                    var caf = CafLoader.GetOrParse(source.VirtualPath, out var cafContentHash);
+                    animationSetComponents.Add(new KeyValuePair<string, string>(source.Alias, cafContentHash));
+                    bool shouldLoop = CgfClipBuilder.ShouldTreatClipAsLoop(source.Alias, caf, controllerToPath, importScale);
+                    string loopPolicyKey = CgfCacheKeys.BuildLoopPolicyKey(source.Alias, shouldLoop);
+                    string compatibilityKey = CgfCacheKeys.BuildCompatibilityCacheKey(animationFingerprint, controllerMapKey);
+                    string semanticClipCacheKey = CgfCacheKeys.BuildSemanticClipCacheKey(
+                        cafContentHash,
+                        source.Alias,
+                        importScale,
+                        loopPolicyKey);
+                    string clipCacheKey = CgfCacheKeys.BuildClipCacheKey(
+                        cafContentHash,
+                        source.Alias,
+                        importScale,
+                        compatibilityKey,
+                        pathLayoutHash,
+                        loopPolicyKey);
+
+                    if (!CgfAnimationSetCache.TryGetCachedClip(clipCacheKey, out var clip))
+                    {
+                        bool usedSemanticCacheForBuild = CgfAnimationSetCache.TryGetCachedSemanticClip(semanticClipCacheKey, out var semanticClipData);
+                        if (!usedSemanticCacheForBuild)
                         {
-                            animationSetComponents.Add(new KeyValuePair<string, string>(source.Alias, "<missing>"));
-                            continue;
-                        }
-
-                        existingSourceCount++;
-
-                        var caf = CafLoader.GetOrParse(source.VirtualPath, out var cafContentHash);
-                        animationSetComponents.Add(new KeyValuePair<string, string>(source.Alias, cafContentHash));
-                        bool shouldLoop = CgfClipBuilder.ShouldTreatClipAsLoop(source.Alias, caf, controllerToPath, importScale);
-                        string loopPolicyKey = CgfAnimationSetCache.BuildLoopPolicyKey(source.Alias, shouldLoop);
-                        string compatibilityKey = CgfAnimationSetCache.BuildCompatibilityCacheKey(animationFingerprint, controllerMapKey);
-                        string semanticClipCacheKey = CgfAnimationSetCache.BuildSemanticClipCacheKey(
-                            cafContentHash,
-                            source.Alias,
-                            importScale,
-                            loopPolicyKey);
-                        string clipCacheKey = CgfAnimationSetCache.BuildClipCacheKey(
-                            cafContentHash,
-                            source.Alias,
-                            importScale,
-                            compatibilityKey,
-                            pathLayoutHash,
-                            loopPolicyKey);
-
-                        if (!CgfAnimationSetCache.TryGetCachedClip(clipCacheKey, out var clip))
-                        {
-                            bool usedSemanticCacheForBuild = CgfAnimationSetCache.TryGetCachedSemanticClip(semanticClipCacheKey, out var semanticClipData);
-                            if (!usedSemanticCacheForBuild)
-                            {
-                                semanticClipData = CgfClipBuilder.BuildSemanticClipData(
-                                    source.Alias,
-                                    caf,
-                                    importScale,
-                                    shouldLoop);
-                                if (semanticClipData != null)
-                                    CgfAnimationSetCache.StoreCachedSemanticClip(semanticClipCacheKey, semanticClipData);
-                            }
-
-                            clip = CgfClipBuilder.BuildFromSemanticData(
+                            semanticClipData = CgfClipBuilder.BuildSemanticClipData(
                                 source.Alias,
-                                semanticClipData,
-                                controllerToPath,
-                                missingControllerIds,
-                                ref missingControllerTrackCount,
-                                ref clipsWithMissingControllers);
-
-                            if (clip != null)
-                            {
-                                if (usedSemanticCacheForBuild)
-                                    clipBuiltFromSemanticCache++;
-                                else
-                                    clipBuiltFromSemanticFresh++;
-                                CgfAnimationSetCache.StoreCachedClip(clipCacheKey, clip);
-                            }
+                                caf,
+                                importScale,
+                                shouldLoop);
+                            if (semanticClipData != null)
+                                CgfAnimationSetCache.StoreCachedSemanticClip(semanticClipCacheKey, semanticClipData);
                         }
 
-                        if (clip == null)
-                            continue;
+                        int missingTrackCount = result.MissingControllerTrackCount;
+                        int clipsWithMissing = result.ClipsWithMissingControllers;
+                        clip = CgfClipBuilder.BuildFromSemanticData(
+                            source.Alias,
+                            semanticClipData,
+                            controllerToPath,
+                            result.MissingControllerIds,
+                            ref missingTrackCount,
+                            ref clipsWithMissing);
+                        result.MissingControllerTrackCount = missingTrackCount;
+                        result.ClipsWithMissingControllers = clipsWithMissing;
 
-                        imported.Add(new CgfRuntimeAnimationClip
+                        if (clip != null)
                         {
-                            Alias = source.Alias,
-                            SourceVirtualPath = source.VirtualPath,
-                            Clip = clip
-                        });
+                            if (usedSemanticCacheForBuild)
+                                result.ClipBuiltFromSemanticCache++;
+                            else
+                                result.ClipBuiltFromSemanticFresh++;
+                            CgfAnimationSetCache.StoreCachedClip(clipCacheKey, clip);
+                        }
                     }
-                    catch (Exception e)
+
+                    if (clip == null)
+                        continue;
+
+                    result.Imported.Add(new CgfRuntimeAnimationClip
                     {
-                        animationSetComponents.Add(new KeyValuePair<string, string>(source.Alias, "<error>"));
-                        Debug.LogWarning($"[CgfImporter] Failed to import animation '{source.VirtualPath}': {e.Message}");
-                    }
+                        Alias = source.Alias,
+                        SourceVirtualPath = source.VirtualPath,
+                        Clip = clip
+                    });
                 }
-
-                animationSetHash = BuildAnimationSetHash(animationSetComponents);
-                string animationSetCacheKey = CgfAnimationSetCache.BuildAnimationSetCacheKey(
-                    animationFingerprint,
-                    pathLayoutHash,
-                    animationSetHash,
-                    importScale);
-                CgfAnimationSetCache.StoreCachedAnimationSet(
-                    animationSetCacheKey,
-                    imported,
-                    existingSourceCount,
-                    missingControllerTrackCount);
-                CgfAnimationSetCache.StoreAnimationSetKeyForModelLayout(modelLayoutKey, animationSetCacheKey);
+                catch (Exception e)
+                {
+                    animationSetComponents.Add(new KeyValuePair<string, string>(source.Alias, "<error>"));
+                    Debug.LogWarning($"[CgfImporter] Failed to import animation '{source.VirtualPath}': {e.Message}");
+                }
             }
 
-            var cafStatsAfter = CafLoader.GetStats();
-            var cacheStatsAfter = CgfAnimationSetCache.GetStats();
-            int cafHitAfter = cafStatsAfter.TotalHitCount;
-            int cafMissAfter = cafStatsAfter.SemanticMissCount;
-            int clipHitAfter = cacheStatsAfter.ClipHitCount;
-            int clipMissAfter = cacheStatsAfter.ClipMissCount;
-            int setHitAfter = cacheStatsAfter.AnimationSetHitCount;
-            int setMissAfter = cacheStatsAfter.AnimationSetMissCount;
-            int semClipHitAfter = cacheStatsAfter.SemanticClipHitCount;
-            int semClipMissAfter = cacheStatsAfter.SemanticClipMissCount;
-            int cafHitDelta = Mathf.Max(0, cafHitAfter - cafHitBefore);
-            int cafMissDelta = Mathf.Max(0, cafMissAfter - cafMissBefore);
-            int clipHitDelta = Mathf.Max(0, clipHitAfter - clipHitBefore);
-            int clipMissDelta = Mathf.Max(0, clipMissAfter - clipMissBefore);
-            int setHitDelta = Mathf.Max(0, setHitAfter - setHitBefore);
-            int setMissDelta = Mathf.Max(0, setMissAfter - setMissBefore);
-            int semClipHitDelta = Mathf.Max(0, semClipHitAfter - semClipHitBefore);
-            int semClipMissDelta = Mathf.Max(0, semClipMissAfter - semClipMissBefore);
-            var diagnostics = new RuntimeAttachDiagnosticsEntry(
-                modelVirtualPath: modelVirtualPath,
-                animationFingerprint: animationFingerprint,
-                pathLayoutHash: pathLayoutHash,
-                animationSetHash: animationSetHash,
-                sourceCount: sources.Count,
-                existingSourceCount: existingSourceCount,
-                importedClipCount: imported.Count,
-                cafHitDelta: cafHitDelta,
-                cafMissDelta: cafMissDelta,
-                clipHitDelta: clipHitDelta,
-                clipMissDelta: clipMissDelta,
-                animationSetHitDelta: setHitDelta,
-                animationSetMissDelta: setMissDelta,
-                semanticClipHitDelta: semClipHitDelta,
-                semanticClipMissDelta: semClipMissDelta,
-                clipBuiltFromSemanticCache: clipBuiltFromSemanticCache,
-                clipBuiltFromSemanticFresh: clipBuiltFromSemanticFresh,
-                missingControllerTrackCount: missingControllerTrackCount,
-                usedRigDefinitionFingerprint: usedRigDefinitionFingerprint);
-            CgfAnimationDiagnostics.Store(diagnostics);
+            result.AnimationSetHash = BuildAnimationSetHash(animationSetComponents);
+            string animationSetCacheKey = CgfCacheKeys.BuildAnimationSetCacheKey(
+                animationFingerprint,
+                pathLayoutHash,
+                result.AnimationSetHash,
+                importScale);
+            CgfAnimationSetCache.StoreCachedAnimationSet(
+                animationSetCacheKey,
+                result.Imported,
+                result.ExistingSourceCount,
+                result.MissingControllerTrackCount);
+            CgfAnimationSetCache.StoreAnimationSetKeyForModelLayout(modelLayoutKey, animationSetCacheKey);
+            return result;
+        }
 
-            if (CgfAnimationDiagnostics.EnableCompatibilityDiagnosticsLogging)
-            {
-                Debug.Log(
-                    $"[CgfAnimDiag] model='{modelVirtualPath}', sources={sources.Count}, existing={existingSourceCount}, imported={imported.Count}, " +
-                    $"cafHit/miss={cafHitDelta}/{cafMissDelta}, clipHit/miss={clipHitDelta}/{clipMissDelta}, " +
-                    $"setHit/miss={setHitDelta}/{setMissDelta}, usedSetCache={(usedAnimationSetCache ? 1 : 0)}, " +
-                    $"semClipHit/miss={semClipHitDelta}/{semClipMissDelta}, " +
-                    $"clipBuild(semHit/semMiss)={clipBuiltFromSemanticCache}/{clipBuiltFromSemanticFresh}, " +
-                    $"missingTracks={missingControllerTrackCount}, animFp={animationFingerprint}, layout={pathLayoutHash}, set={animationSetHash}, " +
-                    $"fpSource={(usedRigDefinitionFingerprint ? "rigDef" : "derived")}.");
-            }
-
-            if (!usedAnimationSetCache && missingControllerTrackCount > 0)
-            {
-                warningMessage =
-                    $"[CgfImporter] Animation import skipped {missingControllerTrackCount} controller track(s) " +
-                    $"across {clipsWithMissingControllers} clip(s) because they were not mapped to skeleton bones. " +
-                    $"Unique controller ids: {CgfAnimationDiagnostics.FormatControllerIdSummary(missingControllerIds)}.";
-            }
-
-            if (imported.Count == 0)
-                return null;
-
+        static void ApplyAnimationsToGameObject(GameObject go, List<CgfRuntimeAnimationClip> imported)
+        {
             var anim = go.GetComponent<Animation>();
             if (anim == null)
                 anim = go.AddComponent<Animation>();
@@ -389,8 +376,89 @@ namespace OpenFarCry.Importer.Cgf
             // and 'clip' is assigned afterwards, so play it explicitly.
             if (anim.clip != null)
                 anim.Play();
+        }
 
-            return imported;
+        // Brackets one TryAttachAnimations call: snapshots CAF/clip/set cache
+        // stats on construction and, in Record(), converts them to hit/miss
+        // deltas and stores the diagnostics entry.
+        sealed class CgfAnimAttachDiagnosticsScope
+        {
+            readonly int _cafHit;
+            readonly int _cafMiss;
+            readonly int _clipHit;
+            readonly int _clipMiss;
+            readonly int _setHit;
+            readonly int _setMiss;
+            readonly int _semClipHit;
+            readonly int _semClipMiss;
+
+            public CgfAnimAttachDiagnosticsScope()
+            {
+                var caf = CafLoader.GetStats();
+                var cache = CgfAnimationSetCache.GetStats();
+                _cafHit = caf.TotalHitCount;
+                _cafMiss = caf.SemanticMissCount;
+                _clipHit = cache.ClipHitCount;
+                _clipMiss = cache.ClipMissCount;
+                _setHit = cache.AnimationSetHitCount;
+                _setMiss = cache.AnimationSetMissCount;
+                _semClipHit = cache.SemanticClipHitCount;
+                _semClipMiss = cache.SemanticClipMissCount;
+            }
+
+            public void Record(
+                string modelVirtualPath,
+                string animationFingerprint,
+                string pathLayoutHash,
+                int sourceCount,
+                bool usedRigDefinitionFingerprint,
+                AnimationSetResult set)
+            {
+                var caf = CafLoader.GetStats();
+                var cache = CgfAnimationSetCache.GetStats();
+                int cafHitDelta = Mathf.Max(0, caf.TotalHitCount - _cafHit);
+                int cafMissDelta = Mathf.Max(0, caf.SemanticMissCount - _cafMiss);
+                int clipHitDelta = Mathf.Max(0, cache.ClipHitCount - _clipHit);
+                int clipMissDelta = Mathf.Max(0, cache.ClipMissCount - _clipMiss);
+                int setHitDelta = Mathf.Max(0, cache.AnimationSetHitCount - _setHit);
+                int setMissDelta = Mathf.Max(0, cache.AnimationSetMissCount - _setMiss);
+                int semClipHitDelta = Mathf.Max(0, cache.SemanticClipHitCount - _semClipHit);
+                int semClipMissDelta = Mathf.Max(0, cache.SemanticClipMissCount - _semClipMiss);
+
+                var diagnostics = new RuntimeAttachDiagnosticsEntry(
+                    modelVirtualPath: modelVirtualPath,
+                    animationFingerprint: animationFingerprint,
+                    pathLayoutHash: pathLayoutHash,
+                    animationSetHash: set.AnimationSetHash,
+                    sourceCount: sourceCount,
+                    existingSourceCount: set.ExistingSourceCount,
+                    importedClipCount: set.Imported.Count,
+                    cafHitDelta: cafHitDelta,
+                    cafMissDelta: cafMissDelta,
+                    clipHitDelta: clipHitDelta,
+                    clipMissDelta: clipMissDelta,
+                    animationSetHitDelta: setHitDelta,
+                    animationSetMissDelta: setMissDelta,
+                    semanticClipHitDelta: semClipHitDelta,
+                    semanticClipMissDelta: semClipMissDelta,
+                    clipBuiltFromSemanticCache: set.ClipBuiltFromSemanticCache,
+                    clipBuiltFromSemanticFresh: set.ClipBuiltFromSemanticFresh,
+                    missingControllerTrackCount: set.MissingControllerTrackCount,
+                    usedRigDefinitionFingerprint: usedRigDefinitionFingerprint);
+                CgfAnimationDiagnostics.Store(diagnostics);
+
+                if (CgfAnimationDiagnostics.EnableCompatibilityDiagnosticsLogging)
+                {
+                    Debug.Log(
+                        $"[CgfAnimDiag] model='{modelVirtualPath}', sources={sourceCount}, existing={set.ExistingSourceCount}, imported={set.Imported.Count}, " +
+                        $"cafHit/miss={cafHitDelta}/{cafMissDelta}, clipHit/miss={clipHitDelta}/{clipMissDelta}, " +
+                        $"setHit/miss={setHitDelta}/{setMissDelta}, usedSetCache={(set.UsedAnimationSetCache ? 1 : 0)}, " +
+                        $"semClipHit/miss={semClipHitDelta}/{semClipMissDelta}, " +
+                        $"clipBuild(semHit/semMiss)={set.ClipBuiltFromSemanticCache}/{set.ClipBuiltFromSemanticFresh}, " +
+                        $"missingTracks={set.MissingControllerTrackCount}, animFp={animationFingerprint}, layout={pathLayoutHash}, set={set.AnimationSetHash}, " +
+                        $"fpSource={(usedRigDefinitionFingerprint ? "rigDef" : "derived")}.");
+                }
+            }
         }
 
         static Dictionary<uint, string> BuildControllerPathMap(

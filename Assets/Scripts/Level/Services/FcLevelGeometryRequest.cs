@@ -36,7 +36,7 @@ namespace OpenFarCry.Level.Services
             ImportSkeleton = importSkeleton;
             SelectedMeshChunkId = selectedMeshChunkId;
             SourceKind = sourceKind;
-            ModelCacheKey = BuildModelCacheKey(
+            ModelCacheKey = CgfCacheKeys.BuildModelCacheKey(
                 VirtualPath,
                 SelectedMeshChunkId,
                 ImportSkeleton,
@@ -71,16 +71,6 @@ namespace OpenFarCry.Level.Services
         public override int GetHashCode()
         {
             return ModelCacheKey != null ? StringComparer.Ordinal.GetHashCode(ModelCacheKey) : 0;
-        }
-
-        static string BuildModelCacheKey(
-            string normalizedVirtualPath,
-            int selectedMeshChunkId,
-            bool importSkeleton,
-            float importScale)
-        {
-            return
-                $"{normalizedVirtualPath}|builder:{CgfMeshBuilder.MeshCacheVersionName}|mesh:{selectedMeshChunkId}|skel:{(importSkeleton ? 1 : 0)}|scale:{importScale:R}";
         }
     }
 }
