@@ -81,21 +81,28 @@ namespace OpenFarCry.Importer.Cgf
 
         internal static CafFile GetOrParse(string virtualPath, out string contentHash)
         {
+            // Fast path: a present path entry is trusted without revalidation.
+            // PAK-backed CAF data is immutable for the session, so a cached path
+            // never needs a bytes-hash compare — and a hit skips file I/O entirely.
+            lock (s_sync)
+            {
+                if (s_byPath.TryGetValue(virtualPath, out var cachedHit))
+                {
+                    s_pathHits++;
+                    cachedHit.LastAccessTick = ++s_tick;
+                    contentHash = cachedHit.ContentHash;
+                    return cachedHit.Handle.Caf;
+                }
+                s_pathMisses++;
+            }
+
+            // Path miss: read + hash for semantic dedup. Hashing the full buffer
+            // happens only here, never on a path-cache hit.
             byte[] bytes = FcFileSystem.ReadAllBytes(virtualPath);
             string sourceBytesHash = ComputeBytesHash(bytes);
 
             lock (s_sync)
             {
-                if (s_byPath.TryGetValue(virtualPath, out var cached) &&
-                    string.Equals(cached.SourceBytesHash, sourceBytesHash, StringComparison.Ordinal))
-                {
-                    s_pathHits++;
-                    cached.LastAccessTick = ++s_tick;
-                    contentHash = cached.ContentHash;
-                    return cached.Handle.Caf;
-                }
-                s_pathMisses++;
-
                 if (s_contentHashBySource.TryGetValue(sourceBytesHash, out var knownContentHash) &&
                     !string.IsNullOrEmpty(knownContentHash) &&
                     s_bySemantic.TryGetValue(knownContentHash, out var cachedSemantic) &&
