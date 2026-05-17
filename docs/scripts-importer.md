@@ -6,6 +6,7 @@ Importer assembly: `OpenFarCry.Importer`. Binary assets to Unity objects.
 
 - **CgfParser.cs**: Reads chunks (Mesh, Node, Mtl, BoneAnim, BoneInitPos).
 - **CgfMeshBuilder.cs**: Builds `Mesh`. Combines nodes. Vertex deduplication. High performance with Burst/Jobs.
+- **CgfRuntimeImportService.cs**: Runtime import orchestrator. Shared sync/async path. In-flight request coalescing. Bounded-concurrency `PreloadAsync` fan-out.
 - **CryTransformConversion.cs**: Asset basis: Cry `(x,y,z)` -> Unity Importer `(x,z,-y)`.
 - **CgfSkeletonBuilder.cs**: Rebuilds bone hierarchy. Maps ControllerID to Unity `Transform`.
 - **CgfLodImportService.cs**: Finds sibling `_lodN.cgf`. Configures `LODGroup`.
@@ -20,11 +21,13 @@ Importer assembly: `OpenFarCry.Importer`. Binary assets to Unity objects.
 ### Animation & Physics
 
 - **CgfAnimationRuntimeImportService.cs**: CAF attachment. Semantic clip cache. Dedup across rigs.
-- **CafParser.cs / CafLoader.cs**: Reads CAF binary. Tracks positions/rotations.
+- **CafParser.cs**: Reads CAF binary. Tracks positions/rotations.
+- **CafLoader.cs**: Two-level CAF cache (path + content-hash semantic dedup). Path hits skip I/O and hashing.
 - **CgfRagdollBuilder.cs**: Auto-builds `BoxCollider` and `ConfigurableJoint` from BoneMesh data.
 - **FcRagdollController.cs**: Runtime toggle: Animated <-> Ragdoll.
 
 ### Cache
 
-- **CgfRuntimeAssetCache.cs**: Ref-counted CGF files and Meshes. Release per level scope.
+- **CgfRuntimeAssetCache.cs**: Ref-counted CGF files and Meshes. Level scope holds one ref per key; `ReleaseLevelScope` force-frees all scoped keys.
+- **CgfCacheKeys.cs**: Single source for all CGF/CAF/animation cache keys.
 - **CgfMaterialRuntimeCache.cs**: Reuses materials with same keys (shader + textures).
