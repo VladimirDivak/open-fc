@@ -204,6 +204,10 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
+        // Releases every asset a level scope owns. The scope holds one ref per
+        // key; releasing it drops that ref, and once a key has no scope left it
+        // is freed immediately — regardless of any leaked per-instance refs.
+        // Level unload always reclaims everything that level loaded.
         public void ReleaseLevelScope(string scopeId)
         {
             if (string.IsNullOrWhiteSpace(scopeId))
@@ -215,11 +219,17 @@ namespace OpenFarCry.Importer.Cgf
                 {
                     foreach (var key in parsedKeys)
                     {
-                        if (_parsedByKey.TryGetValue(key, out var entry))
+                        if (!_parsedByKey.TryGetValue(key, out var entry))
+                            continue;
+
+                        entry.Scopes.Remove(scopeId);
+                        if (entry.RefCount > 0)
+                            entry.RefCount--;
+
+                        if (entry.Scopes.Count == 0)
                         {
-                            if (entry.RefCount > 0)
-                                entry.RefCount--;
-                            entry.Scopes.Remove(scopeId);
+                            entry.ParsedFile?.Dispose();
+                            _parsedByKey.Remove(key);
                         }
                     }
 
@@ -230,11 +240,17 @@ namespace OpenFarCry.Importer.Cgf
                 {
                     foreach (var key in modelKeys)
                     {
-                        if (_modelsByKey.TryGetValue(key, out var entry))
+                        if (!_modelsByKey.TryGetValue(key, out var entry))
+                            continue;
+
+                        entry.Scopes.Remove(scopeId);
+                        if (entry.RefCount > 0)
+                            entry.RefCount--;
+
+                        if (entry.Scopes.Count == 0)
                         {
-                            if (entry.RefCount > 0)
-                                entry.RefCount--;
-                            entry.Scopes.Remove(scopeId);
+                            DisposeModelEntryUnsafe(entry);
+                            _modelsByKey.Remove(key);
                         }
                     }
 
@@ -259,10 +275,12 @@ namespace OpenFarCry.Importer.Cgf
                 {
                     string key = deleteParsedKeys[i];
                     if (_parsedByKey.TryGetValue(key, out var entry))
+                    {
                         entry.ParsedFile?.Dispose();
+                        RemoveKeyFromScopesUnsafe(key, entry.Scopes, _parsedKeysByScope);
+                    }
 
                     _parsedByKey.Remove(key);
-                    RemoveParsedKeyFromAllScopesUnsafe(key);
                     removed++;
                 }
 
@@ -277,10 +295,12 @@ namespace OpenFarCry.Importer.Cgf
                 {
                     string key = deleteModelKeys[i];
                     if (_modelsByKey.TryGetValue(key, out var modelEntry))
+                    {
                         DisposeModelEntryUnsafe(modelEntry);
+                        RemoveKeyFromScopesUnsafe(key, modelEntry.Scopes, _modelKeysByScope);
+                    }
 
                     _modelsByKey.Remove(key);
-                    RemoveModelKeyFromAllScopesUnsafe(key);
                     removed++;
                 }
 
@@ -340,7 +360,11 @@ namespace OpenFarCry.Importer.Cgf
             if (string.IsNullOrWhiteSpace(scopeId))
                 return;
 
-            entry.Scopes.Add(scopeId);
+            // The scope holds exactly one ref per key. Bump only on first attach
+            // so repeated retains within one scope don't inflate its share — and
+            // ReleaseLevelScope's single decrement always matches.
+            if (entry.Scopes.Add(scopeId))
+                entry.RefCount++;
 
             if (!_parsedKeysByScope.TryGetValue(scopeId, out var keys))
             {
@@ -356,7 +380,9 @@ namespace OpenFarCry.Importer.Cgf
             if (string.IsNullOrWhiteSpace(scopeId))
                 return;
 
-            entry.Scopes.Add(scopeId);
+            // The scope holds exactly one ref per key. See AttachParsedScopeUnsafe.
+            if (entry.Scopes.Add(scopeId))
+                entry.RefCount++;
 
             if (!_modelKeysByScope.TryGetValue(scopeId, out var keys))
             {
@@ -367,38 +393,26 @@ namespace OpenFarCry.Importer.Cgf
             keys.Add(key);
         }
 
-        void RemoveParsedKeyFromAllScopesUnsafe(string key)
+        // Removes a key from exactly the scopes the entry recorded, instead of
+        // scanning every scope. The entry's own Scopes set is the authoritative
+        // index, so this is O(scopes-of-entry), not O(all-scopes).
+        static void RemoveKeyFromScopesUnsafe(
+            string key,
+            HashSet<string> entryScopes,
+            Dictionary<string, HashSet<string>> keysByScope)
         {
-            if (_parsedKeysByScope.Count == 0)
+            if (entryScopes == null || entryScopes.Count == 0)
                 return;
 
-            var emptyScopes = new List<string>();
-            foreach (var kv in _parsedKeysByScope)
+            foreach (var scopeId in entryScopes)
             {
-                kv.Value.Remove(key);
-                if (kv.Value.Count == 0)
-                    emptyScopes.Add(kv.Key);
+                if (!keysByScope.TryGetValue(scopeId, out var keys))
+                    continue;
+
+                keys.Remove(key);
+                if (keys.Count == 0)
+                    keysByScope.Remove(scopeId);
             }
-
-            for (int i = 0; i < emptyScopes.Count; i++)
-                _parsedKeysByScope.Remove(emptyScopes[i]);
-        }
-
-        void RemoveModelKeyFromAllScopesUnsafe(string key)
-        {
-            if (_modelKeysByScope.Count == 0)
-                return;
-
-            var emptyScopes = new List<string>();
-            foreach (var kv in _modelKeysByScope)
-            {
-                kv.Value.Remove(key);
-                if (kv.Value.Count == 0)
-                    emptyScopes.Add(kv.Key);
-            }
-
-            for (int i = 0; i < emptyScopes.Count; i++)
-                _modelKeysByScope.Remove(emptyScopes[i]);
         }
 
         static void DisposeModelEntryUnsafe(ModelEntry modelEntry)
