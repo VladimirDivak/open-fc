@@ -24,54 +24,55 @@ Offload texture DXT software-decoding to Burst Jobs.
 
 ## Phase Board
 
-- [ ] Phase 1: Struct Blittability + Unsafe Wrapper
-- [ ] Phase 2: CGF Geometry Jobs (Vertices / Faces / UVs)
-- [ ] Phase 3: CAF Animation Jobs (Position / Rotation Log)
-- [ ] Phase 4: Texture DXT Decoder Jobs
+- [x] Phase 1: Struct Blittability + Unsafe Wrapper
+- [x] Phase 2: CGF Geometry Jobs (Vertices / Faces / UVs)
+- [x] Phase 3: CAF Animation Jobs (Position / Rotation Log)
+- [x] Phase 4: Texture DXT Decoder Jobs
 - [ ] Phase 5: Testing & Cleanup
 
 ## Detailed Plan
 
-### Phase 1. Struct Blittability
+### [x] Phase 1. Struct Blittability
 
 Need data layout parity with CryEngine binary chunks.
 
 Tasks:
-- [ ] Convert `CryVertex`, `CryFace`, `CryUV`, `CryTexFace` in `CgfData.cs` from `class`/managed to strict `struct`.
-- [ ] Add `[StructLayout(LayoutKind.Sequential, Pack = 1)]` (or Pack=4 depending on CryEngine padding).
-- [ ] Create `BinaryBufferReader` struct wrapping `NativeArray<byte>` or `byte*` for safe offset-based reading without allocations.
-- [ ] Update `CgfParser.cs` to use the new memory view approach for simple chunks (Nodes, Headers).
+- [x] Convert `CryVertex`, `CryFace`, `CryUV`, `CryTexFace` in `CgfData.cs` from `class`/managed to strict `struct`.
+- [x] Add `[StructLayout(LayoutKind.Sequential, Pack = 4)]` (to match CryEngine #pragma pack(4)).
+- [x] Create `BinaryBufferReader` struct wrapping `byte*` for allocation-free parsing.
+- [x] Update `CgfParser.cs` and `CafParser.cs` to use `NativeArray<T>` and `MemCpy`.
 
-### Phase 2. CGF Geometry Jobs
+### [x] Phase 2. CGF Geometry Jobs
 
 Move mesh building off main thread, zero allocation.
 
 Tasks:
-- [ ] In `CgfParser.ReadMesh`, instead of `r.ReadSingle()` loop, use `UnsafeUtility` to cast byte slice to `NativeArray<CryVertex>`.
-- [ ] Update `CgfMeshBuilder.cs`. Skip intermediate `List<Vector3>`.
-- [ ] Create `CgfGeometryTransformJob`: takes `NativeArray<CryVertex>`, applies `NodeMatrixInImporterSpace`, writes to `NativeArray<float3>`.
-- [ ] Direct upload: use `Mesh.SetVertexBufferParams` and `Mesh.SetVertexBufferData`. Skip `Mesh.SetVertices(List)`.
+- [x] Refactor `MeshBuildData` to use `NativeArray` for all streams.
+- [x] Implement `StaticVertexTransformJob` (Burst) for world geometry.
+- [x] Implement `SkinnedVertexTransformJob` and `BoneWeightBuildJob` for characters.
+- [x] Use `Mesh.SetVertexBufferData` for direct GPU upload (bypass managed lists).
+- [x] Flatten `CryLink` buffers in `CgfMeshChunk` for job-friendly access.
 
-### Phase 3. CAF Animation Jobs
+### [x] Phase 3. CAF Animation Jobs
 
 CAF parsing is CPU heavy due to `Math.Sin`/`Sqrt` per frame.
 
 Tasks:
-- [ ] `CafParser.cs`: read Controller track payloads as `NativeArray<byte>`.
-- [ ] Create `CafRotationJob`: parses RotationLog `Vector3` -> `Quaternion` (Burst-compiled math).
-- [ ] Create `CafPositionJob`: handles scale and basis conversion.
-- [ ] Change `CafControllerTrack` to hold `NativeArray<float3>` / `NativeArray<quaternion>` instead of managed arrays.
-- [ ] Ensure `CgfClipBuilder` can read from NativeArrays to build `AnimationClip` curves.
+- [x] `CafParser.cs`: read Controller track payloads as `NativeArray<byte>`.
+- [x] Create `CafRotationJob`: parses RotationLog `Vector3` -> `Quaternion` (Burst-compiled math).
+- [x] Create `CafTrackNormalizationJob`: handles scale and basis conversion.
+- [x] Change `CafControllerTrack` to hold `NativeArray<float3>` / `NativeArray<quaternion>` instead of managed arrays.
+- [x] Ensure `CgfClipBuilder` can read from NativeArrays to build `AnimationClip` curves.
 
-### Phase 4. Texture DXT Decoder Jobs
+### [x] Phase 4. Texture DXT Decoder Jobs
 
 Software decoding of DXT1/3/5 is currently on ThreadPool but not Burst compiled.
 
 Tasks:
-- [ ] `DdsRuntimeDecoder.cs`: Extract `TryDecodeBc1`, `TryDecodeBc2` (DXT3), `TryDecodeBc3` (DXT5) loops.
-- [ ] Write `Bc1DecompressJob`, `Bc2DecompressJob`, `Bc3DecompressJob` using `IJobParallelFor`.
-- [ ] (Reference existing `Bc4DecompressJob` and `Bc5DecompressJob` in `DdsDecompressJobs.cs`).
-- [ ] Ensure output is `NativeArray<Color32>` mapped directly to `Texture2D.SetPixelData`.
+- [x] `DdsRuntimeDecoder.cs`: Extract `TryDecodeBc1`, `TryDecodeBc2` (DXT3), `TryDecodeBc3` (DXT5) loops.
+- [x] Write `Bc1DecompressJob`, `Bc2DecompressJob`, `Bc3DecompressJob` using `IJobParallelFor`.
+- [x] (Reference existing `Bc4DecompressJob` and `Bc5DecompressJob` in `DdsDecompressJobs.cs`).
+- [x] Ensure output is `NativeArray<Color32>` mapped directly to `Texture2D.SetPixelData`.
 
 ### Phase 5. Testing & Validation
 
