@@ -14,10 +14,15 @@ namespace OpenFarCry.Importer
             if (string.IsNullOrWhiteSpace(virtualPath))
                 throw new ArgumentException("Virtual path is null or empty.", nameof(virtualPath));
 
-            return virtualPath
+            string normalized = virtualPath
                 .Replace('\\', '/')
                 .TrimStart('/')
                 .ToLowerInvariant();
+            // CGF/CAF asset references often contain collapsed "//" segments from
+            // path concatenation; flatten them so lookups match the index.
+            while (normalized.Contains("//"))
+                normalized = normalized.Replace("//", "/");
+            return normalized;
         }
 
         public static string GetBaseAssetPathNoExtension(string virtualPath)

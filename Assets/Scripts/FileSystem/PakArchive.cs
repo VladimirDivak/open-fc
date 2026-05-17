@@ -128,7 +128,12 @@ namespace OpenFarCry.FileSystem
         internal static string NormalizePath(string path)
         {
             if (string.IsNullOrEmpty(path)) return "";
-            return path.Replace('\\', '/').ToLowerInvariant().Trim('/');
+            path = path.Replace('\\', '/').ToLowerInvariant().Trim('/');
+            // CGF/CAF asset references often contain collapsed "//" segments from
+            // path concatenation; flatten them so lookups match the index.
+            while (path.Contains("//"))
+                path = path.Replace("//", "/");
+            return path;
         }
     }
 }
