@@ -83,7 +83,8 @@ namespace OpenFarCry.Importer.Cgf
             IReadOnlyList<string> siblingLodPaths,
             Func<Mesh, string, Mesh> persistMesh = null,
             CgfMaterialImportService materialService = null,
-            string textureScopeId = null)
+            string textureScopeId = null,
+            Func<Material[], int[], Material[]> materialOverrider = null)
         {
             if (root == null)
                 return;
@@ -136,9 +137,12 @@ namespace OpenFarCry.Importer.Cgf
                             lodSmr.sharedMesh = lodMesh;
                             lodSmr.bones = baseSmr.bones;
                             lodSmr.rootBone = baseSmr.rootBone;
-                            lodSmr.sharedMaterials = materialService != null
+                            var smrMats = materialService != null
                                 ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds, textureScopeId)
                                 : new Material[lodMesh.subMeshCount];
+                            lodSmr.sharedMaterials = materialOverrider != null
+                                ? materialOverrider(smrMats, buildLod.SubmeshMaterialIds) ?? smrMats
+                                : smrMats;
                             lodRenderers.Add(lodSmr);
                         }
                         else
@@ -146,9 +150,12 @@ namespace OpenFarCry.Importer.Cgf
                             var mf = lodGo.AddComponent<MeshFilter>();
                             mf.sharedMesh = lodMesh;
                             var mr = lodGo.AddComponent<MeshRenderer>();
-                            mr.sharedMaterials = materialService != null
+                            var mrMats = materialService != null
                                 ? materialService.ResolveSubmeshMaterials(parsedLod, lodMesh, buildLod.SubmeshMaterialIds, textureScopeId)
                                 : new Material[lodMesh.subMeshCount];
+                            mr.sharedMaterials = materialOverrider != null
+                                ? materialOverrider(mrMats, buildLod.SubmeshMaterialIds) ?? mrMats
+                                : mrMats;
                             lodRenderers.Add(mr);
                         }
                     }

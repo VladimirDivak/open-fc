@@ -382,7 +382,7 @@ namespace OpenFarCry.Importer.Cgf
             }
 
             anim.clip = defaultClip ?? imported[0].Clip;
-            anim.playAutomatically = false;
+            anim.playAutomatically = true;
 
             return imported;
         }

@@ -119,6 +119,15 @@ namespace OpenFarCry.Importer.Cgf
                 SetTextureIfProperty(mat, PropSpecGlossMap, textures.SpecularMap);
             else if (textures.GlossMap != null)
                 SetTextureIfProperty(mat, PropSpecGlossMap, textures.GlossMap);
+
+            // When textures are injected after a texture-free bake, PropSmoothTexCh may not
+            // have been set because the spec/gloss maps were absent at bake time.
+            // Don't override if already set to 1 (smoothness-from-albedo-alpha mode).
+            if (textures.SpecularMap != null || textures.GlossMap != null)
+            {
+                if (mat.HasProperty(PropSmoothTexCh) && mat.GetFloat(PropSmoothTexCh) < 0.5f)
+                    mat.SetFloat(PropSmoothTexCh, 0f);
+            }
         }
 
         public static Material BuildFallback(string name)

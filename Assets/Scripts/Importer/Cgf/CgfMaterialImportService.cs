@@ -73,6 +73,12 @@ namespace OpenFarCry.Importer.Cgf
         readonly CgfMaterialRuntimeCache _cache;
         readonly TextureRuntimeImportService _textureRuntimeService;
 
+        // Optional project-asset lookup: (cgfVirtualPath, chunkTableIndex) → persistent Material.
+        // Set by editor init to return pre-baked .mat assets; null in runtime builds.
+        // When set, GetOrBuild instantiates the project asset and injects textures instead of
+        // building a material from scratch.
+        public Func<string, int, Material> ProjectMaterialLookup { get; set; }
+
         public CgfMaterialImportService(
             CgfMaterialRuntimeCache cache = null,
             TextureRuntimeImportService textureRuntimeService = null)
@@ -409,7 +415,21 @@ namespace OpenFarCry.Importer.Cgf
             var dc = chunk.DiffuseColor;
             string colorKey = $"{dc.r:X2}{dc.g:X2}{dc.b:X2}";
             string key = $"name:{name}|sh:{shader}|type:{(int)chunk.MtlType}|flags:{(int)chunk.Flags}|alpha:{chunk.AlphaTest:F3}|color:{colorKey}|d:{diffuseKey}|n:{normalKey}|s:{specularKey}|o:{opacityKey}|g:{glossKey}";
-            var material = _cache.GetOrCreate(key, textureScopeId, () => CgfMaterialBuilder.Build(chunk, textures));
+            var lookup = ProjectMaterialLookup;
+            var material = _cache.GetOrCreate(key, textureScopeId, () =>
+            {
+                if (lookup != null && !string.IsNullOrEmpty(parsedFile?.SourceVirtualPath))
+                {
+                    var projectMat = lookup(parsedFile.SourceVirtualPath, chunk.TableIndex);
+                    if (projectMat != null)
+                    {
+                        var instance = UnityEngine.Object.Instantiate(projectMat);
+                        instance.name = projectMat.name;
+                        return instance;
+                    }
+                }
+                return CgfMaterialBuilder.Build(chunk, textures);
+            });
             CgfMaterialBuilder.ApplyResolvedTextures(material, textures);
             return material;
         }

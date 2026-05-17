@@ -75,7 +75,7 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
-        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v9";
+        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v10_lmuv";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {

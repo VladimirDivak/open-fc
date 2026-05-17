@@ -96,6 +96,8 @@ namespace OpenFarCry.Importer.Editor
                 if (dirCreated)
                     AssetDatabase.Refresh();
 
+                Unwrapping.GenerateSecondaryUVSet(mesh);
+
                 var existingMesh = AssetDatabase.LoadAssetAtPath<Mesh>(paths.MeshPath);
                 if (existingMesh != null)
                     AssetDatabase.DeleteAsset(paths.MeshPath);

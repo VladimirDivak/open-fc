@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using UnityEngine;
 
@@ -13,6 +14,8 @@ namespace OpenFarCry.Importer.Cgf
             public readonly string Name;
             public readonly CgfMaterialImportService MaterialService; // optional; null = leave slots empty
             public readonly string TextureScopeId;
+            // Optional post-resolve override: receives (baseMaterials, submeshMaterialIds), returns final materials.
+            public readonly Func<Material[], int[], Material[]> MaterialOverrider;
 
             public BuildRequest(
                 BuildResult result,
@@ -20,7 +23,8 @@ namespace OpenFarCry.Importer.Cgf
                 CgfRigDefinition rigDefinition,
                 string name,
                 CgfMaterialImportService materialService = null,
-                string textureScopeId = null)
+                string textureScopeId = null,
+                Func<Material[], int[], Material[]> materialOverrider = null)
             {
                 Result = result;
                 ParsedFile = parsedFile;
@@ -28,6 +32,7 @@ namespace OpenFarCry.Importer.Cgf
                 Name = name;
                 MaterialService = materialService;
                 TextureScopeId = textureScopeId;
+                MaterialOverrider = materialOverrider;
             }
         }
 
@@ -73,13 +78,16 @@ namespace OpenFarCry.Importer.Cgf
                     var rootBone = boneTransforms.FirstOrDefault(t => t != null && t.parent == go.transform);
                     smr.rootBone = rootBone != null ? rootBone : boneTransforms[0];
                 }
-                smr.sharedMaterials = request.MaterialService != null
+                var smrMats = request.MaterialService != null
                     ? request.MaterialService.ResolveSubmeshMaterials(
                         request.ParsedFile,
                         result.Mesh,
                         result.SubmeshMaterialIds,
                         request.TextureScopeId)
                     : new Material[result.Mesh.subMeshCount];
+                smr.sharedMaterials = request.MaterialOverrider != null
+                    ? request.MaterialOverrider(smrMats, result.SubmeshMaterialIds) ?? smrMats
+                    : smrMats;
 
                 if (request.MaterialService != null &&
                     request.MaterialService.RequiresUvScroll(
@@ -95,13 +103,16 @@ namespace OpenFarCry.Importer.Cgf
 
             go.AddComponent<MeshFilter>().sharedMesh = result.Mesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.sharedMaterials = request.MaterialService != null
+            var mrMats = request.MaterialService != null
                 ? request.MaterialService.ResolveSubmeshMaterials(
                     request.ParsedFile,
                     result.Mesh,
                     result.SubmeshMaterialIds,
                     request.TextureScopeId)
                 : new Material[result.Mesh.subMeshCount];
+            mr.sharedMaterials = request.MaterialOverrider != null
+                ? request.MaterialOverrider(mrMats, result.SubmeshMaterialIds) ?? mrMats
+                : mrMats;
 
             if (request.MaterialService != null &&
                 request.MaterialService.RequiresUvScroll(
