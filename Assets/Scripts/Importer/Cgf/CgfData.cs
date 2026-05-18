@@ -305,6 +305,14 @@ namespace OpenFarCry.Importer.Cgf
         public string     SpecularTextureName; // tex_s
         public string     OpacityTextureName;  // tex_o
         public string     GlossTextureName;    // tex_g (0x0745+)
+        public float      SelfIllum;           // 0x0745+; emissive strength scalar
+
+        // Lazily computed shader-family classification; cached so callers stop
+        // re-running CgfMaterialClassifier.Analyze for every material/texture pass.
+        // Safe because the parser fully populates this chunk before any importer reads it.
+        CgfMaterialClassification? _classification;
+        public CgfMaterialClassification Classification =>
+            _classification ?? (CgfMaterialClassification)(_classification = CgfMaterialClassifier.Analyze(this));
     }
 
     // Each matrix converts from mesh-space to bone-space in bind pose (CryEngine RH Z-up)

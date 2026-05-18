@@ -1,6 +1,5 @@
 using UnityEngine;
 using UnityEngine.Rendering;
-using System.Collections.Generic;
 
 namespace OpenFarCry.Importer.Cgf
 {
@@ -13,8 +12,8 @@ namespace OpenFarCry.Importer.Cgf
         static readonly int PropBaseMap      = Shader.PropertyToID("_BaseMap");
         static readonly int PropBumpMap      = Shader.PropertyToID("_BumpMap");
         static readonly int PropBumpScale    = Shader.PropertyToID("_BumpScale");
-        static readonly int PropSpecColor    = Shader.PropertyToID("_SpecColor");
         static readonly int PropSpecGlossMap = Shader.PropertyToID("_SpecGlossMap");
+        static readonly int PropMetallic     = Shader.PropertyToID("_Metallic");
         static readonly int PropWorkflowMode = Shader.PropertyToID("_WorkflowMode");
         static readonly int PropSmoothTexCh  = Shader.PropertyToID("_SmoothnessTextureChannel");
         static readonly int PropBlend        = Shader.PropertyToID("_Blend");
@@ -32,7 +31,6 @@ namespace OpenFarCry.Importer.Cgf
         static readonly int PropDstBlendA    = Shader.PropertyToID("_DstBlendAlpha");
         static readonly int PropSpecHighlights = Shader.PropertyToID("_SpecularHighlights");
         static readonly int PropEnvReflections = Shader.PropertyToID("_EnvironmentReflections");
-        static readonly Dictionary<int, Texture2D> EmissionMaskByBaseTextureId = new Dictionary<int, Texture2D>();
 
         static Shader _urpLit;
         static Shader UrpLit => _urpLit != null ? _urpLit : (_urpLit = Shader.Find("Universal Render Pipeline/Lit"));
@@ -46,7 +44,10 @@ namespace OpenFarCry.Importer.Cgf
                 return BuildFallback(chunk?.Name ?? "unknown");
             }
 
-            var classification = CgfMaterialClassifier.Analyze(chunk);
+            if (chunk == null)
+                return BuildFallback("null");
+
+            var classification = chunk.Classification;
             if (classification.IsNoDraw)
                 return BuildNoDraw(chunk.Name);
 
@@ -65,7 +66,7 @@ namespace OpenFarCry.Importer.Cgf
                 baseAlpha));
             ApplyResolvedTextures(mat, textures);
             ApplySpecularInputs(mat, chunk, textures, classification);
-            ApplyEmissionInputs(mat, textures, classification);
+            ApplyEmissionInputs(mat, textures, classification, chunk.SelfIllum);
             ApplyReflectionInputs(mat, classification);
 
             float smoothness = ComputeSmoothness(chunk);
@@ -177,7 +178,7 @@ namespace OpenFarCry.Importer.Cgf
 
         public static bool IsNoDraw(CgfMaterialChunk chunk)
         {
-            return CgfMaterialClassifier.Analyze(chunk).IsNoDraw;
+            return chunk != null && chunk.Classification.IsNoDraw;
         }
 
         static float ComputeSmoothness(CgfMaterialChunk chunk)
@@ -214,30 +215,35 @@ namespace OpenFarCry.Importer.Cgf
             CgfResolvedMaterialTextures textures,
             CgfMaterialClassification classification)
         {
-            if (classification.Family == CgfMaterialShaderFamily.BumpSpec ||
+            bool isSpecFamily =
+                classification.Family == CgfMaterialShaderFamily.BumpSpec ||
                 classification.Family == CgfMaterialShaderFamily.BumpSpecGlossAlpha ||
                 !string.IsNullOrWhiteSpace(chunk.SpecularTextureName) ||
-                !string.IsNullOrWhiteSpace(chunk.GlossTextureName))
+                !string.IsNullOrWhiteSpace(chunk.GlossTextureName);
+
+            if (isSpecFamily)
             {
-                SetFloatIfProperty(mat, PropWorkflowMode, 0f); // URP Lit specular workflow
-                float specLevel = chunk.SpecLevel > 0.0001f ? Mathf.Clamp01(chunk.SpecLevel) : 0.5f;
-                var sc = chunk.SpecularColor;
-                var specColor = new Color(
-                    (sc.r / 255f) * specLevel,
-                    (sc.g / 255f) * specLevel,
-                    (sc.b / 255f) * specLevel,
-                    1f);
-                SetColorIfProperty(mat, PropSpecColor, specColor);
+                // CryEngine 1 is Phong, not PBR: col_s * specLevel is a highlight
+                // intensity, not a per-pixel reflectance. Feeding it into URP's specular
+                // workflow as _SpecColor turns whole surfaces mirror-white, because col_s
+                // is near-white for almost every FC1 material. FC1 geometry is
+                // overwhelmingly dielectric (cloth, skin, leather, concrete, wood), so map
+                // to the metallic workflow with metallic 0: URP then applies the correct
+                // ~4% dielectric specular. Highlight shape comes from smoothness
+                // (gloss-alpha / shininess), not from a white spec color. Genuine metals
+                // are rare in FC1 and undetectable without parsing Illumination.ext flags.
+                SetFloatIfProperty(mat, PropWorkflowMode, 1f); // URP Lit metallic workflow
+                SetFloatIfProperty(mat, PropMetallic, 0f);
             }
 
             if (classification.UsesGlossFromDiffuseAlpha)
             {
-                // URP Lit: 1 = smoothness from albedo alpha.
+                // Gloss is stored in the diffuse alpha; URP reads smoothness from albedo alpha.
                 SetFloatIfProperty(mat, PropSmoothTexCh, 1f);
             }
             else if (textures.GlossMap != null || textures.SpecularMap != null)
             {
-                // URP Lit: 0 = smoothness from metallic/spec alpha.
+                // Dedicated gloss/spec map: smoothness from the metallic-gloss map alpha.
                 SetFloatIfProperty(mat, PropSmoothTexCh, 0f);
             }
         }
@@ -245,44 +251,30 @@ namespace OpenFarCry.Importer.Cgf
         static void ApplyEmissionInputs(
             Material mat,
             CgfResolvedMaterialTextures textures,
-            CgfMaterialClassification classification)
+            CgfMaterialClassification classification,
+            float selfIllum)
         {
             if (!classification.UsesGlowFromDiffuseAlpha)
                 return;
 
-            UnityEngine.Texture emissionSource = textures.BaseMap;
-            if (textures.BaseMap != null &&
-                TryGetOrCreateEmissionMaskFromBaseAlpha(textures.BaseMap, out var mask) &&
-                mask != null)
-            {
-                emissionSource = mask;
-            }
+            // Bind the base map as a provisional emission source. CgfMaterialImportService
+            // upgrades _EmissionMap to a scoped alpha-derived mask when the base texture is
+            // readable; otherwise the base map itself stays as the emission source.
+            if (textures.BaseMap != null)
+                SetTextureIfProperty(mat, PropEmissionMap, textures.BaseMap);
 
-            if (emissionSource != null)
-                SetTextureIfProperty(mat, PropEmissionMap, emissionSource);
-
-            SetColorIfProperty(mat, PropEmissionColor, Color.white * 0.5f);
+            // Cry selfIllum scalar drives glow strength; fall back to 0.5 when absent.
+            float strength = selfIllum > 0.0001f ? Mathf.Clamp01(selfIllum) : 0.5f;
+            SetColorIfProperty(mat, PropEmissionColor, Color.white * strength);
             mat.EnableKeyword("_EMISSION");
         }
 
-        static void ApplyReflectionInputs(Material mat, CgfMaterialClassification classification)
+        // Builds a grayscale emission mask from a base texture's alpha channel.
+        // Pure: returns a fresh Texture2D (caller owns lifetime) or null when unreadable.
+        public static Texture2D CreateEmissionMaskFromBaseAlpha(Texture2D baseMap)
         {
-            if (!classification.UsesReflection)
-                return;
-
-            SetFloatIfProperty(mat, PropSpecHighlights, 1f);
-            SetFloatIfProperty(mat, PropEnvReflections, 1f);
-        }
-
-        static bool TryGetOrCreateEmissionMaskFromBaseAlpha(Texture2D baseMap, out Texture2D emissionMask)
-        {
-            emissionMask = null;
             if (baseMap == null || !baseMap.isReadable)
-                return false;
-
-            int key = baseMap.GetInstanceID();
-            if (EmissionMaskByBaseTextureId.TryGetValue(key, out emissionMask) && emissionMask != null)
-                return true;
+                return null;
 
             Color32[] src;
             try
@@ -291,11 +283,11 @@ namespace OpenFarCry.Importer.Cgf
             }
             catch
             {
-                return false;
+                return null;
             }
 
             if (src == null || src.Length == 0)
-                return false;
+                return null;
 
             var dst = new Color32[src.Length];
             for (int i = 0; i < src.Length; i++)
@@ -310,10 +302,16 @@ namespace OpenFarCry.Importer.Cgf
             };
             tex.SetPixels32(dst);
             tex.Apply(updateMipmaps: false, makeNoLongerReadable: true);
+            return tex;
+        }
 
-            EmissionMaskByBaseTextureId[key] = tex;
-            emissionMask = tex;
-            return true;
+        static void ApplyReflectionInputs(Material mat, CgfMaterialClassification classification)
+        {
+            if (!classification.UsesReflection)
+                return;
+
+            SetFloatIfProperty(mat, PropSpecHighlights, 1f);
+            SetFloatIfProperty(mat, PropEnvReflections, 1f);
         }
 
         static void ApplyOpaqueState(Material m)

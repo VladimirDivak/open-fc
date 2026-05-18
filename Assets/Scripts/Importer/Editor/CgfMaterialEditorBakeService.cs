@@ -17,7 +17,7 @@ namespace OpenFarCry.Importer.Editor
             if (chunk == null || string.IsNullOrWhiteSpace(cgfVirtualPath))
                 return null;
 
-            string assetPath = GetBakedMaterialPath(cgfVirtualPath, chunk.TableIndex);
+            string assetPath = GetBakedMaterialPath(cgfVirtualPath, chunk);
             var existing = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
             if (existing != null)
                 return existing;
@@ -32,12 +32,38 @@ namespace OpenFarCry.Importer.Editor
             return AssetDatabase.LoadAssetAtPath<Material>(assetPath);
         }
 
-        public static string GetBakedMaterialPath(string cgfVirtualPath, int chunkTableIndex)
+        // Baked .mat path: Assets/FCData/Materials/{cgf_path}/{sanitized_material_name}.mat.
+        // The file name keeps the original Cry material name (e.g. "wall(TemplBumpDiffuse)/mat_x"
+        // -> "wall_TemplBumpDiffuse__mat_x") for readability. The manifest keys on
+        // (virtualPath, TableIndex), so the file name only needs folder-local uniqueness.
+        public static string GetBakedMaterialPath(string cgfVirtualPath, Cgf.CgfMaterialChunk chunk)
         {
             string normalized = ImportAssetPaths.NormalizeVirtualPath(cgfVirtualPath);
             int dotIdx = normalized.LastIndexOf('.');
             string withoutExt = dotIdx > 0 ? normalized.Substring(0, dotIdx) : normalized;
-            return $"{MaterialCacheRoot}/{withoutExt}/{chunkTableIndex}.mat";
+            string fileName = SanitizeMaterialFileName(chunk?.Name, chunk?.TableIndex ?? 0);
+            return $"{MaterialCacheRoot}/{withoutExt}/{fileName}.mat";
+        }
+
+        // Maps a Cry material name to a filesystem-safe file name: any character that is
+        // not a letter, digit, '_', '-' or '.' becomes '_'. Falls back to material_{index}
+        // when the name is empty or sanitizes to nothing.
+        static string SanitizeMaterialFileName(string materialName, int tableIndex)
+        {
+            if (string.IsNullOrWhiteSpace(materialName))
+                return $"material_{tableIndex}";
+
+            var sb = new System.Text.StringBuilder(materialName.Length);
+            foreach (char c in materialName)
+            {
+                if (char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '.')
+                    sb.Append(c);
+                else
+                    sb.Append('_');
+            }
+
+            string result = sb.ToString().Trim('_', '.', ' ');
+            return string.IsNullOrEmpty(result) ? $"material_{tableIndex}" : result;
         }
 
         // Replaces non-persistent (runtime) materials on go's renderers with baked project assets.

@@ -54,6 +54,9 @@ namespace OpenFarCry.Importer.Cgf
 
         public int EntryCount => _entries?.Length ?? 0;
 
+        // Read-only view of baked entries. Lets callers iterate without SerializedObject.
+        public IReadOnlyList<Entry> Entries => _entries ?? System.Array.Empty<Entry>();
+
         static string MakeKey(string virtualPath, int tableIndex)
             => string.Concat(virtualPath, "|", tableIndex.ToString());
     }

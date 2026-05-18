@@ -560,7 +560,7 @@ namespace OpenFarCry.Importer.Cgf
                 r.Skip(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
                 chunk.SpecLevel     = r.ReadSingle();
                 chunk.SpecShininess = r.ReadSingle();
-                r.ReadSingle();                            // selfIllum
+                chunk.SelfIllum = r.ReadSingle();          // selfIllum
                 chunk.Opacity = r.ReadSingle();
                 // TextureMap3 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), tex_b(4), tex_g(5), ...
                 r.Skip(236);                          // skip tex_a (full 236 bytes)
@@ -593,7 +593,7 @@ namespace OpenFarCry.Importer.Cgf
                 r.Skip(3);                            // pack(4) padding: 3×CryIRGB = 9 bytes → float at +12
                 chunk.SpecLevel     = r.ReadSingle();
                 chunk.SpecShininess = r.ReadSingle();
-                r.ReadSingle();                            // selfIllum
+                chunk.SelfIllum = r.ReadSingle();          // selfIllum
                 chunk.Opacity = r.ReadSingle();
                 // TextureMap2 order: tex_a(0), tex_d(1), tex_s(2), tex_o(3), tex_b(4), tex_g(5), ...
                 r.Skip(108);                          // skip tex_a

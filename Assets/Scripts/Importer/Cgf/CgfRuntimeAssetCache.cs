@@ -325,6 +325,27 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
+        // Disposes the Allocator.Persistent NativeArrays held by every cached parsed
+        // CgfFile, without destroying built meshes. Built meshes are UnityEngine.Objects
+        // referenced by the live scene; only the native parsed data must be freed before a
+        // domain reload, which would otherwise orphan it and trip the leak detector.
+        public void DisposeParsedNativeData()
+        {
+            lock (_sync)
+            {
+                foreach (var parsedEntry in _parsedByKey.Values)
+                    parsedEntry.ParsedFile?.Dispose();
+
+                foreach (var modelEntry in _modelsByKey.Values)
+                    modelEntry.Artifact.ParsedFile?.Dispose();
+
+                _parsedByKey.Clear();
+                _modelsByKey.Clear();
+                _parsedKeysByScope.Clear();
+                _modelKeysByScope.Clear();
+            }
+        }
+
         public Stats GetStats()
         {
             lock (_sync)
@@ -417,7 +438,16 @@ namespace OpenFarCry.Importer.Cgf
 
         static void DisposeModelEntryUnsafe(ModelEntry modelEntry)
         {
-            var mesh = modelEntry.Artifact.BuildResult?.Mesh;
+            var buildResult = modelEntry.Artifact.BuildResult;
+            if (buildResult == null)
+                return;
+
+            DestroyMesh(buildResult.Mesh);
+            DestroyMesh(buildResult.ColliderMesh);
+        }
+
+        static void DestroyMesh(Mesh mesh)
+        {
             if (mesh == null)
                 return;
 

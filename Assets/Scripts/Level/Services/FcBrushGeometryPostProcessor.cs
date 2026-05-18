@@ -8,7 +8,8 @@ namespace OpenFarCry.Level.Services
 {
     public static class FcBrushGeometryPostProcessor
     {
-        public const int CacheFormatVersion = 3;
+        // v4: nodraw/proxy faces split into BuildResult.ColliderMesh at mesh-build time.
+        public const int CacheFormatVersion = 4;
         static readonly int PropCull = Shader.PropertyToID("_Cull");
 
         public readonly struct Artifacts
@@ -47,18 +48,35 @@ namespace OpenFarCry.Level.Services
 
             if (addPhysicsCollider && buildResult.Mesh != null)
             {
-                var col = visualRoot.GetComponent<MeshCollider>();
-                if (col == null)
-                    col = visualRoot.AddComponent<MeshCollider>();
-
-                if (TryBuildPhysicsColliderMesh(parsedFile, importScale, out physicsColliderMesh))
+                // Pick a collision mesh: split-off ColliderMesh (cache-owned), else a
+                // parsed-face collider, else the visual mesh itself. physicsColliderMesh is
+                // non-null only for the brush-owned middle case so OnDestroy frees just that.
+                Mesh colliderCandidate = null;
+                if (MeshHasTriangles(buildResult.ColliderMesh))
                 {
-                    col.sharedMesh = physicsColliderMesh;
+                    colliderCandidate = buildResult.ColliderMesh;
+                }
+                else if (TryBuildPhysicsColliderMesh(parsedFile, importScale, out physicsColliderMesh))
+                {
+                    colliderCandidate = physicsColliderMesh;
                 }
                 else
                 {
                     var mf = visualRoot.GetComponent<MeshFilter>();
-                    col.sharedMesh = mf != null ? mf.sharedMesh : buildResult.Mesh;
+                    var visualMesh = mf != null ? mf.sharedMesh : buildResult.Mesh;
+                    if (MeshHasTriangles(visualMesh))
+                        colliderCandidate = visualMesh;
+                }
+
+                // Skip the MeshCollider entirely when there is no usable geometry — a brush
+                // with an empty visual mesh and no collision faces must not get a collider
+                // (Unity rejects a mesh with no non-degenerate triangle).
+                if (MeshHasTriangles(colliderCandidate))
+                {
+                    var col = visualRoot.GetComponent<MeshCollider>();
+                    if (col == null)
+                        col = visualRoot.AddComponent<MeshCollider>();
+                    col.sharedMesh = colliderCandidate;
                 }
             }
 
@@ -441,18 +459,23 @@ namespace OpenFarCry.Level.Services
             return ids;
         }
 
+        // Collision-only material detection lives in CgfMaterialClassifier so the brush
+        // collider builder and the mesh-build nodraw split agree.
         static bool IsNoDrawProxyMaterial(string materialName)
+            => CgfMaterialClassifier.NameMarksCollisionOnly(materialName);
+
+        // True when the mesh carries at least one triangle. A MeshCollider rejects a mesh
+        // with no non-degenerate triangle, so empty meshes must never be assigned to one.
+        static bool MeshHasTriangles(Mesh mesh)
         {
-            if (string.IsNullOrWhiteSpace(materialName))
+            if (mesh == null || mesh.vertexCount < 3)
                 return false;
 
-            string n = materialName.ToLowerInvariant();
-            return n.Contains("nodraw") ||
-                   n.Contains("no_draw") ||
-                   n.Contains("physics_proxy") ||
-                   n.Contains("phys_proxy") ||
-                   n.Contains("$physics_proxy") ||
-                   n.Contains("proxy");
+            for (int i = 0; i < mesh.subMeshCount; i++)
+                if (mesh.GetIndexCount(i) >= 3)
+                    return true;
+
+            return false;
         }
     }
 }

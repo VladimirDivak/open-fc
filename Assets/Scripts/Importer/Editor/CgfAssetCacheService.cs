@@ -105,6 +105,14 @@ namespace OpenFarCry.Importer.Editor
 
                 PersistMaterialAndTextureAssets(virtualPath, go);
                 _animationCacheService.RebindAnimationComponentToSharedClips(paths.MeshPath, go, clips);
+
+                // Stamp the mesh-builder version so cache validation does not depend on
+                // mesh.name (which now carries the original CGF-derived name instead).
+                var buildStamp = go.GetComponent<CgfMeshBuildStamp>();
+                if (buildStamp == null)
+                    buildStamp = go.AddComponent<CgfMeshBuildStamp>();
+                buildStamp.SetVersion(CgfMeshBuilder.MeshCacheVersionName);
+
                 PrefabUtility.SaveAsPrefabAsset(go, paths.PrefabPath);
 
                 AssetDatabase.SaveAssets();
@@ -378,8 +386,11 @@ namespace OpenFarCry.Importer.Editor
             }
             if (mesh == null)
                 return false;
-            // Accept both the original mesh name and proxy-stripped variants (e.g. "vN_NoProxyVisual").
-            if (!mesh.name.StartsWith(CgfMeshBuilder.MeshCacheVersionName, StringComparison.Ordinal))
+            // Validate cache freshness via the build stamp, not mesh.name (mesh.name now
+            // carries the original CGF name). A stamp-less prefab predates this scheme.
+            var buildStamp = prefabAsset.GetComponentInChildren<CgfMeshBuildStamp>(true);
+            if (buildStamp == null ||
+                !string.Equals(buildStamp.MeshBuilderVersion, CgfMeshBuilder.MeshCacheVersionName, StringComparison.Ordinal))
                 return false;
 
             int expectedSubmeshCount = parsedFile.MeshChunk.Faces

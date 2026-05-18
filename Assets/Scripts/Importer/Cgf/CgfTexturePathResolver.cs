@@ -20,6 +20,16 @@ namespace OpenFarCry.Importer.Cgf
             if (!isRootedVirtualPath && !string.IsNullOrEmpty(sourceDir))
                 AddCandidate(baseCandidates, seen, $"{sourceDir}/{normalizedTextureName}");
 
+            // Stale-path recovery: many FC1 MTL chunks store an outdated rooted path
+            // (e.g. "objects/indoor/crates/x.dds") while the texture actually sits next
+            // to the CGF. As a last resort, try {sourceDir}/{basename}.
+            if (!string.IsNullOrEmpty(sourceDir))
+            {
+                string baseName = Path.GetFileName(normalizedTextureName);
+                if (!string.IsNullOrEmpty(baseName))
+                    AddCandidate(baseCandidates, seen, $"{sourceDir}/{baseName}");
+            }
+
             if (hasExtension)
             {
                 for (int i = 0; i < baseCandidates.Count; i++)

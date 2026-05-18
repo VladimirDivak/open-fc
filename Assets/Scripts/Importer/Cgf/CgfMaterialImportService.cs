@@ -72,6 +72,7 @@ namespace OpenFarCry.Importer.Cgf
     {
         readonly CgfMaterialRuntimeCache _cache;
         readonly TextureRuntimeImportService _textureRuntimeService;
+        readonly CgfScopedTextureCache _emissionMasks = new CgfScopedTextureCache();
 
         // Optional project-asset lookup: (cgfVirtualPath, chunkTableIndex) → persistent Material.
         // Set by editor init to return pre-baked .mat assets; null in runtime builds.
@@ -97,51 +98,70 @@ namespace OpenFarCry.Importer.Cgf
             if (subCount == 0 || parsedFile == null)
                 return new Material[subCount];
 
-            // Find primary node (the one that owns SelectedMeshChunkID).
-            CgfNodeChunk primaryNode = null;
-            if (parsedFile.NodeChunks != null)
-                foreach (var node in parsedFile.NodeChunks)
-                    if (node.ObjectID == parsedFile.SelectedMeshChunkID)
-                    { primaryNode = node; break; }
+            var leaves = CollectGlobalLeafMaterials(parsedFile);
+            if (leaves.Count == 0)
+                return BuildFallbackArray(subCount, textureScopeId);
 
-            int matChunkId = primaryNode?.MatID ?? -1;
-
-            if (matChunkId < 0 ||
-                !parsedFile.MaterialByChunkID.TryGetValue(matChunkId, out var rootMat))
-                return BuildFallbackArray(subCount, "(no material chunk)");
-
-            if (rootMat.MtlType == CgfMtlType.Multi)
+            var mats = new Material[subCount];
+            for (int i = 0; i < subCount; i++)
             {
-                if (!parsedFile.MaterialChildrenByParentChunkID.TryGetValue(rootMat.ChunkID, out var children))
-                    children = null;
-
-                var mats = new Material[subCount];
-                for (int i = 0; i < subCount; i++)
-                {
-                    int matId = submeshMaterialIds != null && i < submeshMaterialIds.Length
-                        ? submeshMaterialIds[i]
-                        : i;
-                    var chunk = ResolveMultiMaterialChild(parsedFile, rootMat, children, matId);
-                    mats[i] = chunk != null
-                        ? GetOrBuild(parsedFile, chunk, textureScopeId)
-                        : CgfMaterialBuilder.BuildFallback($"missing_matid_{matId}");
-                }
-                return mats;
+                int matId = submeshMaterialIds != null && i < submeshMaterialIds.Length
+                    ? submeshMaterialIds[i]
+                    : i;
+                var chunk = ResolveLeafByFaceMatId(leaves, matId);
+                mats[i] = chunk != null
+                    ? GetOrBuild(parsedFile, chunk, textureScopeId)
+                    : GetSharedFallback(textureScopeId);
             }
-            else
-            {
-                if (TryResolveMaterialTableIndexSlots(parsedFile, subCount, submeshMaterialIds, textureScopeId, out var tableIndexMats))
-                    return tableIndexMats;
-
-                var single = GetOrBuild(parsedFile, rootMat, textureScopeId);
-                var mats = new Material[subCount];
-                for (int i = 0; i < subCount; i++)
-                    mats[i] = single;
-                return mats;
-            }
+            return mats;
         }
 
-        public void ClearCache() => _cache.Clear();
+        // A CGF face MatID is a GLOBAL leaf-material index: the position of the material
+        // among all non-MULTI material chunks, in chunk-table order, uniform across every
+        // node. Verified against merc_cover, fence_collision, gunboatdamaged, hut and
+        // outdoor_simplefoldable. MTL_MULTI chunks are containers and are skipped.
+        static List<CgfMaterialChunk> CollectGlobalLeafMaterials(CgfFile parsedFile)
+        {
+            var leaves = new List<CgfMaterialChunk>();
+            var chunks = parsedFile?.MaterialChunks;
+            if (chunks == null)
+                return leaves;
+
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var chunk = chunks[i];
+                if (chunk != null && chunk.MtlType != CgfMtlType.Multi)
+                    leaves.Add(chunk);
+            }
+            return leaves;
+        }
+
+        static CgfMaterialChunk ResolveLeafByFaceMatId(List<CgfMaterialChunk> leaves, int matId)
+        {
+            if (leaves == null || leaves.Count == 0)
+                return null;
+
+            // Some LOD meshes store -1 for every face MatID; Cry treats that as default.
+            if (matId < 0)
+                return leaves[0];
+
+            return matId < leaves.Count ? leaves[matId] : null;
+        }
+
+        public void ClearCache()
+        {
+            _cache.Clear();
+            _emissionMasks.Clear();
+        }
+
+        public void ReleaseLevelScope(string scopeId)
+        {
+            _cache.ReleaseLevelScope(scopeId);
+            _emissionMasks.ReleaseLevelScope(scopeId);
+        }
+
+        public int TrimUnused() => _cache.TrimUnused() + _emissionMasks.TrimUnused();
+
         public int CachedCount => _cache.Count;
 
         public bool RequiresUvScroll(
@@ -160,7 +180,7 @@ namespace OpenFarCry.Importer.Cgf
                 if (chunk == null)
                     continue;
 
-                if (CgfMaterialClassifier.Analyze(chunk).UsesUvScroll)
+                if (chunk.Classification.UsesUvScroll)
                     return true;
             }
 
@@ -190,7 +210,7 @@ namespace OpenFarCry.Importer.Cgf
                 var chunk = chunks[i];
                 if (chunk == null)
                     continue;
-                var classification = CgfMaterialClassifier.Analyze(chunk);
+                var classification = chunk.Classification;
                 bool keepBaseReadable = classification.UsesGlowFromDiffuseAlpha;
 
                 tasks.Add(PreloadTextureNameAsync(parsedFile,
@@ -243,79 +263,21 @@ namespace OpenFarCry.Importer.Cgf
             return CollectUniqueTexturePreloadRequests(results).Count;
         }
 
-        static CgfMaterialChunk ResolveMultiMaterialChild(
-            CgfFile parsedFile,
-            CgfMaterialChunk rootMat,
-            List<CgfMaterialChunk> children,
-            int matId)
-        {
-            // Some LOD meshes store -1 in every face MatID even though the file still
-            // has a valid MTL_MULTI table. Cry treats this as the default material.
-            if (matId < 0)
-            {
-                if (children != null && children.Count > 0)
-                    return children[0];
-
-                matId = 0;
-            }
-
-            if (children != null && matId >= 0 && matId < children.Count)
-                return children[matId];
-
-            // Fallback for malformed/partial material tables: walk forward from root.
-            int relLeafIndex = 0;
-            int start = Math.Max(0, rootMat.TableIndex + 1);
-            for (int i = start; i < parsedFile.MaterialChunks.Count; i++)
-            {
-                var chunk = parsedFile.MaterialChunks[i];
-                if (chunk == null || chunk.MtlType == CgfMtlType.Multi)
-                    continue;
-                if (relLeafIndex == matId)
-                    return chunk;
-                relLeafIndex++;
-            }
-
-            return null;
-        }
-
-        List<CgfMaterialChunk> CollectMaterialChunks(CgfFile parsedFile, int subCount, int[] submeshMaterialIds)
+        // Resolves the leaf material chunks for each submesh, in the same global
+        // leaf-index space ResolveSubmeshMaterials uses. Drives texture preload.
+        static List<CgfMaterialChunk> CollectMaterialChunks(CgfFile parsedFile, int subCount, int[] submeshMaterialIds)
         {
             var result = new List<CgfMaterialChunk>();
-
-            CgfNodeChunk primaryNode = null;
-            if (parsedFile.NodeChunks != null)
-            {
-                for (int i = 0; i < parsedFile.NodeChunks.Count; i++)
-                {
-                    var node = parsedFile.NodeChunks[i];
-                    if (node.ObjectID == parsedFile.SelectedMeshChunkID)
-                    {
-                        primaryNode = node;
-                        break;
-                    }
-                }
-            }
-
-            int matChunkId = primaryNode?.MatID ?? -1;
-            if (matChunkId < 0 || !parsedFile.MaterialByChunkID.TryGetValue(matChunkId, out var rootMat))
+            var leaves = CollectGlobalLeafMaterials(parsedFile);
+            if (leaves.Count == 0 || subCount <= 0)
                 return result;
 
-            if (rootMat.MtlType != CgfMtlType.Multi)
-            {
-                if (TryCollectMaterialTableIndexSlots(parsedFile, subCount, submeshMaterialIds, result))
-                    return result;
-
-                result.Add(rootMat);
-                return result;
-            }
-
-            parsedFile.MaterialChildrenByParentChunkID.TryGetValue(rootMat.ChunkID, out var children);
             for (int i = 0; i < subCount; i++)
             {
                 int matId = submeshMaterialIds != null && i < submeshMaterialIds.Length
                     ? submeshMaterialIds[i]
                     : i;
-                var chunk = ResolveMultiMaterialChild(parsedFile, rootMat, children, matId);
+                var chunk = ResolveLeafByFaceMatId(leaves, matId);
                 if (chunk != null)
                     result.Add(chunk);
             }
@@ -323,120 +285,76 @@ namespace OpenFarCry.Importer.Cgf
             return result;
         }
 
-        bool TryResolveMaterialTableIndexSlots(
-            CgfFile parsedFile,
-            int subCount,
-            int[] submeshMaterialIds,
-            string textureScopeId,
-            out Material[] materials)
-        {
-            // Some static CGFs store several MTL_STANDARD chunks instead of one MTL_MULTI.
-            // In that layout face MatID is the material table index, not an index under
-            // the primary node material chunk.
-            materials = null;
-            if (parsedFile?.MaterialChunks == null || parsedFile.MaterialChunks.Count == 0 || subCount <= 0)
-                return false;
-
-            var resolved = new Material[subCount];
-            for (int i = 0; i < subCount; i++)
-            {
-                int tableIndex = submeshMaterialIds != null && i < submeshMaterialIds.Length
-                    ? submeshMaterialIds[i]
-                    : i;
-
-                if (!TryResolveMaterialByTableIndex(parsedFile, tableIndex, out var chunk))
-                    return false;
-
-                resolved[i] = GetOrBuild(parsedFile, chunk, textureScopeId);
-            }
-
-            materials = resolved;
-            return true;
-        }
-
-        bool TryCollectMaterialTableIndexSlots(
-            CgfFile parsedFile,
-            int subCount,
-            int[] submeshMaterialIds,
-            List<CgfMaterialChunk> result)
-        {
-            if (parsedFile?.MaterialChunks == null || parsedFile.MaterialChunks.Count == 0 || subCount <= 0)
-                return false;
-
-            var resolved = new List<CgfMaterialChunk>(subCount);
-            for (int i = 0; i < subCount; i++)
-            {
-                int tableIndex = submeshMaterialIds != null && i < submeshMaterialIds.Length
-                    ? submeshMaterialIds[i]
-                    : i;
-
-                if (!TryResolveMaterialByTableIndex(parsedFile, tableIndex, out var chunk))
-                    return false;
-
-                resolved.Add(chunk);
-            }
-
-            result.AddRange(resolved);
-            return true;
-        }
-
-        static bool TryResolveMaterialByTableIndex(CgfFile parsedFile, int tableIndex, out CgfMaterialChunk chunk)
-        {
-            chunk = null;
-            if (parsedFile?.MaterialChunks == null ||
-                tableIndex < 0 ||
-                tableIndex >= parsedFile.MaterialChunks.Count)
-                return false;
-
-            chunk = parsedFile.MaterialChunks[tableIndex];
-            return chunk != null && chunk.MtlType != CgfMtlType.Multi;
-        }
-
         Material GetOrBuild(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)
         {
-            var textures = ResolveTextures(parsedFile, chunk, textureScopeId);
-            string name = string.IsNullOrEmpty(chunk.Name) ? "__unnamed" : chunk.Name.ToLowerInvariant();
-            string shader = string.IsNullOrEmpty(chunk.ShaderName) ? "-" : chunk.ShaderName.ToLowerInvariant();
-            string diffuseKey = string.IsNullOrEmpty(textures.BaseMapVirtualPath)
-                ? (string.IsNullOrEmpty(textures.DiffuseTextureName) ? "-" : textures.DiffuseTextureName)
-                : textures.BaseMapVirtualPath;
-            string normalKey = string.IsNullOrEmpty(textures.NormalMapVirtualPath)
-                ? (string.IsNullOrEmpty(textures.NormalTextureName) ? "-" : textures.NormalTextureName)
-                : textures.NormalMapVirtualPath;
-            string specularKey = string.IsNullOrEmpty(textures.SpecularMapVirtualPath)
-                ? (string.IsNullOrEmpty(textures.SpecularTextureName) ? "-" : textures.SpecularTextureName)
-                : textures.SpecularMapVirtualPath;
-            string opacityKey = string.IsNullOrEmpty(textures.OpacityMapVirtualPath)
-                ? (string.IsNullOrEmpty(textures.OpacityTextureName) ? "-" : textures.OpacityTextureName)
-                : textures.OpacityMapVirtualPath;
-            string glossKey = string.IsNullOrEmpty(textures.GlossMapVirtualPath)
-                ? (string.IsNullOrEmpty(textures.GlossTextureName) ? "-" : textures.GlossTextureName)
-                : textures.GlossMapVirtualPath;
-            var dc = chunk.DiffuseColor;
-            string colorKey = $"{dc.r:X2}{dc.g:X2}{dc.b:X2}";
-            string key = $"name:{name}|sh:{shader}|type:{(int)chunk.MtlType}|flags:{(int)chunk.Flags}|alpha:{chunk.AlphaTest:F3}|color:{colorKey}|d:{diffuseKey}|n:{normalKey}|s:{specularKey}|o:{opacityKey}|g:{glossKey}";
+            // Key by chunk identity (source file + chunk id). A given (file, chunk) always
+            // resolves to the same textures, so the cache lookup can run before any texture
+            // is loaded. Texture resolution happens inside the factory, on a miss only.
+            string key = BuildMaterialCacheKey(parsedFile, chunk);
             var lookup = ProjectMaterialLookup;
-            var material = _cache.GetOrCreate(key, textureScopeId, () =>
+            return _cache.GetOrCreate(key, textureScopeId, () =>
             {
+                var textures = ResolveTextures(parsedFile, chunk, textureScopeId);
+                Material mat = null;
                 if (lookup != null && !string.IsNullOrEmpty(parsedFile?.SourceVirtualPath))
                 {
                     var projectMat = lookup(parsedFile.SourceVirtualPath, chunk.TableIndex);
                     if (projectMat != null)
                     {
-                        var instance = UnityEngine.Object.Instantiate(projectMat);
-                        instance.name = projectMat.name;
-                        return instance;
+                        mat = UnityEngine.Object.Instantiate(projectMat);
+                        mat.name = projectMat.name;
+                        CgfMaterialBuilder.ApplyResolvedTextures(mat, textures);
                     }
                 }
-                return CgfMaterialBuilder.Build(chunk, textures);
+                if (mat == null)
+                    mat = CgfMaterialBuilder.Build(chunk, textures);
+
+                ApplyScopedEmissionMask(mat, chunk, textures, textureScopeId);
+                return mat;
             });
-            CgfMaterialBuilder.ApplyResolvedTextures(material, textures);
-            return material;
+        }
+
+        // Upgrades _EmissionMap to a level-scoped alpha-derived mask for glow materials.
+        // The mask is destroyed when the level scope is released.
+        void ApplyScopedEmissionMask(
+            Material mat,
+            CgfMaterialChunk chunk,
+            CgfResolvedMaterialTextures textures,
+            string textureScopeId)
+        {
+            if (mat == null || chunk == null || !chunk.Classification.UsesGlowFromDiffuseAlpha)
+                return;
+
+            var baseMap = textures.BaseMap;
+            if (baseMap == null || !baseMap.isReadable)
+                return;
+
+            string baseKey = string.IsNullOrEmpty(textures.BaseMapVirtualPath)
+                ? baseMap.name
+                : textures.BaseMapVirtualPath;
+            if (string.IsNullOrEmpty(baseKey))
+                return;
+
+            var mask = _emissionMasks.GetOrCreate(
+                string.Concat("emission:", baseKey),
+                textureScopeId,
+                () => CgfMaterialBuilder.CreateEmissionMaskFromBaseAlpha(baseMap));
+
+            if (mask != null)
+                mat.SetTexture("_EmissionMap", mask);
+        }
+
+        static string BuildMaterialCacheKey(CgfFile parsedFile, CgfMaterialChunk chunk)
+        {
+            string source = parsedFile != null && !string.IsNullOrEmpty(parsedFile.SourceVirtualPath)
+                ? parsedFile.SourceVirtualPath.ToLowerInvariant()
+                : "__nofile";
+            return string.Concat(source, "#", chunk.ChunkID.ToString());
         }
 
         CgfResolvedMaterialTextures ResolveTextures(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)
         {
-            var classification = CgfMaterialClassifier.Analyze(chunk);
+            var classification = chunk != null ? chunk.Classification : default;
             bool keepBaseReadable = classification.UsesGlowFromDiffuseAlpha;
 
             string diffuseName = CgfTexturePathResolver.NormalizeTextureName(chunk?.DiffuseTextureName);
@@ -620,7 +538,7 @@ namespace OpenFarCry.Importer.Cgf
                         result.ParsedFile,
                         CgfTexturePathResolver.NormalizeTextureName(chunk.DiffuseTextureName),
                         linearColorSpace: false,
-                        markNonReadable: !CgfMaterialClassifier.Analyze(chunk).UsesGlowFromDiffuseAlpha,
+                        markNonReadable: !chunk.Classification.UsesGlowFromDiffuseAlpha,
                         seen,
                         requests);
                     TryCollectTextureCandidate(
@@ -697,11 +615,19 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
-        static Material[] BuildFallbackArray(int count, string reason)
+        // One shared magenta material for the whole cache, level-scoped so it releases
+        // with the level instead of leaking one instance per missing submesh.
+        Material GetSharedFallback(string textureScopeId)
+        {
+            return _cache.GetOrCreate("__shared_fallback", textureScopeId,
+                () => CgfMaterialBuilder.BuildFallback("shared"));
+        }
+
+        Material[] BuildFallbackArray(int count, string textureScopeId)
         {
             var mats = new Material[count];
             for (int i = 0; i < count; i++)
-                mats[i] = CgfMaterialBuilder.BuildFallback(reason);
+                mats[i] = GetSharedFallback(textureScopeId);
             return mats;
         }
     }

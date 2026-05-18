@@ -24,10 +24,13 @@ namespace OpenFarCry.Importer.Cgf
 
         public Material GetOrCreate(string key, string scopeId, Func<Material> factory)
         {
+            // RefCount tracks the number of distinct scopes holding the material, so it
+            // stays balanced against ReleaseLevelScope (one decrement per scope). Repeated
+            // GetOrCreate calls in the same scope must not inflate it.
             if (_materials.TryGetValue(key, out var entry) && entry.Material != null)
             {
-                entry.RefCount++;
-                AttachScope(scopeId, key, entry);
+                if (AttachScope(scopeId, key, entry))
+                    entry.RefCount++;
                 return entry.Material;
             }
 
@@ -35,6 +38,8 @@ namespace OpenFarCry.Importer.Cgf
             if (mat == null)
                 return null;
 
+            // RefCount starts at 1 for the creating scope (or as a persistent global
+            // material when scopeId is null). AttachScope must not add another count.
             var created = new Entry { Material = mat, RefCount = 1 };
             _materials[key] = created;
             AttachScope(scopeId, key, created);
@@ -93,13 +98,14 @@ namespace OpenFarCry.Importer.Cgf
 
         public int Count => _materials.Count;
 
-        void AttachScope(string scopeId, string key, Entry entry)
+        // Returns true when scopeId was newly attached to the entry (caller should bump RefCount).
+        bool AttachScope(string scopeId, string key, Entry entry)
         {
             if (string.IsNullOrWhiteSpace(scopeId) || entry == null)
-                return;
+                return false;
 
             if (!entry.Scopes.Add(scopeId))
-                return;
+                return false;
 
             if (!_keysByScope.TryGetValue(scopeId, out var keys))
             {
@@ -107,6 +113,7 @@ namespace OpenFarCry.Importer.Cgf
                 _keysByScope[scopeId] = keys;
             }
             keys.Add(key);
+            return true;
         }
 
         void RemoveEntry(string key, Entry entry)

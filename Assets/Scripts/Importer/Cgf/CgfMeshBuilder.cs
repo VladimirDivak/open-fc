@@ -13,6 +13,7 @@ namespace OpenFarCry.Importer.Cgf
     public class BuildResult
     {
         public Mesh        Mesh;
+        public Mesh        ColliderMesh; // nodraw/proxy faces split off the visual mesh; null when none
         public int         MeshChunkID;
         public string      SourceNodeName;
         public int[]       SubmeshMaterialIds; // submesh index -> original Cry face MatID
@@ -30,11 +31,13 @@ namespace OpenFarCry.Importer.Cgf
         {
             public readonly BuildResult Result;
             public readonly MeshBuildData Data;
+            public readonly string MeshName; // CGF-derived display name
 
-            public PreparedBuild(BuildResult result, MeshBuildData data)
+            public PreparedBuild(BuildResult result, MeshBuildData data, string meshName)
             {
                 Result = result;
                 Data = data;
+                MeshName = meshName;
             }
         }
 
@@ -46,8 +49,10 @@ namespace OpenFarCry.Importer.Cgf
             public NativeArray<BoneWeight> BoneWeights;
             public Matrix4x4[] BindPoses;
 
-            // submesh index -> int[] triangle indices
+            // visual submesh: face MatID -> triangle indices (collision faces excluded)
             public readonly Dictionary<int, NativeArray<int>> SubmeshTriangles = new Dictionary<int, NativeArray<int>>();
+            // nodraw/proxy faces routed out of the visual mesh, indices into the shared vertex buffer
+            public readonly List<int> ColliderTriangles = new List<int>();
 
             public void Dispose()
             {
@@ -74,7 +79,7 @@ namespace OpenFarCry.Importer.Cgf
             }
         }
 
-        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v10_lmuv";
+        public const string MeshCacheVersionName = "CGFMesh_NodeMatrixOld_v16_nodrawsplit";
 
         public static BuildResult Build(CgfFile cgf, bool importSkeleton = true, float importScale = 1f)
         {
@@ -111,16 +116,35 @@ namespace OpenFarCry.Importer.Cgf
                 SourceNodeName = sourceNodeName,
             };
 
+            string meshName = ResolveMeshName(cgf, sourceNodeName);
+
+            // Global leaf-material indices that are collision-only; uniform across all nodes.
+            var collisionMatIds = CgfNoDrawFaceClassifier.Classify(cgf);
+
             if (!selectedHasBones && TryBuildStaticMeshParts(cgf, out var staticParts))
             {
-                var staticData = BuildStaticCombinedMeshData(staticParts, importScale);
+                var staticData = BuildStaticCombinedMeshData(staticParts, importScale, collisionMatIds);
                 if (string.IsNullOrEmpty(result.SourceNodeName) && staticParts.Count > 0)
                     result.SourceNodeName = staticParts[0].NodeName;
-                return new PreparedBuild(result, staticData);
+                return new PreparedBuild(result, staticData, meshName);
             }
 
-            var meshData = BuildMeshData(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale);
-            return new PreparedBuild(result, meshData);
+            var meshData = BuildMeshData(mesh, nodeTransform, cgf.BoneNames, cgf.BoneAnim, cgf.BoneInitPos, result, importSkeleton, importScale, collisionMatIds);
+            return new PreparedBuild(result, meshData, meshName);
+        }
+
+        // Original-derived mesh name for readable errors/assets: CGF file name without
+        // extension, falling back to the source node name, then a generic constant.
+        static string ResolveMeshName(CgfFile cgf, string sourceNodeName)
+        {
+            if (!string.IsNullOrEmpty(cgf?.SourceVirtualPath))
+            {
+                string fileName = System.IO.Path.GetFileNameWithoutExtension(cgf.SourceVirtualPath);
+                if (!string.IsNullOrEmpty(fileName))
+                    return fileName;
+            }
+
+            return !string.IsNullOrEmpty(sourceNodeName) ? sourceNodeName : "CgfMesh";
         }
 
         internal static BuildResult UploadPrepared(PreparedBuild prepared)
@@ -132,8 +156,20 @@ namespace OpenFarCry.Importer.Cgf
             if (prepared.Data == null)
                 throw new ArgumentException("Prepared build data is null.", nameof(prepared));
 
-            prepared.Result.Mesh = CreateUnityMesh(prepared.Data, out var submeshMaterialIds);
+            prepared.Result.Mesh = CreateUnityMesh(
+                prepared.Data,
+                out var submeshMaterialIds,
+                out var colliderMesh);
             prepared.Result.SubmeshMaterialIds = submeshMaterialIds;
+            prepared.Result.ColliderMesh = colliderMesh;
+
+            // Name meshes after the original CGF so runtime errors are distinguishable.
+            // The CgfMeshBuilder version is tracked separately (cache key + CgfMeshBuildStamp).
+            string meshName = string.IsNullOrEmpty(prepared.MeshName) ? "CgfMesh" : prepared.MeshName;
+            prepared.Result.Mesh.name = meshName;
+            if (colliderMesh != null)
+                colliderMesh.name = meshName + "_collider";
+
             prepared.Data.Dispose();
             return prepared.Result;
         }
@@ -208,12 +244,13 @@ namespace OpenFarCry.Importer.Cgf
             CgfBoneInitPosChunk  boneInitPos,
             BuildResult result,
             bool importSkeleton,
-            float importScale)
+            float importScale,
+            HashSet<int> collisionMatIds)
         {
             bool hasBones = importSkeleton && chunk.HasBoneInfo && boneNames != null && boneNames.Names.Length > 0;
 
             if (!hasBones)
-                return BuildStaticMeshData(chunk, nodeTransform, importScale);
+                return BuildStaticMeshData(chunk, nodeTransform, importScale, collisionMatIds);
 
             int[] boneIdToIndex = null;
             int[] boneIndexToId = null;
@@ -296,7 +333,10 @@ namespace OpenFarCry.Importer.Cgf
 
             foreach (var kv in remap.SubmeshMap)
             {
-                data.SubmeshTriangles[kv.Key] = new NativeArray<int>(kv.Value.ToArray(), Allocator.Persistent);
+                if (collisionMatIds != null && collisionMatIds.Contains(kv.Key))
+                    data.ColliderTriangles.AddRange(kv.Value);
+                else
+                    data.SubmeshTriangles[kv.Key] = new NativeArray<int>(kv.Value.ToArray(), Allocator.Persistent);
             }
 
             nativePosIdx.Dispose();
@@ -316,7 +356,11 @@ namespace OpenFarCry.Importer.Cgf
             return data;
         }
 
-        static MeshBuildData BuildStaticMeshData(CgfMeshChunk chunk, Matrix4x4 nodeTransform, float importScale)
+        static MeshBuildData BuildStaticMeshData(
+            CgfMeshChunk chunk,
+            Matrix4x4 nodeTransform,
+            float importScale,
+            HashSet<int> collisionMatIds)
         {
             var data = new MeshBuildData();
             var unityNodeTransform = CryTransformConversion.NodeMatrixInImporterSpace(nodeTransform, importScale);
@@ -337,12 +381,18 @@ namespace OpenFarCry.Importer.Cgf
 
             foreach (var kv in remap.SubmeshMap)
             {
-                data.SubmeshTriangles[kv.Key] = new NativeArray<int>(kv.Value.ToArray(), Allocator.Persistent);
+                if (collisionMatIds != null && collisionMatIds.Contains(kv.Key))
+                    data.ColliderTriangles.AddRange(kv.Value);
+                else
+                    data.SubmeshTriangles[kv.Key] = new NativeArray<int>(kv.Value.ToArray(), Allocator.Persistent);
             }
             return data;
         }
 
-        static MeshBuildData BuildStaticCombinedMeshData(List<StaticMeshPart> parts, float importScale)
+        static MeshBuildData BuildStaticCombinedMeshData(
+            List<StaticMeshPart> parts,
+            float importScale,
+            HashSet<int> collisionMatIds)
         {
             var data = new MeshBuildData();
 
@@ -384,6 +434,16 @@ namespace OpenFarCry.Importer.Cgf
 
                 foreach (var kv in remap.SubmeshMap)
                 {
+                    // Collision-only faces go to the collider mesh, never the visual mesh.
+                    // Face MatID is a global leaf-material index uniform across all nodes.
+                    if (collisionMatIds != null && collisionMatIds.Contains(kv.Key))
+                    {
+                        var collisionTris = kv.Value;
+                        for (int t = 0; t < collisionTris.Count; t++)
+                            data.ColliderTriangles.Add(collisionTris[t] + vertexOffset);
+                        continue;
+                    }
+
                     if (!data.SubmeshTriangles.TryGetValue(kv.Key, out var existing))
                     {
                         var arr = new NativeArray<int>(kv.Value.Count, Allocator.Persistent);
@@ -499,7 +559,10 @@ namespace OpenFarCry.Importer.Cgf
             if (!rawUVs.IsCreated) safeUvs.Dispose();
         }
 
-        static Mesh CreateUnityMesh(MeshBuildData data, out int[] submeshMaterialIds)
+        static Mesh CreateUnityMesh(
+            MeshBuildData data,
+            out int[] submeshMaterialIds,
+            out Mesh colliderMesh)
         {
             var mesh = new Mesh { name = MeshCacheVersionName };
 
@@ -525,13 +588,16 @@ namespace OpenFarCry.Importer.Cgf
             mesh.SetVertexBufferData(data.Normals,   0, 0, vertCount, 1, MeshUpdateFlags.DontRecalculateBounds);
             mesh.SetVertexBufferData(data.Uvs,       0, 0, vertCount, 2, MeshUpdateFlags.DontRecalculateBounds);
 
+            // SubmeshTriangles already holds visual faces only — collision-only faces were
+            // routed into data.ColliderTriangles per node during the build.
             var sortedMatIDs = data.SubmeshTriangles.Keys.OrderBy(k => k).ToList();
             mesh.subMeshCount = sortedMatIDs.Count;
 
             int totalIndices = 0;
-            foreach (var na in data.SubmeshTriangles.Values) totalIndices += na.Length;
+            for (int i = 0; i < sortedMatIDs.Count; i++)
+                totalIndices += data.SubmeshTriangles[sortedMatIDs[i]].Length;
             mesh.SetIndexBufferParams(totalIndices, mesh.indexFormat);
-            
+
             int baseIndex = 0;
             for (int si = 0; si < sortedMatIDs.Count; si++)
             {
@@ -549,7 +615,35 @@ namespace OpenFarCry.Importer.Cgf
                 mesh.bindposes = data.BindPoses;
 
             mesh.RecalculateBounds();
+
+            colliderMesh = BuildColliderMesh(data);
             return mesh;
+        }
+
+        // Builds a single-submesh collider mesh from the nodraw/proxy faces routed out of
+        // the visual mesh. Shares the full vertex buffer (positions only); MeshCollider
+        // cooking ignores unreferenced vertices. Returns null when there are no such faces.
+        static Mesh BuildColliderMesh(MeshBuildData data)
+        {
+            if (data.ColliderTriangles.Count < 3)
+                return null;
+
+            int vertCount = data.Positions.Length;
+            var positions = new Vector3[vertCount];
+            for (int i = 0; i < vertCount; i++)
+            {
+                var p = data.Positions[i];
+                positions[i] = new Vector3(p.x, p.y, p.z);
+            }
+
+            var colliderMesh = new Mesh
+            {
+                name = MeshCacheVersionName + "_Collider",
+                indexFormat = IndexFormat.UInt32,
+            };
+            colliderMesh.SetVertices(positions);
+            colliderMesh.SetTriangles(data.ColliderTriangles, 0, calculateBounds: true);
+            return colliderMesh;
         }
 
         static Matrix4x4 BuildAccumulatedNodeTransform(CgfFile cgf, CgfNodeChunk node)

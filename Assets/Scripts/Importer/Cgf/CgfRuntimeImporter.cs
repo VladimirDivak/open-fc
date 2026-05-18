@@ -67,14 +67,14 @@ namespace OpenFarCry.Importer.Cgf
         {
             SharedService.ReleaseLevelScope(levelScopeId);
             TextureImportService.ReleaseLevelScope(levelScopeId);
-            SharedMaterialCache.ReleaseLevelScope(levelScopeId);
+            SharedMaterialService.ReleaseLevelScope(levelScopeId);
         }
 
         public static int TrimUnused()
         {
             int removed = SharedService.TrimUnused();
             removed += TextureImportService.TrimUnusedRuntimeCache();
-            removed += SharedMaterialCache.TrimUnused();
+            removed += SharedMaterialService.TrimUnused();
             return removed;
         }
 
@@ -93,6 +93,14 @@ namespace OpenFarCry.Importer.Cgf
             SharedService.ClearRuntimeCache();
             SharedMaterialService.ClearCache();
             TextureImportService.RuntimeService.ClearRuntimeCache();
+        }
+
+        // Frees Allocator.Persistent native data held by cached parsed CGF files without
+        // destroying built meshes. Call before an editor domain reload to avoid leaking
+        // the parsed-geometry NativeArrays.
+        public static void DisposeParsedNativeData()
+        {
+            SharedService.DisposeParsedNativeData();
         }
 
         public static CgfRuntimeAssetCache.Stats GetCacheStats()

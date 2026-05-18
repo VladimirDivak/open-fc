@@ -238,6 +238,11 @@ namespace OpenFarCry.Importer.Cgf
             _runtimeCache.ClearRuntimeCache();
         }
 
+        public void DisposeParsedNativeData()
+        {
+            _runtimeCache.DisposeParsedNativeData();
+        }
+
         public CgfRuntimeAssetCache.Stats GetCacheStats()
         {
             return _runtimeCache.GetStats();

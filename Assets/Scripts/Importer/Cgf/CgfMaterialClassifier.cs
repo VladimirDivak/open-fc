@@ -159,5 +159,32 @@ namespace OpenFarCry.Importer.Cgf
         {
             return value != null && needle != null && value.IndexOf(needle, StringComparison.Ordinal) >= 0;
         }
+
+        // True when the material is collision-only: a nodraw shader or a physics-proxy name.
+        // Single authority for the geometry-build nodraw split and the brush collider builder.
+        public static bool IsCollisionOnly(CgfMaterialChunk chunk)
+        {
+            if (chunk == null)
+                return false;
+            return chunk.Classification.IsNoDraw || NameMarksCollisionOnly(chunk.Name);
+        }
+
+        // True when the material name marks collision-only geometry: nodraw, physics
+        // proxy, or an AI-obstruction helper (mat_obstruct is a Cry physics material —
+        // soft obstruction geometry that is invisible but still collidable).
+        public static bool NameMarksCollisionOnly(string materialName)
+        {
+            if (string.IsNullOrWhiteSpace(materialName))
+                return false;
+
+            string n = materialName.ToLowerInvariant();
+            return n.Contains("nodraw") ||
+                   n.Contains("no_draw") ||
+                   n.Contains("physics_proxy") ||
+                   n.Contains("phys_proxy") ||
+                   n.Contains("$physics_proxy") ||
+                   n.Contains("proxy") ||
+                   n.Contains("obstruct");
+        }
     }
 }
