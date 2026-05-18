@@ -602,9 +602,12 @@ namespace OpenFarCry.Level.Data
                 {
                     string svStr = child.Attributes?["SunVector"]?.Value;
                     if (TryParseVec3(svStr, out Vector3 sv))
-                        // Cry SunVector points toward the sun; negate to get the
-                        // light travel direction used as the directional light forward.
-                        env.SunVector = -ConvertDirection(sv.x, sv.y, sv.z);
+                        // Cry (3dEngineLoad.cpp:734-745) derives the sun position as
+                        // swapXY(normalize(-SunVector)). The directional light forward is
+                        // the light travel direction = -sunPos = swapXY(normalize(SunVector)),
+                        // converted from Cry (x,y,z) to Unity scene space (x,z,y).
+                        // Net: Unity forward = (SunVector.y, SunVector.z, SunVector.x).
+                        env.SunVector = new Vector3(sv.y, sv.z, sv.x);
 
                     string sunColorInt = child.Attributes?["SunColor"]?.Value;
                     if (!string.IsNullOrEmpty(sunColorInt) && int.TryParse(sunColorInt, out int sc))
