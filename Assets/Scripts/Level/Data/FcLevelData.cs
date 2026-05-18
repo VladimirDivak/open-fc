@@ -93,7 +93,7 @@ namespace OpenFarCry.Level.Data
     public sealed class FcLevelEnvironmentDesc
     {
         // <Lighting>
-        public Vector3 SunVector;           // Unity space (converted from Cry in loader)
+        public Vector3 SunVector;           // Unity-space light travel direction (Cry-converted + negated in loader)
         public Color SunColor = Color.white;
         public Color SkyColor = Color.grey;
         public float SunMultiplier = 1f;

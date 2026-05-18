@@ -3,7 +3,9 @@ using UnityEngine;
 namespace OpenFarCry.Level.Services
 {
     // Applies level-wide environment settings from the parsed mission XML.
-    // Populated by FcLevelSceneBuilder (editor) and applied at runtime via Awake.
+    // FcLevelSceneBuilder populates the fields and calls Apply() at build time;
+    // the sun GameObject and RenderSettings are then baked into the saved scene,
+    // so no runtime re-application is needed.
     public sealed class FcLevelEnvironment : MonoBehaviour
     {
         [Header("Sun")]
@@ -26,11 +28,6 @@ namespace OpenFarCry.Level.Services
         public Color FogColor       { get => _fogColor; set => _fogColor = value; }
         public float FogStart       { get => _fogStart; set => _fogStart = value; }
         public float FogEnd         { get => _fogEnd;   set => _fogEnd = value; }
-
-        void Awake()
-        {
-            Apply();
-        }
 
         public void Apply()
         {
@@ -76,11 +73,11 @@ namespace OpenFarCry.Level.Services
             return null;
         }
 
-#if UNITY_EDITOR
-        void OnValidate()
-        {
-            if (Application.isPlaying) Apply();
-        }
-#endif
+// #if UNITY_EDITOR
+//         void OnValidate()
+//         {
+//             if (Application.isPlaying) Apply();
+//         }
+// #endif
     }
 }

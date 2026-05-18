@@ -602,7 +602,9 @@ namespace OpenFarCry.Level.Data
                 {
                     string svStr = child.Attributes?["SunVector"]?.Value;
                     if (TryParseVec3(svStr, out Vector3 sv))
-                        env.SunVector = ConvertDirection(sv.x, sv.y, sv.z);
+                        // Cry SunVector points toward the sun; negate to get the
+                        // light travel direction used as the directional light forward.
+                        env.SunVector = -ConvertDirection(sv.x, sv.y, sv.z);
 
                     string sunColorInt = child.Attributes?["SunColor"]?.Value;
                     if (!string.IsNullOrEmpty(sunColorInt) && int.TryParse(sunColorInt, out int sc))

@@ -14,12 +14,6 @@ namespace OpenFarCry.Level.Entities
         [SerializeField] float _intensity = 1f;
         [SerializeField] float _spotAngle = 30f;
 
-        protected override void Awake()
-        {
-            base.Awake();
-            ApplyLight();
-        }
-
         void ApplyLight()
         {
             var l = GetComponent<Light>();

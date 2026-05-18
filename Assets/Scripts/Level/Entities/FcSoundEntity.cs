@@ -17,24 +17,6 @@ namespace OpenFarCry.Level.Entities
 
         public string SoundVirtualPath => _soundVirtualPath;
 
-        protected override void Awake()
-        {
-            base.Awake();
-            ApplyAudioSource();
-        }
-
-        void ApplyAudioSource()
-        {
-            var src = GetComponent<AudioSource>();
-            src.clip = null; // populated once audio importer is implemented
-            src.volume = _volume;
-            src.minDistance = _minDistance;
-            src.maxDistance = _maxDistance;
-            src.loop = _loop;
-            src.spatialBlend = 1f;
-            src.playOnAwake = false;
-        }
-
         public override void SetData(FcEntityDesc desc)
         {
             base.SetData(desc);
