@@ -83,6 +83,7 @@ namespace OpenFarCry.Level.Data
     public sealed class FcTerrainLayerDesc
     {
         public byte   SurfaceTypeId;
+        public string BaseTexturePath;   // VFS path, e.g. "levels/training/sand.dds"
         public string DetailTexturePath; // VFS path, e.g. "terrain/detail0.dds"
         public float  ScaleX = 8f;
         public float  ScaleY = 8f;

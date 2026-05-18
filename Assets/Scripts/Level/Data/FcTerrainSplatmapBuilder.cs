@@ -3,19 +3,13 @@ using System.Collections.Generic;
 namespace OpenFarCry.Level.Data
 {
     // Converts a per-cell surface type ID map (from land_map.h16 bits 0-2) into a
-    // Unity terrain alphamap. Layer layout:
-    //   index 0          = cover_low (base weight, always present)
-    //   index id+1 (1-7) = detail layer for surface type id (0-6)
+    // Unity terrain alphamap. Channels 0..7 map directly to surface types 0..7.
     public static class FcTerrainSplatmapBuilder
     {
-        // Weight assigned to the matching detail layer per cell.
-        // Remainder (1-DetailWeight) goes to cover_low (layer 0).
-        public const float DetailWeight = 0.85f;
-
-        // Builds alphamap[splatRes, splatRes, layerCount+1] from surfaceTypeIds.
+        // Builds alphamap[splatRes, splatRes, layerCount] from surfaceTypeIds.
         // splatRes should equal heightmap resolution (1024) or a power-of-two divisor.
         // surfaceTypeIds is row-major [z*resolution + x], length = resolution*resolution.
-        // layerCount = number of FcTerrainLayerDesc entries (≤7).
+        // layerCount = number of FcTerrainLayerDesc entries (≤8).
         public static float[,,] Build(
             byte[] surfaceTypeIds,
             int resolution,
@@ -23,17 +17,16 @@ namespace OpenFarCry.Level.Data
         {
             int splatRes   = resolution;
             int layerCount = layers.Count;
-            int totalChannels = layerCount + 1; // +1 for cover_low at index 0
 
-            var alpha = new float[splatRes, splatRes, totalChannels];
+            var alpha = new float[splatRes, splatRes, layerCount];
 
-            // Build lookup: surfaceTypeId → alphamap channel index (1-based).
+            // Build lookup: surfaceTypeId → alphamap channel index.
             var idToChannel = new int[8]; // surface IDs are 0-6
             for (int i = 0; i < idToChannel.Length; i++)
                 idToChannel[i] = -1;
             for (int li = 0; li < layerCount; li++)
                 if (layers[li].SurfaceTypeId < 8)
-                    idToChannel[layers[li].SurfaceTypeId] = li + 1;
+                    idToChannel[layers[li].SurfaceTypeId] = li;
 
             for (int hz = 0; hz < splatRes; hz++)
             {
@@ -41,28 +34,19 @@ namespace OpenFarCry.Level.Data
                 {
                     int srcIdx = hz * resolution + hx;
                     if (srcIdx >= surfaceTypeIds.Length)
-                    {
-                        alpha[hz, hx, 0] = 1f;
                         continue;
-                    }
 
                     byte typeId = surfaceTypeIds[srcIdx];
                     int channel = (typeId < 8) ? idToChannel[typeId] : -1;
 
-                    if (channel >= 1 && channel < totalChannels)
+                    if (channel >= 0 && channel < layerCount)
                     {
-                        alpha[hz, hx, 0]       = 1f - DetailWeight; // cover_low residual
-                        alpha[hz, hx, channel] = DetailWeight;
-                    }
-                    else
-                    {
-                        // Hole (7), unknown, or no layer defined for this type → full cover_low.
-                        alpha[hz, hx, 0] = 1f;
+                        alpha[hz, hx, channel] = 1.0f;
                     }
                 }
             }
 
-            BoxBlurBoundaries(alpha, splatRes, totalChannels);
+            BoxBlurBoundaries(alpha, splatRes, layerCount);
             return alpha;
         }
 

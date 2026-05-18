@@ -21,24 +21,26 @@ namespace OpenFarCry.Level.Services
         [Serializable]
         public struct LayerDef
         {
-            public string VfsPath;
+            public string BaseVfsPath;
+            public string DetailVfsPath;
             public float  TileSizeX;
             public float  TileSizeY;
         }
 
-        // Layer 0: cover_low.dds (global megatexture, tileSize = worldSize).
-        public LayerDef CoverLayer;
-        public string CoverCtcPath;
-        public int CoverSectorCount;
+        // Layer 0: cover_low.dds (global fallback megatexture).
+        public string CoverLowVfsPath;
 
-        // Layers 1..N: detail textures per surface type, ordered by SurfaceTypeId.
+        // Layers 1..N: textures per surface type, ordered by SurfaceTypeId.
         public LayerDef[] DetailLayers;
 
-        // Transposes the cover texture: output[hz,hx] = input[hx,hz].
-        // Matches the X↔Z swap applied to the h16 heightmap so cover_low.dds aligns with terrain.
-        // Source may be GPU-only (non-readable DDS), so it is first copied via RenderTexture.
+        [Header("Runtime Debug")]
+        [SerializeField] private Texture2DArray _generatedCoverArray;
+        [SerializeField] private Texture2D _generatedCoverLow;
+
+        // Transposes the texture: output[hz,hx] = input[hx,hz].
         static Texture2D TransposeTexture(Texture2D src)
         {
+            if (src == null) return null;
             int w = src.width;
             int h = src.height;
 
@@ -73,193 +75,162 @@ namespace OpenFarCry.Level.Services
         {
             var terrain = GetComponent<Terrain>();
             if (terrain == null || terrain.terrainData == null)
-                return;
-
-            int detailCount   = DetailLayers?.Length ?? 0;
-            int buildCount    = 1 + detailCount;
-            int existingCount = terrain.terrainData.terrainLayers?.Length ?? 0;
-
-            if (buildCount != existingCount)
             {
-                Debug.LogWarning(
-                    $"[FcTerrainTextureService] Layer count mismatch: terrain has {existingCount}, service has {buildCount}. " +
-                    "Rebuild the scene to regenerate TerrainLayers.");
+                Debug.LogWarning("[FcTerrainTextureService] Terrain or TerrainData is missing.");
                 return;
             }
 
-            var runtimeLayers = new TerrainLayer[buildCount];
-            runtimeLayers[0] = await BuildLayerAsync(CoverLayer, ct, transposeTex: true);
+            int detailCount = DetailLayers?.Length ?? 0;
+            Debug.Log($"[FcTerrainTextureService] Applying terrain textures. Layers={detailCount}, CoverLow='{CoverLowVfsPath}'");
 
+            if (detailCount == 0)
+            {
+                Debug.LogWarning("[FcTerrainTextureService] No detail layers defined. Rebuild the scene?");
+                return;
+            }
+
+            // 1. Build Cover Array (Base textures)
+            Texture2DArray coverArray = null;
+            try
+            {
+                coverArray = await BuildCoverArrayAsync(DetailLayers, ct);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[FcTerrainTextureService] Failed to build cover array: {ex.Message}\n{ex.StackTrace}");
+            }
+            _generatedCoverArray = coverArray;
+
+            if (coverArray == null)
+            {
+                Debug.LogWarning("[FcTerrainTextureService] coverArray is null after build.");
+            }
+            else
+            {
+                Debug.Log($"[FcTerrainTextureService] Successfully generated coverArray: {coverArray.width}x{coverArray.height} x {coverArray.depth}");
+            }
+
+            // 2. Build Terrain Layers (standard Unity Detail blending)
+            var runtimeLayers = new TerrainLayer[detailCount];
             for (int i = 0; i < detailCount; i++)
             {
                 if (ct.IsCancellationRequested) return;
-                runtimeLayers[i + 1] = await BuildLayerAsync(DetailLayers[i], ct, transposeTex: false);
+                runtimeLayers[i] = await BuildDetailLayerAsync(DetailLayers[i], ct);
             }
 
             if (ct.IsCancellationRequested) return;
             terrain.terrainData.terrainLayers = runtimeLayers;
-            Texture coverTexture = await BuildCoverTextureForMaterialAsync(runtimeLayers[0], ct);
-            if (ct.IsCancellationRequested) return;
-            ApplyCoverMaterialProperties(terrain, runtimeLayers[0], coverTexture);
+
+            // 3. Load Global Fallback (cover_low)
+            Texture2D coverLow = null;
+            if (!string.IsNullOrEmpty(CoverLowVfsPath))
+            {
+                var (ok, info) = await TextureImportService.RuntimeService.TryLoadWithInfoAsync(CoverLowVfsPath, null, ct);
+                if (ok) coverLow = TransposeTexture(info.Texture);
+            }
+            _generatedCoverLow = coverLow;
+
+            // 4. Apply to Material
+            Material material = terrain.materialTemplate;
+            if (material != null)
+            {
+                if (coverArray != null)
+                {
+                    material.SetTexture("_FcCoverTexArray", coverArray);
+                }
+                if (coverLow != null)
+                    material.SetTexture("_FcCoverLow", coverLow);
+            }
         }
 
-        async UniTask<Texture> BuildCoverTextureForMaterialAsync(TerrainLayer fallbackCoverLayer, CancellationToken ct)
+        async UniTask<Texture2DArray> BuildCoverArrayAsync(LayerDef[] layers, CancellationToken ct)
         {
-            if (!string.IsNullOrEmpty(CoverCtcPath) &&
-                CoverSectorCount > 0 &&
-                FcFileSystem.Exists(CoverCtcPath))
+            int count = layers.Length;
+            var textures = new Texture2D[count];
+            int maxW = 0, maxH = 0;
+
+            for (int i = 0; i < count; i++)
             {
-                try
+                string path = layers[i].BaseVfsPath;
+                if (string.IsNullOrEmpty(path))
                 {
-                    var atlas = await BuildCoverAtlasFromCtcAsync(CoverCtcPath, CoverSectorCount, ct);
-                    if (atlas != null)
-                        return atlas;
+                    Debug.Log($"[FcTerrainTextureService] Layer[{i}] has no BaseVfsPath.");
+                    continue;
                 }
-                catch (Exception ex)
+
+                Debug.Log($"[FcTerrainTextureService] Loading base texture for layer[{i}]: '{path}'");
+                var (ok, info) = await TextureImportService.RuntimeService.TryLoadWithInfoAsync(path, null, ct);
+                if (ok && info.Texture != null)
                 {
-                    Debug.LogWarning($"[FcTerrainTextureService] Failed to build cover atlas from '{CoverCtcPath}': {ex.Message}");
+                    textures[i] = info.Texture;
+                    maxW = Math.Max(maxW, textures[i].width);
+                    maxH = Math.Max(maxH, textures[i].height);
+                    Debug.Log($"[FcTerrainTextureService] Loaded layer[{i}]: {textures[i].width}x{textures[i].height}");
+                }
+                else
+                {
+                    Debug.LogWarning($"[FcTerrainTextureService] Failed to load base texture '{path}' for layer[{i}].");
                 }
             }
-            else
+
+            if (maxW == 0)
             {
-                Debug.LogWarning(
-                    $"[FcTerrainTextureService] cover.ctc is unavailable for runtime cover atlas. " +
-                    $"path='{CoverCtcPath}', sectorCount={CoverSectorCount}, exists=" +
-                    $"{(!string.IsNullOrEmpty(CoverCtcPath) && FcFileSystem.Exists(CoverCtcPath))}.");
+                Debug.LogWarning("[FcTerrainTextureService] maxW is 0, no base textures were loaded.");
+                return null;
             }
-
-            Debug.LogWarning("[FcTerrainTextureService] Falling back to cover_low.dds for terrain cover.");
-            return fallbackCoverLayer != null ? fallbackCoverLayer.diffuseTexture : null;
-        }
-
-        static async UniTask<Texture2D> BuildCoverAtlasFromCtcAsync(
-            string virtualPath,
-            int sectorCount,
-            CancellationToken ct)
-        {
-            byte[] fileBytes = await FcFileSystem.ReadAllBytesAsync(virtualPath, ct);
-            if (fileBytes == null || fileBytes.Length < 4)
-                throw new InvalidOperationException("CTC file is empty or too small.");
-
-            int sectorTexSize = BitConverter.ToInt32(fileBytes, 0);
-            if (sectorTexSize <= 0)
-                throw new InvalidOperationException($"Invalid sector texture size: {sectorTexSize}.");
-
-            int bytesPerTopMip = sectorTexSize * sectorTexSize / 2; // DXT1 = 4bpp
-            int bytesPerSector = CalculateDxt1MipChainBytes(sectorTexSize);
-            int expectedMinSize = 4 + sectorCount * sectorCount * bytesPerSector;
-            if (fileBytes.Length < expectedMinSize)
-            {
-                throw new InvalidOperationException(
-                    $"CTC file is smaller than expected. bytes={fileBytes.Length}, expected>={expectedMinSize}, " +
-                    $"sectorCount={sectorCount}, sectorTexSize={sectorTexSize}.");
-            }
-
-            int atlasSize = sectorTexSize * sectorCount;
 
             await UniTask.SwitchToMainThread(ct);
-            var atlas = new Texture2D(atlasSize, atlasSize, TextureFormat.RGBA32, mipChain: true, linear: false)
+            var array = new Texture2DArray(maxW, maxH, count, TextureFormat.RGBA32, true, false);
+            array.name = "FcTerrainCoverArray";
+            array.wrapMode = TextureWrapMode.Repeat;
+            array.filterMode = FilterMode.Bilinear;
+
+            for (int i = 0; i < count; i++)
             {
-                name = "FcTerrainCoverAtlas"
-            };
-            var tile = new Texture2D(sectorTexSize, sectorTexSize, TextureFormat.DXT1, mipChain: false, linear: false);
-            var topMipBytes = new byte[bytesPerTopMip];
-
-            int sectorTotal = sectorCount * sectorCount;
-            for (int secIndex = 0; secIndex < sectorTotal; secIndex++)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                int fileOffset = 4 + secIndex * bytesPerSector;
-                Buffer.BlockCopy(fileBytes, fileOffset, topMipBytes, 0, bytesPerTopMip);
-
-                tile.LoadRawTextureData(topMipBytes);
-                tile.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-
-                int sx = secIndex % sectorCount;
-                int sy = secIndex / sectorCount;
-                atlas.SetPixels32(sx * sectorTexSize, sy * sectorTexSize, sectorTexSize, sectorTexSize, tile.GetPixels32());
-
-                if ((secIndex & 31) == 31)
-                    await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                var src = textures[i];
+                if (src == null)
+                {
+                    // Fill with neutral grey if texture is missing
+                    continue;
+                }
+                
+                if (src.width != maxW || src.height != maxH)
+                {
+                    var rt = RenderTexture.GetTemporary(maxW, maxH, 0, RenderTextureFormat.ARGB32);
+                    Graphics.Blit(src, rt);
+                    var temp = new Texture2D(maxW, maxH, TextureFormat.RGBA32, true);
+                    RenderTexture.active = rt;
+                    temp.ReadPixels(new Rect(0, 0, maxW, maxH), 0, 0);
+                    temp.Apply();
+                    RenderTexture.active = null;
+                    RenderTexture.ReleaseTemporary(rt);
+                    Graphics.CopyTexture(temp, 0, 0, array, i, 0);
+                    Destroy(temp);
+                }
+                else
+                {
+                    Graphics.CopyTexture(src, 0, 0, array, i, 0);
+                }
             }
 
-            atlas.wrapMode = TextureWrapMode.Clamp;
-            atlas.filterMode = FilterMode.Bilinear;
-            atlas.Apply(updateMipmaps: true, makeNoLongerReadable: false);
-            UnityEngine.Object.Destroy(tile);
-
-            var transposedAtlas = TransposeTexture(atlas);
-            transposedAtlas.name = "FcTerrainCoverAtlas_Transposed";
-            transposedAtlas.wrapMode = TextureWrapMode.Clamp;
-            transposedAtlas.filterMode = FilterMode.Bilinear;
-            UnityEngine.Object.Destroy(atlas);
-            return transposedAtlas;
+            array.Apply(false, true);
+            return array;
         }
 
-        static int CalculateDxt1MipChainBytes(int size)
-        {
-            int total = 0;
-            int mipSize = size;
-            while (mipSize >= 4)
-            {
-                int blockCount = mipSize / 4;
-                total += blockCount * blockCount * 8; // DXT1 block = 8 bytes, minimum 1 block per mip
-                mipSize /= 2;
-            }
-
-            return total;
-        }
-
-        static void ApplyCoverMaterialProperties(Terrain terrain, TerrainLayer coverLayer, Texture coverTexture)
-        {
-            if (terrain == null || coverLayer == null)
-                return;
-
-            Material material = terrain.materialTemplate;
-            if (material == null)
-                return;
-
-            material.SetTexture(FcCoverTexId, coverTexture);
-
-            Vector2 tileSize = coverLayer.tileSize;
-            float scaleX = tileSize.x > 0f ? 1f / tileSize.x : 1f;
-            float scaleY = tileSize.y > 0f ? 1f / tileSize.y : 1f;
-            material.SetVector(FcCoverScaleId, new Vector4(scaleX, scaleY, 0f, 0f));
-            material.SetVector(FcCoverOffsetId, Vector4.zero);
-        }
-
-        static async UniTask<TerrainLayer> BuildLayerAsync(LayerDef def, CancellationToken ct, bool transposeTex = false)
+        static async UniTask<TerrainLayer> BuildDetailLayerAsync(LayerDef def, CancellationToken ct)
         {
             Texture2D tex = null;
-            if (string.IsNullOrEmpty(def.VfsPath))
+            if (!string.IsNullOrEmpty(def.DetailVfsPath))
             {
-                Debug.LogWarning(
-                    $"[FcTerrainTextureService] Terrain layer has empty VfsPath (tileSize={def.TileSizeX}x{def.TileSizeY}). " +
-                    "Rebuild the scene.");
-            }
-            else if (!TextureImportService.IsSupportedVirtualPath(def.VfsPath))
-            {
-                Debug.LogWarning($"[FcTerrainTextureService] Unsupported texture path '{def.VfsPath}'.");
-            }
-            else
-            {
-                var (ok, info) = await TextureImportService.RuntimeService
-                    .TryLoadWithInfoAsync(def.VfsPath, scopeId: null, ct);
-                if (ok)
-                    tex = info.Texture;
-                else
-                    Debug.LogWarning($"[FcTerrainTextureService] Failed to load terrain texture '{def.VfsPath}'.");
+                var (ok, info) = await TextureImportService.RuntimeService.TryLoadWithInfoAsync(def.DetailVfsPath, null, ct);
+                if (ok) tex = info.Texture;
             }
 
             await UniTask.SwitchToMainThread(ct);
-            if (tex != null && transposeTex)
-                tex = TransposeTexture(tex);
             return new TerrainLayer
             {
                 diffuseTexture = tex,
                 tileSize       = new Vector2(def.TileSizeX, def.TileSizeY),
-                tileOffset     = Vector2.zero,
             };
         }
     }

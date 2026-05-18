@@ -2,11 +2,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using OpenFarCry.FileSystem;
 using OpenFarCry.Importer;
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Importer.Editor;
 using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
+using OpenFarCry.Level.Services;
 using OpenFarCry.Level.Registry;
 using OpenFarCry.Level.Services;
 using OpenFarCry.Level.Volumes;
@@ -192,6 +194,8 @@ namespace OpenFarCry.Level.Editor
             _lastError = null;
             _lastBuildStats = null;
 
+            FcFileSystem.Initialize();
+
             string levelName = _levelNames[_levelIndex];
             string missionName = _missionNames[_missionIndex];
 
@@ -252,6 +256,8 @@ namespace OpenFarCry.Level.Editor
             _lastError = null;
             _lastBuildStats = null;
 
+            FcFileSystem.Initialize();
+
             string levelName = _levelNames[_levelIndex];
             string missionName = _missionNames[_missionIndex];
 
@@ -284,11 +290,43 @@ namespace OpenFarCry.Level.Editor
                     "Runtime services were kept to avoid an empty scene.");
             }
 
+            AttachMaterialManifestBinding(target, levelName);
+
             var slotDiagnosticsSummary = CollectMaterialSlotDiagnosticsSummary(target);
             PersistMaterialSlotDiagnosticsToLayoutData(levelName, missionName, slotDiagnosticsSummary);
 
             _lastBuildStats = $"Built authoring scene '{levelName}/{missionName}':\n{stats}\n\nFCData cache:\n{cacheStats}\n\nAuthoring:\nRuntime services removed: {removedServices}\nMaterial slot diagnostics persisted: total={slotDiagnosticsSummary.TotalCount}, applied={slotDiagnosticsSummary.AppliedCount}, targeted-miss={slotDiagnosticsSummary.TargetedMissCount}, unresolved={slotDiagnosticsSummary.UnresolvedCount}\nMaterial instance diagnostics persisted: total={slotDiagnosticsSummary.InstanceCount}, override-applied={slotDiagnosticsSummary.InstanceOverrideAppliedCount}, fallback={slotDiagnosticsSummary.InstanceFallbackCount}, targeted-miss={slotDiagnosticsSummary.InstanceTargetedMissCount}, unresolved={slotDiagnosticsSummary.InstanceUnresolvedCount}";
             Debug.Log($"[FcLevelBuilder] {_lastBuildStats}");
+        }
+
+        // Attaches an FcLevelMaterialManifestBinding to the level root so a player build can
+        // reuse pre-baked .mat assets. No-op when the level manifest has not been baked yet.
+        void AttachMaterialManifestBinding(Scene target, string levelName)
+        {
+            string manifestPath = CgfMaterialEditorBakeService.GetLevelManifestPath(levelName);
+            var manifest = AssetDatabase.LoadAssetAtPath<FcMaterialManifest>(manifestPath);
+            if (manifest == null)
+                return;
+
+            GameObject levelRoot = null;
+            var roots = target.GetRootGameObjects();
+            string expectedName = $"Level_{levelName}";
+            for (int i = 0; i < roots.Length; i++)
+            {
+                if (roots[i] != null && roots[i].name == expectedName)
+                {
+                    levelRoot = roots[i];
+                    break;
+                }
+            }
+            if (levelRoot == null)
+                return;
+
+            var binding = levelRoot.GetComponent<FcLevelMaterialManifestBinding>();
+            if (binding == null)
+                binding = levelRoot.AddComponent<FcLevelMaterialManifestBinding>();
+            binding.SetManifest(manifest);
+            EditorUtility.SetDirty(binding);
         }
 
         void ClearScene()
@@ -534,7 +572,7 @@ namespace OpenFarCry.Level.Editor
                         if (chunk == null || chunk.MtlType == CgfMtlType.Multi)
                             continue;
 
-                        string assetPath = CgfMaterialEditorBakeService.GetBakedMaterialPath(virtualPath, chunk.TableIndex);
+                        string assetPath = CgfMaterialEditorBakeService.GetBakedMaterialPath(virtualPath, chunk);
                         bool existed = AssetDatabase.LoadAssetAtPath<Material>(assetPath) != null;
                         var mat = CgfMaterialEditorBakeService.GetOrBakeMaterial(virtualPath, chunk);
                         if (mat != null)
