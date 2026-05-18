@@ -486,6 +486,7 @@ namespace OpenFarCry.Level.Editor
             var detailArray = BuildDetailArray(surfaceLayers, levelDir, out var detailScaleA, out var detailScaleB);
             BuildSplatTextures(samples, resolution, levelDir, out var splatA, out var splatB);
             terrainData.terrainLayers = new TerrainLayer[0];
+            ApplyTerrainHoles(terrainData, samples, resolution);
 
             AssetDatabase.SaveAssets();
 
@@ -544,6 +545,32 @@ namespace OpenFarCry.Level.Editor
             AssetDatabase.CreateAsset(albedoTex, albedoPath);
             AssetDatabase.SaveAssets();
             return AssetDatabase.LoadAssetAtPath<Texture2D>(albedoPath) ?? albedoTex;
+        }
+
+        // Marks terrain cells whose h16 surface type is STYPE_HOLE (7) as holes,
+        // cutting geometry where Far Cry has cave / tunnel openings.
+        static void ApplyTerrainHoles(TerrainData terrainData, ushort[] samples, int resolution)
+        {
+            int hr = terrainData.holesResolution;
+            if (hr <= 0)
+                return;
+
+            byte[] ids = FcTerrainHeightmapDecoder.DecodeSurfaceTypes(samples);
+            var holes = new bool[hr, hr];
+            int holeCount = 0;
+            for (int z = 0; z < hr; z++)
+                for (int x = 0; x < hr; x++)
+                {
+                    int sx = x * resolution / hr;
+                    int sz = z * resolution / hr;
+                    bool isHole = ids[sz * resolution + sx] == 7;
+                    holes[z, x] = !isHole; // Unity convention: false = hole, true = solid
+                    if (isHole) holeCount++;
+                }
+
+            terrainData.SetHoles(0, 0, holes);
+            if (holeCount > 0)
+                Debug.Log($"[FcLevelSceneBuilder] Terrain holes: {holeCount} cell(s) cut.");
         }
 
         // Builds two RGBA splat-weight textures from the h16 surface type ids:

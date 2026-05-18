@@ -84,4 +84,13 @@ void FcTriplanarDetail_float(
     OutDetail = wsum > 1e-4 ? acc / wsum : float3(0.5, 0.5, 0.5);
 }
 
+// Samples the terrain holes texture (_TerrainHolesTexture is already declared
+// by the Terrain Lit target; do not redeclare it). Returns 1 for solid terrain
+// and 0 for a hole cell. Feed Hole into the fragment Alpha block with Alpha
+// Clipping enabled (threshold 0.5) so the shader discards hole pixels.
+void FcTerrainHole_float(float2 TerrainUV, out float Hole)
+{
+    Hole = SAMPLE_TEXTURE2D(_TerrainHolesTexture, sampler_TerrainHolesTexture, TerrainUV).r;
+}
+
 #endif
