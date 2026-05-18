@@ -171,6 +171,14 @@ namespace OpenFarCry.Level.Entities
 
             _lastBuildOutput.Root.transform.SetParent(transform, worldPositionStays: false);
 
+            // Diagnostic: dump expected vs actually-bound textures after build + material
+            // override. Gated; no-op when CGF material logging is off. Skinned characters
+            // use a SkinnedMeshRenderer, static meshes a MeshRenderer.
+            CgfMaterialImportService.LogFinalTextureBinding(
+                result.ParsedFile,
+                (Renderer)_lastBuildOutput.SkinnedMeshRenderer ?? _lastBuildOutput.MeshRenderer,
+                result.BuildResult.SubmeshMaterialIds);
+
             if (!result.BuildResult.HasSkeleton && result.Mesh != null)
             {
                 var col = _lastBuildOutput.Root.AddComponent<MeshCollider>();

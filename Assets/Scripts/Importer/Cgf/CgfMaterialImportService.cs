@@ -74,6 +74,26 @@ namespace OpenFarCry.Importer.Cgf
         readonly TextureRuntimeImportService _textureRuntimeService;
         readonly CgfScopedTextureCache _emissionMasks = new CgfScopedTextureCache();
 
+        // Diagnostic logging: when enabled, ResolveSubmeshMaterials and ResolveAndLoadTexture
+        // dump per-submesh chunk resolution and per-texture candidate probing. DiagnosticAssetFilter
+        // is an optional case-insensitive substring of the CGF source path that scopes the logs.
+        public static bool DiagnosticLogging;
+        public static string DiagnosticAssetFilter;
+
+        static readonly int PropBaseMap = Shader.PropertyToID("_BaseMap");
+        static readonly int PropBumpMap = Shader.PropertyToID("_BumpMap");
+
+        static bool DiagnosticEnabledFor(CgfFile parsedFile)
+        {
+            if (!DiagnosticLogging)
+                return false;
+            if (string.IsNullOrEmpty(DiagnosticAssetFilter))
+                return true;
+            string src = parsedFile?.SourceVirtualPath;
+            return !string.IsNullOrEmpty(src) &&
+                   src.IndexOf(DiagnosticAssetFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         // Optional project-asset lookup: (cgfVirtualPath, chunkTableIndex) → persistent Material.
         // Set by editor init to return pre-baked .mat assets; null in runtime builds.
         // When set, GetOrBuild instantiates the project asset and injects textures instead of
@@ -102,16 +122,27 @@ namespace OpenFarCry.Importer.Cgf
             if (leaves.Count == 0)
                 return BuildFallbackArray(subCount, textureScopeId);
 
+            bool diag = DiagnosticEnabledFor(parsedFile);
+            if (diag)
+                LogResolutionContext(parsedFile, subCount, submeshMaterialIds, leaves);
+
             var mats = new Material[subCount];
             for (int i = 0; i < subCount; i++)
             {
-                int matId = submeshMaterialIds != null && i < submeshMaterialIds.Length
-                    ? submeshMaterialIds[i]
-                    : i;
+                bool fromArray = submeshMaterialIds != null && i < submeshMaterialIds.Length;
+                int matId = fromArray ? submeshMaterialIds[i] : i;
                 var chunk = ResolveLeafByFaceMatId(leaves, matId);
                 mats[i] = chunk != null
                     ? GetOrBuild(parsedFile, chunk, textureScopeId)
                     : GetSharedFallback(textureScopeId);
+
+                if (diag)
+                    Debug.Log(
+                        $"[CgfMatDiag] {parsedFile?.SourceVirtualPath} submesh={i} " +
+                        $"matId={matId}{(fromArray ? "" : "(fallback=i)")} -> " +
+                        (chunk != null
+                            ? $"chunkID={chunk.ChunkID} tableIndex={chunk.TableIndex} type={chunk.MtlType} name='{chunk.Name}'"
+                            : "<no chunk: shared fallback>"));
             }
             return mats;
         }
@@ -134,6 +165,141 @@ namespace OpenFarCry.Importer.Cgf
                     leaves.Add(chunk);
             }
             return leaves;
+        }
+
+        // Dumps the leaf-material table and node->material links so the diagnostic log shows
+        // exactly what face MatID indexes into and which Multi root each node references.
+        static void LogResolutionContext(
+            CgfFile parsedFile,
+            int subCount,
+            int[] submeshMaterialIds,
+            List<CgfMaterialChunk> leaves)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[CgfMatDiag] ").Append(parsedFile?.SourceVirtualPath)
+              .Append(" subCount=").Append(subCount)
+              .Append(" submeshMaterialIds=")
+              .Append(submeshMaterialIds == null ? "<null>" : "[" + string.Join(",", submeshMaterialIds) + "]");
+
+            sb.Append("\n  leaves (global non-Multi, chunk-table order):");
+            for (int i = 0; i < leaves.Count; i++)
+            {
+                var c = leaves[i];
+                sb.Append("\n    [").Append(i).Append("] chunkID=").Append(c.ChunkID)
+                  .Append(" tableIndex=").Append(c.TableIndex)
+                  .Append(" type=").Append(c.MtlType)
+                  .Append(" name='").Append(c.Name).Append('\'')
+                  .Append(" diffuse='").Append(c.DiffuseTextureName).Append('\'')
+                  .Append(" normal='").Append(c.NormalTextureName).Append('\'');
+            }
+
+            var nodes = parsedFile?.NodeChunks;
+            if (nodes != null)
+            {
+                sb.Append("\n  nodes (name -> objectID/matChunkID):");
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    var n = nodes[i];
+                    sb.Append("\n    '").Append(n.Name).Append("' objectID=").Append(n.ObjectID)
+                      .Append(" matChunkID=").Append(n.MatID);
+                }
+            }
+
+            var hierarchy = parsedFile?.MaterialChildrenByParentChunkID;
+            if (hierarchy != null && hierarchy.Count > 0)
+            {
+                sb.Append("\n  Multi roots -> children chunkIDs:");
+                foreach (var kv in hierarchy)
+                {
+                    sb.Append("\n    root chunkID=").Append(kv.Key).Append(" children=[");
+                    for (int i = 0; i < kv.Value.Count; i++)
+                    {
+                        if (i > 0) sb.Append(',');
+                        sb.Append(kv.Value[i].ChunkID);
+                    }
+                    sb.Append(']');
+                }
+            }
+
+            Debug.Log(sb.ToString());
+        }
+
+        // Diagnostic: walks the FINAL renderer state after the whole build/override/LOD
+        // pipeline and prints, per submesh, the texture the resolved material chunk SHOULD
+        // carry (chunk diffuse/normal name) vs the texture actually bound to _BaseMap /
+        // _BumpMap. Catches desyncs that happen downstream of ResolveSubmeshMaterials.
+        public static void LogFinalTextureBinding(
+            CgfFile parsedFile,
+            Renderer renderer,
+            int[] submeshMaterialIds)
+        {
+            if (!DiagnosticEnabledFor(parsedFile) || renderer == null)
+                return;
+
+            var leaves = CollectGlobalLeafMaterials(parsedFile);
+            var mats = renderer.sharedMaterials;
+            int count = mats != null ? mats.Length : 0;
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[CgfFinalBind] ").Append(parsedFile?.SourceVirtualPath)
+              .Append(" renderer='").Append(renderer.name).Append("' submeshes=").Append(count)
+              .Append(" submeshMaterialIds=")
+              .Append(submeshMaterialIds == null ? "<null>" : "[" + string.Join(",", submeshMaterialIds) + "]");
+
+            for (int i = 0; i < count; i++)
+            {
+                int matId = submeshMaterialIds != null && i < submeshMaterialIds.Length
+                    ? submeshMaterialIds[i]
+                    : i;
+                var chunk = ResolveLeafByFaceMatId(leaves, matId);
+                var mat = mats[i];
+
+                string expDiffuse = chunk != null
+                    ? CgfTexturePathResolver.NormalizeTextureName(chunk.DiffuseTextureName)
+                    : "<no chunk>";
+                string expNormal = chunk != null
+                    ? CgfTexturePathResolver.NormalizeTextureName(chunk.NormalTextureName)
+                    : "<no chunk>";
+
+                var boundBase = mat != null && mat.HasProperty(PropBaseMap) ? mat.GetTexture(PropBaseMap) : null;
+                var boundBump = mat != null && mat.HasProperty(PropBumpMap) ? mat.GetTexture(PropBumpMap) : null;
+                string gotDiffuse = boundBase != null ? boundBase.name : "<null>";
+                string gotNormal = boundBump != null ? boundBump.name : "<null>";
+
+                sb.Append("\n  submesh=").Append(i).Append(" matId=").Append(matId)
+                  .Append(" mat='").Append(mat != null ? mat.name : "<null mat>").Append('\'')
+                  .Append("\n    diffuse expected->'").Append(expDiffuse)
+                  .Append("' got->'").Append(gotDiffuse).Append('\'')
+                  .Append(TextureNameMatches(expDiffuse, gotDiffuse) ? "" : "  <<< MISMATCH")
+                  .Append("\n    normal  expected->'").Append(expNormal)
+                  .Append("' got->'").Append(gotNormal).Append('\'')
+                  .Append(TextureNameMatches(expNormal, gotNormal) ? "" : "  <<< MISMATCH");
+            }
+
+            Debug.Log(sb.ToString());
+        }
+
+        // Compares two texture identifiers by base file name (path + extension stripped,
+        // lower-cased). Empty/sentinel values count as a match so they raise no false alarm.
+        static bool TextureNameMatches(string expected, string got)
+        {
+            string e = TextureBaseName(expected);
+            string g = TextureBaseName(got);
+            if (e.Length == 0 || g.Length == 0)
+                return true;
+            return e == g;
+        }
+
+        static string TextureBaseName(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value[0] == '<')
+                return string.Empty;
+            int slash = value.LastIndexOfAny(new[] { '/', '\\' });
+            string name = slash >= 0 ? value.Substring(slash + 1) : value;
+            int dot = name.LastIndexOf('.');
+            if (dot > 0)
+                name = name.Substring(0, dot);
+            return name.ToLowerInvariant();
         }
 
         static CgfMaterialChunk ResolveLeafByFaceMatId(List<CgfMaterialChunk> leaves, int matId)
@@ -422,16 +588,23 @@ namespace OpenFarCry.Importer.Cgf
             if (string.IsNullOrEmpty(normalizedTextureName))
                 return (null, null, false, false);
 
+            bool diag = DiagnosticEnabledFor(parsedFile);
+
             string firstSupportedCandidate = null;
             foreach (var candidate in CgfTexturePathResolver.BuildTexturePathCandidates(parsedFile, normalizedTextureName))
             {
-                if (!TextureImportService.IsSupportedVirtualPath(candidate))
+                bool supported = TextureImportService.IsSupportedVirtualPath(candidate);
+                if (!supported)
+                {
+                    if (diag)
+                        Debug.Log($"[CgfTexDiag] {parsedFile?.SourceVirtualPath} name='{normalizedTextureName}' candidate='{candidate}' -> unsupported path");
                     continue;
+                }
 
                 if (firstSupportedCandidate == null)
                     firstSupportedCandidate = candidate;
 
-                if (_textureRuntimeService.TryLoadWithInfo(
+                bool loaded = _textureRuntimeService.TryLoadWithInfo(
                         candidate,
                         out var loadedInfo,
                         textureScopeId,
@@ -439,7 +612,14 @@ namespace OpenFarCry.Importer.Cgf
                             useRuntimeMemoryCache: true,
                             markNonReadable: markNonReadable,
                             linearColorSpace: linearColorSpace,
-                            generateMipmaps: true)))
+                            generateMipmaps: true));
+
+                if (diag)
+                    Debug.Log(
+                        $"[CgfTexDiag] {parsedFile?.SourceVirtualPath} name='{normalizedTextureName}' " +
+                        $"candidate='{candidate}' -> loaded={loaded} texture={(loaded && loadedInfo.Texture != null ? "ok" : "<null>")}");
+
+                if (loaded)
                 {
                     return (
                         candidate,
@@ -448,6 +628,11 @@ namespace OpenFarCry.Importer.Cgf
                         loadedInfo.HasTransparentPixels);
                 }
             }
+
+            if (diag)
+                Debug.LogWarning(
+                    $"[CgfTexDiag] {parsedFile?.SourceVirtualPath} name='{normalizedTextureName}' " +
+                    $"-> NO texture loaded (firstSupportedCandidate='{firstSupportedCandidate ?? "<none>"}')");
 
             if (firstSupportedCandidate != null)
                 return (firstSupportedCandidate, null, false, false);

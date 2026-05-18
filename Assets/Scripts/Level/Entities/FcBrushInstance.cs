@@ -92,6 +92,13 @@ namespace OpenFarCry.Level.Entities
             // LOD children are attached after the base visual, so we ensure cull-off
             // once more after LOD assembly.
             FcBrushGeometryPostProcessor.DisableBackfaceCulling(output.Root);
+
+            // Diagnostic: dump expected vs actually-bound textures for the final renderer
+            // state, after build + material override + LOD assembly. Gated; no-op when off.
+            CgfMaterialImportService.LogFinalTextureBinding(
+                result.ParsedFile,
+                output.MeshRenderer,
+                _postProcessArtifacts.VisualSubmeshMaterialIds ?? result.BuildResult?.SubmeshMaterialIds);
         }
 
         // Fallback when FcBrushLoadService is absent (e.g. editor without full scene).
