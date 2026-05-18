@@ -120,7 +120,13 @@ namespace OpenFarCry.Level.Data
                     Id               = id,
                     VirtualPath      = path,
                     MaterialOverride = matOverride,
-                    MaterialId       = matIdx,
+                    // brush.lst matIdx is an index into this file's override-string table,
+                    // NOT a CGF sub-material selector. A brush.lst material override always
+                    // replaces the whole brush; per-submesh sub-materials are resolved from
+                    // the override multi by face MatID. MaterialId stays -1 so the override
+                    // service targets every slot (requestedMaterialId < 0 path) instead of
+                    // mistaking the table index for a face MatID.
+                    MaterialId       = -1,
                     Matrix           = matrix,
                     NoPhysics        = (geomFlags[geomIdx] & GeomFlagNoPhysics) != 0,
                     Flags            = flags,
