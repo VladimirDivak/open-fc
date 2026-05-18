@@ -224,14 +224,24 @@ namespace OpenFarCry.Importer.Texture
                 return false;
             }
 
+            // Stamp the decoded texture with its source virtual path so material/diagnostic
+            // tooling can identify which file a bound texture came from.
+            if (texture != null && string.IsNullOrEmpty(texture.name))
+                texture.name = normalizedVirtualPath;
+
             loadedInfo = new LoadedTextureInfo(
                 normalizedVirtualPath: normalizedVirtualPath,
                 texture: texture,
                 hasAlphaChannel: hasAlphaChannel,
                 hasTransparentPixels: hasTransparentPixels);
 
+            // Store returns the canonical cached info: if a concurrent load already
+            // cached this path, adopt that texture so every caller shares one instance.
             if (resolvedOptions.UseRuntimeMemoryCache && texture != null)
-                _runtimeCache.Store(cacheKey, scopeId, texture, loadedInfo);
+            {
+                loadedInfo = _runtimeCache.Store(cacheKey, scopeId, texture, loadedInfo);
+                texture = loadedInfo.Texture;
+            }
 
             if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
             {
@@ -348,14 +358,21 @@ namespace OpenFarCry.Importer.Texture
             string ddsFormatTag = decodeResult.DdsFormatTag;
             bool usedNativeDdsPath = decodeResult.UsedNativeDdsPath;
 
+            // Stamp the decoded texture with its source virtual path so material/diagnostic
+            // tooling can identify which file a bound texture came from.
+            if (texture != null && string.IsNullOrEmpty(texture.name))
+                texture.name = normalizedVirtualPath;
+
             var loadedInfo = new LoadedTextureInfo(
                 normalizedVirtualPath: normalizedVirtualPath,
                 texture: texture,
                 hasAlphaChannel: hasAlphaChannel,
                 hasTransparentPixels: hasTransparentPixels);
 
+            // Store returns the canonical cached info: if a concurrent load already
+            // cached this path, adopt that texture so every caller shares one instance.
             if (resolvedOptions.UseRuntimeMemoryCache && texture != null)
-                _runtimeCache.Store(cacheKey, scopeId, texture, loadedInfo);
+                loadedInfo = _runtimeCache.Store(cacheKey, scopeId, texture, loadedInfo);
 
             if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
             {

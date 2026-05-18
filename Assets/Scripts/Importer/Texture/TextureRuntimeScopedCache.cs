@@ -78,21 +78,36 @@ namespace OpenFarCry.Importer.Texture
             }
         }
 
-        public void Store(
+        // Stores a freshly decoded texture and returns the CANONICAL cached info.
+        // Concurrent loads of the same path can each decode their own Texture2D before
+        // either reaches the cache. The first store wins and may already be bound to
+        // materials; a later store of a different Texture2D for the same path must NOT
+        // destroy that live canonical texture. Instead the incoming duplicate (not yet
+        // bound to anything) is destroyed and the caller is handed the canonical info.
+        public TextureRuntimeImportService.LoadedTextureInfo Store(
             string normalizedVirtualPath,
             string scopeId,
             Texture2D texture,
             TextureRuntimeImportService.LoadedTextureInfo info)
         {
             if (string.IsNullOrWhiteSpace(normalizedVirtualPath) || texture == null)
-                return;
+                return info;
 
             lock (_sync)
             {
                 if (_byPath.TryGetValue(normalizedVirtualPath, out var existing))
                 {
                     if (existing.Texture != null && existing.Texture != texture)
-                        DestroyTexture(existing.Texture);
+                    {
+                        // Lost a decode race: keep the canonical texture, drop the
+                        // duplicate we just decoded (it is not referenced anywhere yet).
+                        DestroyTexture(texture);
+                        existing.RefCount++;
+                        existing.LastAccessTick = NextAccessTickUnsafe();
+                        AttachScopeUnsafe(scopeId, normalizedVirtualPath, existing);
+                        TrimToCapacityUnsafe(_maxEntries);
+                        return existing.Info;
+                    }
 
                     existing.Texture = texture;
                     existing.Info = info;
@@ -100,7 +115,7 @@ namespace OpenFarCry.Importer.Texture
                     existing.LastAccessTick = NextAccessTickUnsafe();
                     AttachScopeUnsafe(scopeId, normalizedVirtualPath, existing);
                     TrimToCapacityUnsafe(_maxEntries);
-                    return;
+                    return info;
                 }
 
                 var created = new Entry
@@ -114,6 +129,7 @@ namespace OpenFarCry.Importer.Texture
                 _byPath[normalizedVirtualPath] = created;
                 AttachScopeUnsafe(scopeId, normalizedVirtualPath, created);
                 TrimToCapacityUnsafe(_maxEntries);
+                return info;
             }
         }
 
