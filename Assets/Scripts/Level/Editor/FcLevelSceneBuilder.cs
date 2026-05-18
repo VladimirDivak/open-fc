@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading.Tasks;
 using OpenFarCry.Level.Data;
 using OpenFarCry.Level.Entities;
 using OpenFarCry.Level.Registry;
@@ -480,9 +481,11 @@ namespace OpenFarCry.Level.Editor
                 terrainData = inMemoryTerrainData;
             }
 
-            // ── Bake albedo megatexture + detail layers ──────────────────────────
-            var megaAlbedo = BakeTerrainAlbedo(levelName, samples, resolution, heightmapUnitSize, levelDir);
-            BuildDetailTerrainLayers(terrainData, samples, resolution, surfaceLayers, levelDir);
+            // ── Bake albedo + build triplanar detail inputs ──────────────────────
+            var megaAlbedo  = BakeTerrainAlbedo(levelName, samples, resolution, heightmapUnitSize, levelDir);
+            var detailArray = BuildDetailArray(surfaceLayers, levelDir, out var detailScaleA, out var detailScaleB);
+            BuildSplatTextures(samples, resolution, levelDir, out var splatA, out var splatB);
+            terrainData.terrainLayers = new TerrainLayer[0];
 
             AssetDatabase.SaveAssets();
 
@@ -492,9 +495,11 @@ namespace OpenFarCry.Level.Editor
             terrainGo.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             var terrain = terrainGo.GetComponent<Terrain>();
-            // Detail layers blend through the FarCryTerrain shader graph; the baked
-            // albedo megatexture is multiplied over them via the _MegaAlbedo property.
-            terrain.materialTemplate = ResolveTerrainMaterial(levelDir, levelName, megaAlbedo, buildMode);
+            // The FarCryTerrain shader graph multiplies the baked albedo over a
+            // triplanar detail layer blended per-texel by the surface-type splat.
+            terrain.materialTemplate = ResolveTerrainMaterial(
+                levelDir, levelName, megaAlbedo, splatA, splatB, detailArray,
+                detailScaleA, detailScaleB, buildMode);
 
             if (environment != null)
                 BuildWaterPlane(terrainGo.transform, resolution, heightmapUnitSize,
@@ -530,6 +535,8 @@ namespace OpenFarCry.Level.Editor
             };
             albedoTex.SetPixels32(albedo);
             albedoTex.Apply(updateMipmaps: true);
+            // Terrain albedo carries no alpha; DXT1 is ~8x smaller than RGBA32.
+            EditorUtility.CompressTexture(albedoTex, TextureFormat.DXT1, TextureCompressionQuality.Best);
 
             string albedoPath = $"{levelDir}/TerrainAlbedo.asset";
             if (AssetDatabase.LoadAssetAtPath<Texture2D>(albedoPath) != null)
@@ -539,64 +546,194 @@ namespace OpenFarCry.Level.Editor
             return AssetDatabase.LoadAssetAtPath<Texture2D>(albedoPath) ?? albedoTex;
         }
 
-        // Builds the per-surface-type detail TerrainLayers and the h16 splatmap.
-        // These feed the standard terrain layer blend the shader graph multiplies
-        // the baked albedo over.
-        static void BuildDetailTerrainLayers(
-            TerrainData terrainData,
-            ushort[] samples,
-            int resolution,
-            List<FcTerrainLayerDesc> surfaceLayers,
-            string levelDir)
+        // Builds two RGBA splat-weight textures from the h16 surface type ids:
+        // SplatA channels = surface types 0-3, SplatB channels = types 4-7.
+        // The hard per-texel id field is blurred so detail blends smoothly
+        // between types instead of switching in hard squares.
+        static void BuildSplatTextures(
+            ushort[] samples, int resolution, string levelDir,
+            out Texture2D splatA, out Texture2D splatB)
         {
-            var valid = new List<FcTerrainLayerDesc>();
-            if (surfaceLayers != null)
+            byte[] ids = FcTerrainHeightmapDecoder.DecodeSurfaceTypes(samples);
+            int n = resolution * resolution;
+            var a = new Color[n];
+            var b = new Color[n];
+            for (int i = 0; i < n; i++)
             {
-                foreach (var ld in surfaceLayers)
-                    if (ld != null) valid.Add(ld);
+                Color ca = default, cb = default;
+                switch (ids[i])
+                {
+                    case 0: ca.r = 1f; break;
+                    case 1: ca.g = 1f; break;
+                    case 2: ca.b = 1f; break;
+                    case 3: ca.a = 1f; break;
+                    case 4: cb.r = 1f; break;
+                    case 5: cb.g = 1f; break;
+                    case 6: cb.b = 1f; break;
+                    default: cb.a = 1f; break; // 7
+                }
+                a[i] = ca;
+                b[i] = cb;
             }
 
-            if (valid.Count == 0)
+            const int blurIterations = 4; // softens ~2 m id texels into a smooth fade
+            for (int k = 0; k < blurIterations; k++)
+            {
+                BoxBlurColors(a, resolution);
+                BoxBlurColors(b, resolution);
+            }
+
+            splatA = CreateSplatTexture(a, resolution, "TerrainSplatA", $"{levelDir}/TerrainSplatA.asset");
+            splatB = CreateSplatTexture(b, resolution, "TerrainSplatB", $"{levelDir}/TerrainSplatB.asset");
+        }
+
+        static Texture2D CreateSplatTexture(Color[] pixels, int res, string name, string path)
+        {
+            var tex = new Texture2D(res, res, TextureFormat.RGBA32, mipChain: true, linear: true)
+            {
+                name = name,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp,
+            };
+            tex.SetPixels(pixels);
+            tex.Apply(updateMipmaps: true);
+            if (AssetDatabase.LoadAssetAtPath<Texture2D>(path) != null)
+                AssetDatabase.DeleteAsset(path);
+            AssetDatabase.CreateAsset(tex, path);
+            AssetDatabase.SaveAssets();
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path) ?? tex;
+        }
+
+        // In-place 3x3 box blur over an RGBA weight field.
+        static void BoxBlurColors(Color[] buf, int res)
+        {
+            var src = (Color[])buf.Clone();
+            Parallel.For(0, res, z =>
+            {
+                int z0 = Mathf.Max(0, z - 1), z1 = Mathf.Min(res - 1, z + 1);
+                for (int x = 0; x < res; x++)
+                {
+                    int x0 = Mathf.Max(0, x - 1), x1 = Mathf.Min(res - 1, x + 1);
+                    Color sum = default;
+                    int cnt = 0;
+                    for (int zz = z0; zz <= z1; zz++)
+                        for (int xx = x0; xx <= x1; xx++)
+                        {
+                            sum += src[zz * res + xx];
+                            cnt++;
+                        }
+                    buf[z * res + x] = sum * (1f / cnt);
+                }
+            });
+        }
+
+        // Builds a Texture2DArray of detail textures, one slice per surface type id
+        // (0-7), loaded from the leveldata.xml detail paths. The per-type tiling
+        // (tiles per metre, from each layer DetailScaleX) is packed into two
+        // Vector4s: scaleA = types 0-3, scaleB = types 4-7.
+        static Texture2DArray BuildDetailArray(
+            List<FcTerrainLayerDesc> surfaceLayers, string levelDir,
+            out Vector4 scaleA, out Vector4 scaleB)
+        {
+            const int sliceCount = 8; // surface ids 0-7
+            const float defaultScale = 0.2f; // tiles per metre
+            var scales = new float[sliceCount];
+            for (int i = 0; i < sliceCount; i++)
+                scales[i] = defaultScale;
+            scaleA = scaleB = Vector4.zero;
+
+            if (surfaceLayers == null || surfaceLayers.Count == 0)
             {
                 Debug.LogWarning("[FcLevelSceneBuilder] No surface-type detail layers; terrain detail skipped.");
-                return;
+                return null;
             }
+
+            var slices = new Texture2D[sliceCount];
+            int maxW = 0, maxH = 0;
 
             string detailDir = $"{levelDir}/TerrainDetail";
             EnsureDir(detailDir);
 
-            var layers = new TerrainLayer[valid.Count];
-            for (int i = 0; i < valid.Count; i++)
+            foreach (var ld in surfaceLayers)
             {
-                var ld = valid[i];
-                // DetailScaleX/Y is a UV scale: 1/scale = world metres per tile.
-                float tileX = ld.ScaleX > 0f ? 1f / ld.ScaleX : 1f;
-                float tileY = ld.ScaleY > 0f ? 1f / ld.ScaleY : 1f;
-                var tl = new TerrainLayer { tileSize = new Vector2(tileX, tileY) };
+                if (ld == null || ld.SurfaceTypeId >= sliceCount)
+                    continue;
+                if (ld.ScaleX > 0f)
+                    scales[ld.SurfaceTypeId] = ld.ScaleX;
                 if (TryLoadAndPersistTerrainTexture(
                         ld.DetailTexturePath, $"{detailDir}/Detail_{ld.SurfaceTypeId}.asset",
-                        transpose: false, out var detailTex))
+                        transpose: false, out var tex) && tex != null)
                 {
-                    tl.diffuseTexture = detailTex;
+                    slices[ld.SurfaceTypeId] = tex;
+                    maxW = Mathf.Max(maxW, tex.width);
+                    maxH = Mathf.Max(maxH, tex.height);
                 }
-
-                string layerPath = $"{levelDir}/TerrainDetailLayer_{ld.SurfaceTypeId}.terrainlayer";
-                layers[i] = SaveAndLoadTerrainLayerAsset(tl, layerPath) ?? tl;
             }
 
-            terrainData.terrainLayers = layers;
+            scaleA = new Vector4(scales[0], scales[1], scales[2], scales[3]);
+            scaleB = new Vector4(scales[4], scales[5], scales[6], scales[7]);
 
-            byte[] surfaceIds = FcTerrainHeightmapDecoder.DecodeSurfaceTypes(samples);
-            terrainData.alphamapResolution = resolution;
-            float[,,] alphamap = FcTerrainSplatmapBuilder.Build(surfaceIds, resolution, valid);
-            terrainData.SetAlphamaps(0, 0, alphamap);
+            if (maxW == 0)
+            {
+                Debug.LogWarning("[FcLevelSceneBuilder] No detail textures resolved; terrain detail skipped.");
+                return null;
+            }
+
+            var array = new Texture2DArray(maxW, maxH, sliceCount, TextureFormat.RGBA32, mipChain: true)
+            {
+                name = "TerrainDetailArray",
+                wrapMode = TextureWrapMode.Repeat,
+                filterMode = FilterMode.Bilinear,
+            };
+            for (int i = 0; i < sliceCount; i++)
+            {
+                Color32[] pixels;
+                if (slices[i] != null)
+                {
+                    pixels = ReadTextureRgba(slices[i], maxW, maxH);
+                }
+                else
+                {
+                    pixels = new Color32[maxW * maxH];
+                    for (int p = 0; p < pixels.Length; p++)
+                        pixels[p] = new Color32(128, 128, 128, 255); // neutral grey
+                }
+                array.SetPixels32(pixels, i);
+            }
+            array.Apply(updateMipmaps: true);
+
+            string path = $"{levelDir}/TerrainDetailArray.asset";
+            if (AssetDatabase.LoadAssetAtPath<Texture2DArray>(path) != null)
+                AssetDatabase.DeleteAsset(path);
+            AssetDatabase.CreateAsset(array, path);
+            AssetDatabase.SaveAssets();
+            return AssetDatabase.LoadAssetAtPath<Texture2DArray>(path) ?? array;
+        }
+
+        // Reads any texture (incl. compressed) to RGBA32 pixels at w x h via a blit.
+        static Color32[] ReadTextureRgba(Texture src, int w, int h)
+        {
+            var rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32);
+            Graphics.Blit(src, rt);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            var tmp = new Texture2D(w, h, TextureFormat.RGBA32, mipChain: false);
+            tmp.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+            tmp.Apply(updateMipmaps: false);
+            RenderTexture.active = prev;
+            RenderTexture.ReleaseTemporary(rt);
+            var pixels = tmp.GetPixels32();
+            UnityEngine.Object.DestroyImmediate(tmp);
+            return pixels;
         }
 
         // Resolves the terrain material: instances the FarCryTerrain shader-graph
-        // material and binds the baked albedo to its _MegaAlbedo property. Falls
-        // back to the stock URP terrain material when the graph is not yet built.
+        // material and binds the baked albedo, detail array and surface index.
+        // Falls back to the stock URP terrain material when the graph is missing.
         static Material ResolveTerrainMaterial(
-            string levelDir, string levelName, Texture2D megaAlbedo, SceneBuildMode buildMode)
+            string levelDir, string levelName, Texture2D megaAlbedo,
+            Texture2D splatA, Texture2D splatB, Texture2DArray detailArray,
+            Vector4 detailScaleA, Vector4 detailScaleB, SceneBuildMode buildMode)
         {
             const string graphMatPath = "Assets/Materials/FarCryTerrain.mat";
             var graphMat = AssetDatabase.LoadAssetAtPath<Material>(graphMatPath);
@@ -609,8 +746,12 @@ namespace OpenFarCry.Level.Editor
             }
 
             var mat = new Material(graphMat) { name = $"FarCryTerrain_{levelName}" };
-            if (megaAlbedo != null)
-                mat.SetTexture("_MegaAlbedo", megaAlbedo);
+            if (megaAlbedo != null)  mat.SetTexture("_MegaAlbedo", megaAlbedo);
+            if (splatA != null)      mat.SetTexture("_SplatA", splatA);
+            if (splatB != null)      mat.SetTexture("_SplatB", splatB);
+            if (detailArray != null) mat.SetTexture("_DetailArray", detailArray);
+            mat.SetVector("_DetailScaleA", detailScaleA);
+            mat.SetVector("_DetailScaleB", detailScaleB);
 
             string matPath = $"{levelDir}/TerrainMaterial.mat";
             if (AssetDatabase.LoadAssetAtPath<Material>(matPath) != null)

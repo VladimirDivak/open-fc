@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace OpenFarCry.Level.Data
@@ -33,7 +34,8 @@ namespace OpenFarCry.Level.Data
                 return false;
 
             outRes = Mathf.Max(1, layerSet.TextureSize);
-            var acc = new Color32[outRes * outRes];
+            int res = outRes; // local copy: out params cannot be used in lambdas
+            var acc = new Color32[res * res];
 
             float unit = heightmapUnitSize > 0 ? heightmapUnitSize : 1f;
             bool firstLayer = true;
@@ -47,15 +49,18 @@ namespace OpenFarCry.Level.Data
                 byte[] rgba = layer.TextureRgba;
 
                 byte[] autogenMask = layer.AutoGenMask
-                    ? BuildAutogenMask(layer, samples, hmRes, unit, outRes)
+                    ? BuildAutogenMask(layer, samples, hmRes, unit, res)
                     : null;
 
-                long painted = 0;
-                for (int oz = 0; oz < outRes; oz++)
+                // Rows are independent: parallelize within a layer (layer order
+                // itself stays sequential). Per-row painted counts avoid a race.
+                var rowPainted = new long[res];
+                Parallel.For(0, res, oz =>
                 {
                     int lz = texHPow2 ? (oz & (texH - 1)) : (oz % texH);
-                    int rowBase = oz * outRes;
-                    for (int ox = 0; ox < outRes; ox++)
+                    int rowBase = oz * res;
+                    long rp = 0;
+                    for (int ox = 0; ox < res; ox++)
                     {
                         int lx = texWPow2 ? (ox & (texW - 1)) : (ox % texW);
                         int li = (lz * texW + lx) * 4;
@@ -64,16 +69,16 @@ namespace OpenFarCry.Level.Data
                         if (firstLayer)
                         {
                             acc[i] = new Color32(rgba[li], rgba[li + 1], rgba[li + 2], 255);
-                            painted++;
+                            rp++;
                             continue;
                         }
 
                         int w = autogenMask != null
                             ? autogenMask[i]
-                            : SampleMaskWeight(layer, ox, oz, outRes);
+                            : SampleMaskWeight(layer, ox, oz, res);
                         if (w <= 0)
                             continue;
-                        painted++;
+                        rp++;
 
                         if (w >= 255)
                         {
@@ -89,9 +94,14 @@ namespace OpenFarCry.Level.Data
                             (byte)((d.b * iw + rgba[li + 2] * w) / 255),
                             255);
                     }
-                }
+                    rowPainted[oz] = rp;
+                });
 
-                float coverage = 100f * painted / (outRes * (long)outRes);
+                long painted = 0;
+                for (int r = 0; r < res; r++)
+                    painted += rowPainted[r];
+
+                float coverage = 100f * painted / (res * (long)res);
                 Debug.Log(
                     $"[FcTerrainAlbedoBaker] layer '{layer.Name}' " +
                     $"({(layer.AutoGenMask ? "autogen" : "manual")}) coverage={coverage:F1}%" +
@@ -117,15 +127,25 @@ namespace OpenFarCry.Level.Data
             return layer.Mask[mx * m + mz];
         }
 
-        // Builds a full-resolution autogen mask: hard altitude+slope test, 0xFF/0x00,
-        // optionally softened by a 3x3 box blur when the layer requests Smooth.
+        // Soft transition half-width at autogen band edges. Hard altitude/slope
+        // cuts produce sharp visible lines (e.g. at the beach line); a smoothstep
+        // window fades the layer in/out instead.
+        const float AutogenAltFalloff = 2.5f;    // metres
+        const float AutogenSlopeFalloff = 16f;   // slope units (0..255)
+
+        // Builds a full-resolution autogen mask via soft altitude+slope windows,
+        // optionally further softened by a 3x3 box blur when Smooth is set.
+        // Falloff is skipped at the 0 / 255 clamp extremes (not real boundaries).
         static byte[] BuildAutogenMask(
             FcTerrainPaintLayer layer, ushort[] samples, int hmRes, float unit, int outRes)
         {
             var mask = new byte[outRes * outRes];
             bool slopeFiltered = layer.MinSlope > 0 || layer.MaxSlope < 255;
 
-            for (int oz = 0; oz < outRes; oz++)
+            float band = Mathf.Max(0f, layer.AltEnd - layer.AltStart);
+            float af = Mathf.Max(0.25f, Mathf.Min(AutogenAltFalloff, band * 0.5f));
+
+            Parallel.For(0, outRes, oz =>
             {
                 int hz = oz * hmRes / outRes;
                 int rowBase = oz * outRes;
@@ -133,19 +153,29 @@ namespace OpenFarCry.Level.Data
                 {
                     int hx = ox * hmRes / outRes;
                     float h = HeightMeters(samples, hmRes, hx, hz);
-                    if (h < layer.AltStart || h > layer.AltEnd)
+
+                    float w = 1f;
+                    if (layer.AltStart > 0)
+                        w *= SmoothStep01(layer.AltStart - af, layer.AltStart + af, h);
+                    if (layer.AltEnd < 255)
+                        w *= 1f - SmoothStep01(layer.AltEnd - af, layer.AltEnd + af, h);
+                    if (w <= 0f)
                         continue;
 
                     if (slopeFiltered)
                     {
-                        int s = SlopeValue(samples, hmRes, unit, hx, hz);
-                        if (s < layer.MinSlope || s > layer.MaxSlope)
-                            continue;
+                        float s = SlopeValue(samples, hmRes, unit, hx, hz);
+                        if (layer.MinSlope > 0)
+                            w *= SmoothStep01(
+                                layer.MinSlope - AutogenSlopeFalloff, layer.MinSlope + AutogenSlopeFalloff, s);
+                        if (layer.MaxSlope < 255)
+                            w *= 1f - SmoothStep01(
+                                layer.MaxSlope - AutogenSlopeFalloff, layer.MaxSlope + AutogenSlopeFalloff, s);
                     }
 
-                    mask[rowBase + ox] = 0xFF;
+                    mask[rowBase + ox] = (byte)Mathf.Clamp(Mathf.RoundToInt(w * 255f), 0, 255);
                 }
-            }
+            });
 
             if (layer.Smooth)
                 BoxBlur3x3(mask, outRes);
@@ -176,10 +206,20 @@ namespace OpenFarCry.Level.Data
             return Mathf.Clamp(Mathf.RoundToInt(angleDeg / 90f * 255f), 0, 255);
         }
 
+        // HLSL-style smoothstep: 0 below edge0, 1 above edge1, smooth between.
+        // (Unity's Mathf.SmoothStep interpolates a value between from/to instead.)
+        static float SmoothStep01(float edge0, float edge1, float x)
+        {
+            if (edge1 <= edge0)
+                return x >= edge1 ? 1f : 0f;
+            float t = Mathf.Clamp01((x - edge0) / (edge1 - edge0));
+            return t * t * (3f - 2f * t);
+        }
+
         static void BoxBlur3x3(byte[] mask, int res)
         {
             var src = (byte[])mask.Clone();
-            for (int z = 0; z < res; z++)
+            Parallel.For(0, res, z =>
             {
                 int z0 = Mathf.Max(0, z - 1), z1 = Mathf.Min(res - 1, z + 1);
                 for (int x = 0; x < res; x++)
@@ -194,7 +234,7 @@ namespace OpenFarCry.Level.Data
                         }
                     mask[z * res + x] = (byte)(sum / n);
                 }
-            }
+            });
         }
     }
 }
