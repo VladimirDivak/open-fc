@@ -114,7 +114,11 @@ namespace OpenFarCry.Level.Data
                 heightmapSize = ParseInt(attrs?["HeightmapSize"]?.Value, heightmapSize);
                 heightmapUnitSize = ParseInt(attrs?["HeightmapUnitSize"]?.Value, heightmapUnitSize);
 
-                ParseSurfaceTypes(doc, levelName, surfaceLayers);
+                if (!TryLoadSurfaceTypesFromCry(levelName, surfaceLayers))
+                {
+                    ParseSurfaceTypes(doc, levelName, surfaceLayers);
+                }
+
                 return true;
             }
             catch (Exception e)
@@ -217,33 +221,72 @@ namespace OpenFarCry.Level.Data
             return result;
         }
 
+        static bool TryLoadSurfaceTypesFromCry(string levelName, List<FcTerrainLayerDesc> result)
+        {
+            if (!TryGetInstallPath(out string installPath))
+                return false;
+
+            string resolvedDir = ResolveLevelDirectoryName(installPath, levelName);
+            string cryPath = Path.Combine(installPath, "Levels", resolvedDir, resolvedDir + ".cry");
+            if (!File.Exists(cryPath))
+                return false;
+
+            try
+            {
+                using var pak = new OpenFarCry.FileSystem.PakArchive(cryPath);
+                if (!pak.TryRead("level.editor_xml", out byte[] xmlBytes))
+                    return false;
+
+                var doc = LoadXml(xmlBytes);
+                var surfaceTypeNodes = doc.GetElementsByTagName("SurfaceType");
+                if (surfaceTypeNodes.Count == 0)
+                    return false;
+
+                ParseSurfaceTypesFromNodes(surfaceTypeNodes, result);
+                return result.Count > 0;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[FcLevelLoader] Failed to parse .cry surface types for '{levelName}': {e.Message}");
+                return false;
+            }
+        }
+
         static void ParseSurfaceTypes(XmlDocument doc, string levelName, List<FcTerrainLayerDesc> result)
         {
             XmlNodeList surfaceTypeNodes = doc.GetElementsByTagName("SurfaceType");
+            ParseSurfaceTypesFromNodes(surfaceTypeNodes, result);
+        }
+
+        static void ParseSurfaceTypesFromNodes(XmlNodeList surfaceTypeNodes, List<FcTerrainLayerDesc> result)
+        {
             byte id = 0;
             foreach (XmlNode node in surfaceTypeNodes)
             {
                 if (id >= 7) break; // STYPE_BIT_MASK covers 0-6; 7 = hole
 
-                string texAttr = node.Attributes?["DetailTexture"]?.Value;
-                if (string.IsNullOrEmpty(texAttr))
+                var attrs = node.Attributes;
+                string detailTexAttr = attrs?["DetailTexture"]?.Value;
+                string baseTexAttr = attrs?["Texture"]?.Value;
+
+                if (string.IsNullOrEmpty(detailTexAttr))
                 {
                     id++;
                     continue;
                 }
 
-                // DetailTexture paths in leveldata.xml are VFS-root-relative paths stored in
-                // FCData/*.pak (mounted with empty bindRoot), not in the level PAK.
-                string vfsPath = texAttr.ToLowerInvariant().Replace('\\', '/');
+                string detailVfsPath = detailTexAttr.ToLowerInvariant().Replace('\\', '/');
+                string baseVfsPath = baseTexAttr?.ToLowerInvariant().Replace('\\', '/');
 
-                string scaleXStr = node.Attributes?["DetailScaleX"]?.Value;
-                string scaleYStr = node.Attributes?["DetailScaleY"]?.Value;
-                string projAxis  = node.Attributes?["ProjAxis"]?.Value;
+                string scaleXStr = attrs?["DetailScaleX"]?.Value;
+                string scaleYStr = attrs?["DetailScaleY"]?.Value;
+                string projAxis  = attrs?["ProjAxis"]?.Value;
 
                 result.Add(new FcTerrainLayerDesc
                 {
                     SurfaceTypeId     = id,
-                    DetailTexturePath = vfsPath,
+                    BaseTexturePath   = baseVfsPath,
+                    DetailTexturePath = detailVfsPath,
                     ScaleX            = ParseFloat(scaleXStr, 8f),
                     ScaleY            = ParseFloat(scaleYStr, 8f),
                     ProjAxis          = string.IsNullOrEmpty(projAxis) ? 'Z' : projAxis[0],
@@ -278,6 +321,14 @@ namespace OpenFarCry.Level.Data
             }
 
             FcFileSystem.Mount(pakPath, bindRoot: $"levels/{levelKey}");
+
+            // The <level>.cry editor archive (a ZIP) carries terrain paint layers
+            // and masks. Mount it under a sibling root so editor tooling can read
+            // layer_*/layermask_* entries through the normal VFS.
+            string cryPath = Path.Combine(installPath, "Levels", resolvedLevelDirName, resolvedLevelDirName + ".cry");
+            if (File.Exists(cryPath))
+                FcFileSystem.Mount(cryPath, bindRoot: $"levels/{levelKey}/cry");
+
             MountedLevelKeys.Add(levelKey);
         }
 

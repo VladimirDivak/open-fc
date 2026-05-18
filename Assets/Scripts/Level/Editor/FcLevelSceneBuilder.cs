@@ -433,8 +433,14 @@ namespace OpenFarCry.Level.Editor
         {
             string basePath = $"levels/{levelName.ToLowerInvariant()}";
             string h16Path = $"{basePath}/terrain/land_map.h16";
+
+            Debug.Log($"[FcLevelSceneBuilder] Building terrain for '{levelName}'. h16Path='{h16Path}', layers={surfaceLayers?.Count ?? 0}");
+
             if (!FcFileSystem.Exists(h16Path))
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Terrain heightmap not found in VFS: '{h16Path}'");
                 return null;
+            }
 
             byte[] h16Bytes = FcFileSystem.ReadAllBytes(h16Path);
             if (!FcTerrainHeightmapDecoder.TryDecodeH16(h16Bytes, resolution, out var samples))
@@ -474,71 +480,9 @@ namespace OpenFarCry.Level.Editor
                 terrainData = inMemoryTerrainData;
             }
 
-            // ── Build TerrainLayers ──────────────────────────────────────────────
-            // Layer 0: cover_low.dds — global megatexture (CLAMP, tiled once over worldSize).
-            // Layers 1-N: detail textures per surface type from <SurfaceTypes> in leveldata.xml.
-            var terrainLayers = new List<TerrainLayer>();
-            bool authoringMode = buildMode == SceneBuildMode.Authoring;
-            string terrainTexturesDir = $"{levelDir}/TerrainTextures";
-            if (authoringMode)
-                EnsureDir(terrainTexturesDir);
-
-            string coverPath = $"{basePath}/terrain/cover_low.dds";
-            {
-                var layer = new TerrainLayer { tileSize = new Vector2(worldSize, worldSize) };
-                if (authoringMode)
-                {
-                    TryLoadAndPersistTerrainTexture(
-                        coverPath,
-                        $"{terrainTexturesDir}/Cover.asset",
-                        transpose: true,
-                        out var coverTexture);
-                    layer.diffuseTexture = coverTexture;
-                }
-
-                string layerPath = $"{levelDir}/TerrainLayer_Cover.terrainlayer";
-                terrainLayers.Add(SaveAndLoadTerrainLayerAsset(layer, layerPath));
-            }
-
-            var validSurfaceLayers = new List<FcTerrainLayerDesc>(surfaceLayers.Count);
-            for (int i = 0; i < surfaceLayers.Count; i++)
-            {
-                var layerDesc = surfaceLayers[i];
-                if (layerDesc != null)
-                    validSurfaceLayers.Add(layerDesc);
-            }
-
-            foreach (var layerDesc in validSurfaceLayers)
-            {
-                // DetailScaleX/Y in leveldata.xml is a UV scale: 1/scale = world meters per tile.
-                float tileSizeX = layerDesc.ScaleX > 0f ? 1f / layerDesc.ScaleX : 1f;
-                float tileSizeY = layerDesc.ScaleY > 0f ? 1f / layerDesc.ScaleY : 1f;
-                var layer = new TerrainLayer { tileSize = new Vector2(tileSizeX, tileSizeY) };
-                if (authoringMode)
-                {
-                    TryLoadAndPersistTerrainTexture(
-                        layerDesc.DetailTexturePath,
-                        $"{terrainTexturesDir}/SurfaceType_{layerDesc.SurfaceTypeId}.asset",
-                        transpose: false,
-                        out var detailTexture);
-                    layer.diffuseTexture = detailTexture;
-                }
-
-                string layerPath = $"{levelDir}/TerrainLayer_Type{layerDesc.SurfaceTypeId}.terrainlayer";
-                terrainLayers.Add(SaveAndLoadTerrainLayerAsset(layer, layerPath));
-            }
-
-            terrainLayers.RemoveAll(l => l == null);
-            terrainData.terrainLayers = terrainLayers.ToArray();
-
-            // ── Build and apply alphamap (splatmap) ──────────────────────────────
-            if (validSurfaceLayers.Count > 0)
-            {
-                byte[] surfaceTypeIds = FcTerrainHeightmapDecoder.DecodeSurfaceTypes(samples);
-                terrainData.alphamapResolution = resolution;
-                float[,,] alphamap = FcTerrainSplatmapBuilder.Build(surfaceTypeIds, resolution, validSurfaceLayers);
-                terrainData.SetAlphamaps(0, 0, alphamap);
-            }
+            // ── Bake albedo megatexture + detail layers ──────────────────────────
+            var megaAlbedo = BakeTerrainAlbedo(levelName, samples, resolution, heightmapUnitSize, levelDir);
+            BuildDetailTerrainLayers(terrainData, samples, resolution, surfaceLayers, levelDir);
 
             AssetDatabase.SaveAssets();
 
@@ -548,92 +492,132 @@ namespace OpenFarCry.Level.Editor
             terrainGo.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             var terrain = terrainGo.GetComponent<Terrain>();
-            const string terrainMaterialPath = "Assets/Materials/FarCry Terrain Material.mat";
-            var terrainMaterial = AssetDatabase.LoadAssetAtPath<Material>(terrainMaterialPath);
-            Material assignedTerrainMaterial = null;
-            if (IsUsableTerrainMaterial(terrainMaterial))
-            {
-                if (buildMode == SceneBuildMode.Authoring)
-                {
-                    string authoringMaterialPath = $"{levelDir}/TerrainMaterial_Authoring.mat";
-                    if (AssetDatabase.LoadAssetAtPath<Material>(authoringMaterialPath) != null)
-                        AssetDatabase.DeleteAsset(authoringMaterialPath);
-
-                    var authoringMaterial = new Material(terrainMaterial)
-                    {
-                        name = $"{terrainMaterial.name}_{levelName}_Authoring"
-                    };
-                    AssetDatabase.CreateAsset(authoringMaterial, authoringMaterialPath);
-                    AssetDatabase.SaveAssets();
-                    assignedTerrainMaterial = AssetDatabase.LoadAssetAtPath<Material>(authoringMaterialPath);
-                    if (!IsUsableTerrainMaterial(assignedTerrainMaterial))
-                        assignedTerrainMaterial = authoringMaterial;
-                }
-                else
-                {
-                    assignedTerrainMaterial = terrainMaterial;
-                }
-            }
-            else
-            {
-                Debug.LogWarning(
-                    $"[FcLevelSceneBuilder] Terrain material missing/invalid at '{terrainMaterialPath}'. " +
-                    "Trying terrain material fallback.");
-            }
-
-            if (!IsUsableTerrainMaterial(assignedTerrainMaterial))
-            {
-                assignedTerrainMaterial = CreateFallbackTerrainMaterial(levelDir, levelName, buildMode);
-            }
-
-            if (IsUsableTerrainMaterial(assignedTerrainMaterial))
-            {
-                terrain.materialType = Terrain.MaterialType.Custom;
-                terrain.materialTemplate = assignedTerrainMaterial;
-            }
-            else
-            {
-                terrain.materialTemplate = null;
-                terrain.materialType = Terrain.MaterialType.BuiltInStandard;
-                Debug.LogWarning(
-                    "[FcLevelSceneBuilder] No usable custom terrain material found. " +
-                    "Using built-in terrain material mode.");
-            }
-
-            if (buildMode == SceneBuildMode.Runtime)
-            {
-                // Runtime scene keeps lazy terrain texture load from VFS.
-                var texService = terrainGo.AddComponent<FcTerrainTextureService>();
-                texService.CoverLayer = new FcTerrainTextureService.LayerDef
-                {
-                    VfsPath = coverPath,
-                    TileSizeX = worldSize,
-                    TileSizeY = worldSize,
-                };
-                texService.CoverCtcPath = $"{basePath}/terrain/cover.ctc";
-                texService.CoverSectorCount = Mathf.Max(1, Mathf.RoundToInt((resolution * heightmapUnitSize) / 64f));
-                texService.DetailLayers = new FcTerrainTextureService.LayerDef[surfaceLayers.Count];
-                for (int i = 0; i < surfaceLayers.Count; i++)
-                {
-                    var ld = surfaceLayers[i];
-                    texService.DetailLayers[i] = new FcTerrainTextureService.LayerDef
-                    {
-                        VfsPath = ld.DetailTexturePath,
-                        TileSizeX = ld.ScaleX > 0f ? 1f / ld.ScaleX : 1f,
-                        TileSizeY = ld.ScaleY > 0f ? 1f / ld.ScaleY : 1f,
-                    };
-                }
-            }
-            else
-            {
-                ApplyAuthoringCoverMaterialProperties(terrain);
-            }
+            // Detail layers blend through the FarCryTerrain shader graph; the baked
+            // albedo megatexture is multiplied over them via the _MegaAlbedo property.
+            terrain.materialTemplate = ResolveTerrainMaterial(levelDir, levelName, megaAlbedo, buildMode);
 
             if (environment != null)
                 BuildWaterPlane(terrainGo.transform, resolution, heightmapUnitSize,
                     environment.WaterLevel * terrainData.size.y / FcTerrainHeightmapDecoder.MaxWorldHeight);
 
             return terrain;
+        }
+
+        // Bakes the clean albedo megatexture from the level .cry paint layers and
+        // persists it. Returns the persisted texture, or null on failure.
+        static Texture2D BakeTerrainAlbedo(
+            string levelName, ushort[] samples, int resolution, int heightmapUnitSize, string levelDir)
+        {
+            string levelKey = levelName.ToLowerInvariant();
+            if (!FcTerrainLayerSet.TryLoad(levelKey, out var layerSet))
+            {
+                Debug.LogWarning(
+                    $"[FcLevelSceneBuilder] No .cry terrain layers for '{levelName}'; albedo not baked.");
+                return null;
+            }
+
+            if (!FcTerrainAlbedoBaker.TryBake(
+                    layerSet, samples, resolution, heightmapUnitSize, out var albedo, out int outRes))
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Terrain albedo bake failed for '{levelName}'.");
+                return null;
+            }
+
+            var albedoTex = new Texture2D(outRes, outRes, TextureFormat.RGBA32, mipChain: true)
+            {
+                name = "TerrainAlbedo",
+                wrapMode = TextureWrapMode.Clamp,
+            };
+            albedoTex.SetPixels32(albedo);
+            albedoTex.Apply(updateMipmaps: true);
+
+            string albedoPath = $"{levelDir}/TerrainAlbedo.asset";
+            if (AssetDatabase.LoadAssetAtPath<Texture2D>(albedoPath) != null)
+                AssetDatabase.DeleteAsset(albedoPath);
+            AssetDatabase.CreateAsset(albedoTex, albedoPath);
+            AssetDatabase.SaveAssets();
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(albedoPath) ?? albedoTex;
+        }
+
+        // Builds the per-surface-type detail TerrainLayers and the h16 splatmap.
+        // These feed the standard terrain layer blend the shader graph multiplies
+        // the baked albedo over.
+        static void BuildDetailTerrainLayers(
+            TerrainData terrainData,
+            ushort[] samples,
+            int resolution,
+            List<FcTerrainLayerDesc> surfaceLayers,
+            string levelDir)
+        {
+            var valid = new List<FcTerrainLayerDesc>();
+            if (surfaceLayers != null)
+            {
+                foreach (var ld in surfaceLayers)
+                    if (ld != null) valid.Add(ld);
+            }
+
+            if (valid.Count == 0)
+            {
+                Debug.LogWarning("[FcLevelSceneBuilder] No surface-type detail layers; terrain detail skipped.");
+                return;
+            }
+
+            string detailDir = $"{levelDir}/TerrainDetail";
+            EnsureDir(detailDir);
+
+            var layers = new TerrainLayer[valid.Count];
+            for (int i = 0; i < valid.Count; i++)
+            {
+                var ld = valid[i];
+                // DetailScaleX/Y is a UV scale: 1/scale = world metres per tile.
+                float tileX = ld.ScaleX > 0f ? 1f / ld.ScaleX : 1f;
+                float tileY = ld.ScaleY > 0f ? 1f / ld.ScaleY : 1f;
+                var tl = new TerrainLayer { tileSize = new Vector2(tileX, tileY) };
+                if (TryLoadAndPersistTerrainTexture(
+                        ld.DetailTexturePath, $"{detailDir}/Detail_{ld.SurfaceTypeId}.asset",
+                        transpose: false, out var detailTex))
+                {
+                    tl.diffuseTexture = detailTex;
+                }
+
+                string layerPath = $"{levelDir}/TerrainDetailLayer_{ld.SurfaceTypeId}.terrainlayer";
+                layers[i] = SaveAndLoadTerrainLayerAsset(tl, layerPath) ?? tl;
+            }
+
+            terrainData.terrainLayers = layers;
+
+            byte[] surfaceIds = FcTerrainHeightmapDecoder.DecodeSurfaceTypes(samples);
+            terrainData.alphamapResolution = resolution;
+            float[,,] alphamap = FcTerrainSplatmapBuilder.Build(surfaceIds, resolution, valid);
+            terrainData.SetAlphamaps(0, 0, alphamap);
+        }
+
+        // Resolves the terrain material: instances the FarCryTerrain shader-graph
+        // material and binds the baked albedo to its _MegaAlbedo property. Falls
+        // back to the stock URP terrain material when the graph is not yet built.
+        static Material ResolveTerrainMaterial(
+            string levelDir, string levelName, Texture2D megaAlbedo, SceneBuildMode buildMode)
+        {
+            const string graphMatPath = "Assets/Materials/FarCryTerrain.mat";
+            var graphMat = AssetDatabase.LoadAssetAtPath<Material>(graphMatPath);
+            if (graphMat == null || graphMat.shader == null)
+            {
+                Debug.LogWarning(
+                    $"[FcLevelSceneBuilder] '{graphMatPath}' missing; using stock URP terrain material. " +
+                    "Build the FarCryTerrain shader graph for albedo+detail blending.");
+                return CreateFallbackTerrainMaterial(levelDir, levelName, buildMode);
+            }
+
+            var mat = new Material(graphMat) { name = $"FarCryTerrain_{levelName}" };
+            if (megaAlbedo != null)
+                mat.SetTexture("_MegaAlbedo", megaAlbedo);
+
+            string matPath = $"{levelDir}/TerrainMaterial.mat";
+            if (AssetDatabase.LoadAssetAtPath<Material>(matPath) != null)
+                AssetDatabase.DeleteAsset(matPath);
+            AssetDatabase.CreateAsset(mat, matPath);
+            AssetDatabase.SaveAssets();
+            return AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
         }
 
         static bool IsUsableTerrainMaterial(Material material)
