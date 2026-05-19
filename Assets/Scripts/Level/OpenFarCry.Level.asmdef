@@ -4,7 +4,8 @@
     "references": [
         "OpenFarCry.FileSystem",
         "OpenFarCry.Importer",
-        "UniTask"
+        "UniTask",
+        "Unity.RenderPipelines.Universal.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

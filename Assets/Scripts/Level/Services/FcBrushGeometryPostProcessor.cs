@@ -8,21 +8,54 @@ namespace OpenFarCry.Level.Services
 {
     public static class FcBrushGeometryPostProcessor
     {
+        // v5: planar templdecalmodulate submeshes stripped from the visual mesh and
+        //     re-spawned as URP DecalProjectors (FcBrushDecalProjectorBuilder).
         // v4: nodraw/proxy faces split into BuildResult.ColliderMesh at mesh-build time.
-        public const int CacheFormatVersion = 4;
+        public const int CacheFormatVersion = 5;
         static readonly int PropCull = Shader.PropertyToID("_Cull");
+        static readonly int PropSrcBlend = Shader.PropertyToID("_SrcBlend");
+
+        // A planar decal submesh extracted from a brush mesh, in visual-root local space.
+        // Re-projected onto surrounding geometry by FcBrushDecalProjectorBuilder.
+        public readonly struct DecalQuad
+        {
+            public readonly Vector3 Center;   // rect center, visual-root local space
+            public readonly Vector3 Normal;   // mesh face normal (points toward viewer)
+            public readonly Vector3 AxisU;    // unit, world direction of increasing texture U
+            public readonly Vector3 AxisV;    // unit, world direction of increasing texture V
+            public readonly float Width;      // footprint along AxisU
+            public readonly float Height;     // footprint along AxisV
+            public readonly Material SourceMaterial; // brush submesh material, pre-override
+            public readonly int MaterialId;          // CGF submesh MatID, for level override resolution
+
+            public DecalQuad(Vector3 center, Vector3 normal, Vector3 axisU, Vector3 axisV,
+                float width, float height, Material sourceMaterial, int materialId)
+            {
+                Center = center;
+                Normal = normal;
+                AxisU = axisU;
+                AxisV = axisV;
+                Width = width;
+                Height = height;
+                SourceMaterial = sourceMaterial;
+                MaterialId = materialId;
+            }
+        }
 
         public readonly struct Artifacts
         {
             public readonly Mesh PhysicsColliderMesh;
             public readonly Mesh VisualFilteredMesh;
             public readonly int[] VisualSubmeshMaterialIds;
+            public readonly DecalQuad[] DecalQuads;
 
-            public Artifacts(Mesh physicsColliderMesh, Mesh visualFilteredMesh, int[] visualSubmeshMaterialIds)
+            public Artifacts(Mesh physicsColliderMesh, Mesh visualFilteredMesh,
+                int[] visualSubmeshMaterialIds, DecalQuad[] decalQuads)
             {
                 PhysicsColliderMesh = physicsColliderMesh;
                 VisualFilteredMesh = visualFilteredMesh;
                 VisualSubmeshMaterialIds = visualSubmeshMaterialIds;
+                DecalQuads = decalQuads;
             }
         }
 
@@ -39,11 +72,18 @@ namespace OpenFarCry.Level.Services
             var visualSubmeshMaterialIds = buildResult.SubmeshMaterialIds != null
                 ? (int[])buildResult.SubmeshMaterialIds.Clone()
                 : null;
+
+            // Extract planar decal submeshes from the original mesh before stripping; the
+            // same submesh indices are then removed from the visual mesh below.
+            var decalQuads = ExtractPlanarDecals(
+                visualRoot, buildResult, parsedFile, out var decalStripSubmeshes);
+
             Mesh visualFilteredMesh = StripProxySubmeshesFromVisual(
                 visualRoot,
                 buildResult,
                 parsedFile,
-                ref visualSubmeshMaterialIds);
+                ref visualSubmeshMaterialIds,
+                decalStripSubmeshes);
             Mesh physicsColliderMesh = null;
 
             if (addPhysicsCollider && buildResult.Mesh != null)
@@ -82,7 +122,11 @@ namespace OpenFarCry.Level.Services
 
             DisableBackfaceCulling(visualRoot);
             StampCacheMetadata(visualRoot, brushRuntimeParity: true, visualSubmeshMaterialIds);
-            return new Artifacts(physicsColliderMesh, visualFilteredMesh, visualSubmeshMaterialIds);
+            return new Artifacts(
+                physicsColliderMesh,
+                visualFilteredMesh,
+                visualSubmeshMaterialIds,
+                decalQuads != null && decalQuads.Count > 0 ? decalQuads.ToArray() : null);
         }
 
         public static void DisableBackfaceCulling(GameObject root)
@@ -97,8 +141,15 @@ namespace OpenFarCry.Level.Services
                 for (int i = 0; i < materials.Length; i++)
                 {
                     var mat = materials[i];
-                    if (mat != null && mat.HasProperty(PropCull))
-                        mat.SetFloat(PropCull, (float)CullMode.Off);
+                    if (mat == null || !mat.HasProperty(PropCull))
+                        continue;
+                    // Skip multiply-blend materials (Cry templdecalmodulate): they must
+                    // keep Render Face = Front so the decal does not appear through the
+                    // back side of its host surface.
+                    if (mat.HasProperty(PropSrcBlend) &&
+                        (int)mat.GetFloat(PropSrcBlend) == (int)BlendMode.DstColor)
+                        continue;
+                    mat.SetFloat(PropCull, (float)CullMode.Off);
                 }
             }
         }
@@ -130,11 +181,16 @@ namespace OpenFarCry.Level.Services
             return meta.CacheFormatVersion >= CacheFormatVersion && meta.BrushRuntimeParity;
         }
 
-        static Mesh StripProxySubmeshesFromVisual(
+        // Strips collision-only (proxy/no-draw) submeshes from a visual GameObject's
+        // MeshFilter/MeshRenderer. Public so LOD children get the same treatment as LOD0.
+        // Returns the brush-owned filtered Mesh (caller must Destroy it), or null when no
+        // stripping was needed.
+        public static Mesh StripProxySubmeshesFromVisual(
             GameObject visualRoot,
             BuildResult buildResult,
             CgfFile parsedFile,
-            ref int[] visualSubmeshMaterialIds)
+            ref int[] visualSubmeshMaterialIds,
+            HashSet<int> extraStripSubmeshIndices = null)
         {
             if (visualRoot == null || buildResult?.SubmeshMaterialIds == null)
                 return null;
@@ -151,7 +207,8 @@ namespace OpenFarCry.Level.Services
                 return null;
             }
 
-            if (proxyMatIds.Count == 0)
+            bool hasExtraStrip = extraStripSubmeshIndices != null && extraStripSubmeshIndices.Count > 0;
+            if (proxyMatIds.Count == 0 && !hasExtraStrip)
                 return null;
 
             var mf = visualRoot.GetComponent<MeshFilter>();
@@ -171,8 +228,11 @@ namespace OpenFarCry.Level.Services
             var keep = new List<int>(subCount);
             for (int i = 0; i < subCount; i++)
             {
-                if (!proxyMatIds.Contains(matIds[i]))
-                    keep.Add(i);
+                if (proxyMatIds.Contains(matIds[i]))
+                    continue;
+                if (hasExtraStrip && extraStripSubmeshIndices.Contains(i))
+                    continue;
+                keep.Add(i);
             }
 
             if (keep.Count == subCount)
@@ -457,6 +517,165 @@ namespace OpenFarCry.Level.Services
             }
 
             return ids;
+        }
+
+        // Finds planar templdecalmodulate submeshes. Each returned DecalQuad is later
+        // re-spawned as a URP DecalProjector; its submesh index is added to
+        // `stripSubmeshIndices` so StripProxySubmeshesFromVisual removes it from the
+        // visual mesh. Non-planar decal submeshes are left untouched (rendered as-is).
+        static List<DecalQuad> ExtractPlanarDecals(
+            GameObject visualRoot,
+            BuildResult buildResult,
+            CgfFile parsedFile,
+            out HashSet<int> stripSubmeshIndices)
+        {
+            stripSubmeshIndices = null;
+            var quads = new List<DecalQuad>();
+            if (visualRoot == null || buildResult?.SubmeshMaterialIds == null)
+                return quads;
+            if (!TryResolveRootMaterial(parsedFile, out var rootMat) || rootMat == null)
+                return quads;
+
+            var decalMatIds = BuildDecalMaterialIds(parsedFile, rootMat);
+            if (decalMatIds.Count == 0)
+                return quads;
+
+            var mf = visualRoot.GetComponent<MeshFilter>();
+            var mr = visualRoot.GetComponent<MeshRenderer>();
+            var mesh = mf != null ? mf.sharedMesh : null;
+            if (mesh == null || mr == null)
+                return quads;
+
+            int subCount = mesh.subMeshCount;
+            int[] matIds = buildResult.SubmeshMaterialIds;
+            if (matIds.Length != subCount)
+                return quads;
+
+            var verts = mesh.vertices;
+            var uvs = mesh.uv;
+            if (uvs == null || uvs.Length != verts.Length)
+                return quads;
+
+            var mats = mr.sharedMaterials;
+            for (int s = 0; s < subCount; s++)
+            {
+                if (!decalMatIds.Contains(matIds[s]))
+                    continue;
+
+                var tris = mesh.GetTriangles(s);
+                if (tris.Length < 6)
+                    continue;
+
+                var srcMat = mats != null && s < mats.Length ? mats[s] : null;
+                if (!TryBuildDecalQuad(verts, uvs, tris, srcMat, matIds[s], out var quad))
+                    continue; // non-planar / degenerate -> keep as overlay geometry
+
+                quads.Add(quad);
+                (stripSubmeshIndices ??= new HashSet<int>()).Add(s);
+            }
+
+            return quads;
+        }
+
+        // Two templdecalmodulate cases need different handling:
+        //   * Whole-brush decal -- the CGF is a single-material decal quad (objects/decals/
+        //     GDE_*.cgf, moss07.cgf, ...). The root material is itself ModulateDecal and
+        //     MtlType is not Multi. These get stripped and rendered through a
+        //     DecalProjector (FcBrushDecalProjectorBuilder).
+        //   * MatID-in-mesh decal -- the CGF is a multi-material brush where one (or more)
+        //     submeshes carry a templdecalmodulate child (decals_hull.cgf, WW2_..._DECAL).
+        //     Those submeshes stay in the visual mesh and rely on
+        //     CgfMaterialBuilder.ApplyModulateState's URP Lit Multiply blend to reproduce
+        //     Cry's surface*decal blending directly on the host geometry.
+        static HashSet<int> BuildDecalMaterialIds(CgfFile parsedFile, CgfMaterialChunk rootMat)
+        {
+            var ids = new HashSet<int>();
+            if (rootMat == null)
+                return ids;
+
+            if (rootMat.MtlType != CgfMtlType.Multi &&
+                rootMat.Classification.Family == CgfMaterialShaderFamily.ModulateDecal)
+                ids.Add(rootMat.TableIndex);
+
+            return ids;
+        }
+
+        // Fits a planar oriented rectangle to a decal submesh. Returns false when the
+        // submesh is non-planar, degenerate, or has no usable UV gradient.
+        static bool TryBuildDecalQuad(
+            Vector3[] verts,
+            Vector2[] uvs,
+            int[] tris,
+            Material srcMat,
+            int materialId,
+            out DecalQuad quad)
+        {
+            quad = default;
+
+            var idx = new List<int>(4);
+            for (int i = 0; i < tris.Length; i++)
+            {
+                if (!idx.Contains(tris[i]))
+                    idx.Add(tris[i]);
+            }
+            if (idx.Count < 3)
+                return false;
+
+            Vector3 p0 = verts[tris[0]], p1 = verts[tris[1]], p2 = verts[tris[2]];
+            Vector3 normal = Vector3.Cross(p1 - p0, p2 - p0);
+            if (normal.sqrMagnitude < 1e-12f)
+                return false;
+            normal.Normalize();
+
+            Vector3 centroid = Vector3.zero;
+            for (int i = 0; i < idx.Count; i++)
+                centroid += verts[idx[i]];
+            centroid /= idx.Count;
+
+            // Tangent / bitangent: world-space directions of increasing texture U / V.
+            Vector2 uv0 = uvs[tris[0]], uv1 = uvs[tris[1]], uv2 = uvs[tris[2]];
+            Vector3 e1 = p1 - p0, e2 = p2 - p0;
+            Vector2 d1 = uv1 - uv0, d2 = uv2 - uv0;
+            float det = d1.x * d2.y - d2.x * d1.y;
+            if (Mathf.Abs(det) < 1e-12f)
+                return false;
+            float inv = 1f / det;
+            Vector3 tangent = (e1 * d2.y - e2 * d1.y) * inv;
+            Vector3 bitangent = (e2 * d1.x - e1 * d2.x) * inv;
+            if (tangent.sqrMagnitude < 1e-12f || bitangent.sqrMagnitude < 1e-12f)
+                return false;
+
+            Vector3 axisU = tangent.normalized;
+            Vector3 axisV = bitangent.normalized;
+
+            // Planarity gate: max out-of-plane deviation relative to footprint.
+            float footprint = Mathf.Max(tangent.magnitude, bitangent.magnitude);
+            float maxDev = 0f;
+            float minU = float.MaxValue, maxU = float.MinValue;
+            float minV = float.MaxValue, maxV = float.MinValue;
+            for (int i = 0; i < idx.Count; i++)
+            {
+                Vector3 d = verts[idx[i]] - centroid;
+                maxDev = Mathf.Max(maxDev, Mathf.Abs(Vector3.Dot(d, normal)));
+                float cu = Vector3.Dot(d, axisU);
+                float cv = Vector3.Dot(d, axisV);
+                minU = Mathf.Min(minU, cu); maxU = Mathf.Max(maxU, cu);
+                minV = Mathf.Min(minV, cv); maxV = Mathf.Max(maxV, cv);
+            }
+            if (footprint <= 1e-6f || maxDev > footprint * 0.05f)
+                return false;
+
+            float width = maxU - minU;
+            float height = maxV - minV;
+            if (width < 1e-4f || height < 1e-4f)
+                return false;
+
+            Vector3 center = centroid +
+                             axisU * ((minU + maxU) * 0.5f) +
+                             axisV * ((minV + maxV) * 0.5f);
+
+            quad = new DecalQuad(center, normal, axisU, axisV, width, height, srcMat, materialId);
+            return true;
         }
 
         // Collision-only material detection lives in CgfMaterialClassifier so the brush

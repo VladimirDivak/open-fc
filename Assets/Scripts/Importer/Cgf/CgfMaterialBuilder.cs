@@ -31,6 +31,7 @@ namespace OpenFarCry.Importer.Cgf
         static readonly int PropDstBlendA    = Shader.PropertyToID("_DstBlendAlpha");
         static readonly int PropSpecHighlights = Shader.PropertyToID("_SpecularHighlights");
         static readonly int PropEnvReflections = Shader.PropertyToID("_EnvironmentReflections");
+        static readonly int PropReceiveShadows = Shader.PropertyToID("_ReceiveShadows");
 
         static Shader _urpLit;
         static Shader UrpLit => _urpLit != null ? _urpLit : (_urpLit = Shader.Find("Universal Render Pipeline/Lit"));
@@ -363,13 +364,25 @@ namespace OpenFarCry.Importer.Cgf
 
         static void ApplyModulateState(Material m)
         {
+            // templdecalmodulate = Cry multiply blend (result = surface * decal). URP Lit
+            // Transparent + Blend Mode = Multiply reproduces it exactly. BaseColor is
+            // forced white so the texture's rgb (with white background) is the multiplier:
+            // white background pixels leave the surface unchanged, dark mark pixels darken.
+            // Render Face = Front (Cull Back) so the decal does not show through the host
+            // surface from behind; Receive Shadows off so darkened patches do not get
+            // double-darkened by cascaded shadow attenuation.
             m.SetFloat(PropSurface, 1f);
+            SetFloatIfProperty(m, PropBlend, 3f); // URP Lit Multiply
             m.SetFloat(PropAlphaClip, 0f);
             m.SetFloat(PropZWrite, 0f);
             m.SetFloat(PropSrcBlend,  (float)BlendMode.DstColor);
             m.SetFloat(PropDstBlend,  (float)BlendMode.Zero);
             m.SetFloat(PropSrcBlendA, (float)BlendMode.One);
             m.SetFloat(PropDstBlendA, (float)BlendMode.Zero);
+            m.SetFloat(PropCull, (float)CullMode.Back);
+            SetFloatIfProperty(m, PropReceiveShadows, 0f);
+            m.EnableKeyword("_RECEIVE_SHADOWS_OFF");
+            m.SetColor(PropBaseColor, Color.white);
             m.DisableKeyword("_ALPHATEST_ON");
             m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
             m.SetOverrideTag("RenderType", "Transparent");

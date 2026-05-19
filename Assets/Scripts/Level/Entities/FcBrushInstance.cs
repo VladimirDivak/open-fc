@@ -31,11 +31,15 @@ namespace OpenFarCry.Level.Entities
             _materialId = materialId;
         }
 
+        static readonly int PropBaseMap = Shader.PropertyToID("_BaseMap");
+
         readonly CgfGameObjectBuilder _goBuilder = new CgfGameObjectBuilder();
         CgfRuntimeImportResult _importResult;
         IReadOnlyList<CgfRuntimeImportResult> _lodResults;
         bool _releaseImportResultsOnDestroy = true;
         FcBrushGeometryPostProcessor.Artifacts _postProcessArtifacts;
+        List<Mesh> _lodFilteredVisualMeshes;
+        List<GameObject> _decalProjectors;
 
         void Start()
         {
@@ -81,11 +85,13 @@ namespace OpenFarCry.Level.Entities
 
             output.Root.transform.SetParent(transform, worldPositionStays: false);
 
-            FcLevelRuntimeLodGroupBuilder.Apply(
+            _lodFilteredVisualMeshes = FcLevelRuntimeLodGroupBuilder.Apply(
                 output.Root,
                 output.MeshRenderer,
                 lodResults,
-                levelScopeId);
+                levelScopeId,
+                materialOverrider: null,
+                stripProxySubmeshes: true);
 
             ApplyMaterialOverride(output.Root, levelScopeId);
 
@@ -99,6 +105,62 @@ namespace OpenFarCry.Level.Entities
                 result.ParsedFile,
                 output.MeshRenderer,
                 _postProcessArtifacts.VisualSubmeshMaterialIds ?? result.BuildResult?.SubmeshMaterialIds);
+
+            // Planar decal submeshes were stripped from the visual mesh above; re-spawn
+            // them as URP DecalProjectors that project onto surrounding geometry. Decal
+            // textures get the same level/brush.lst override as visual submeshes.
+            var decalTextures = ResolveDecalBaseTextures(
+                _postProcessArtifacts.DecalQuads, levelScopeId);
+            _decalProjectors = FcBrushDecalProjectorBuilder.Build(
+                output.Root.transform,
+                transform.parent,
+                _postProcessArtifacts.DecalQuads,
+                decalTextures);
+        }
+
+        // Resolves the base texture for each decal quad, applying the same level/brush.lst
+        // material override that visual submeshes receive in ApplyMaterialOverride.
+        Texture[] ResolveDecalBaseTextures(
+            FcBrushGeometryPostProcessor.DecalQuad[] quads,
+            string levelScopeId)
+        {
+            if (quads == null || quads.Length == 0)
+                return null;
+
+            var textures = new Texture[quads.Length];
+            for (int i = 0; i < quads.Length; i++)
+            {
+                var mat = quads[i].SourceMaterial;
+                textures[i] = mat != null ? mat.GetTexture(PropBaseMap) : null;
+            }
+
+            var service = FcLevelMaterialOverrideService.Current;
+            if (service == null ||
+                (string.IsNullOrWhiteSpace(_materialOverride) && _materialId < 0))
+                return textures;
+
+            var slots = new Material[quads.Length];
+            var submeshMaterialIds = new int[quads.Length];
+            for (int i = 0; i < quads.Length; i++)
+            {
+                slots[i] = quads[i].SourceMaterial;
+                submeshMaterialIds[i] = quads[i].MaterialId;
+            }
+
+            if (!service.TryApplyBrushOverrideToRendererSlots(
+                    _materialOverride, _materialId, levelScopeId, slots, submeshMaterialIds))
+                return textures;
+
+            for (int i = 0; i < quads.Length; i++)
+            {
+                if (slots[i] == null)
+                    continue;
+                var overridden = slots[i].GetTexture(PropBaseMap);
+                if (overridden != null)
+                    textures[i] = overridden;
+            }
+
+            return textures;
         }
 
         // Fallback when FcBrushLoadService is absent (e.g. editor without full scene).
@@ -211,13 +273,11 @@ namespace OpenFarCry.Level.Entities
             if (renderer == null || visualRoot == null)
                 return null;
 
-            var rootMeta = visualRoot.GetComponent<FcCachedGeometryMetadata>();
-            if (rootMeta != null &&
-                renderer.transform == visualRoot.transform &&
-                rootMeta.SubmeshMaterialIds != null)
-            {
-                return rootMeta.SubmeshMaterialIds;
-            }
+            // Proxy/no-draw stripping stamps filtered submesh ids on each renderer's own
+            // GameObject (LOD0 root and every LODn child). Prefer those over raw build ids.
+            var meta = renderer.GetComponent<FcCachedGeometryMetadata>();
+            if (meta != null && meta.SubmeshMaterialIds != null)
+                return meta.SubmeshMaterialIds;
 
             if (renderer.transform == visualRoot.transform)
                 return _importResult?.BuildResult?.SubmeshMaterialIds;
@@ -350,6 +410,27 @@ namespace OpenFarCry.Level.Entities
                 Destroy(_postProcessArtifacts.PhysicsColliderMesh);
             if (_postProcessArtifacts.VisualFilteredMesh != null)
                 Destroy(_postProcessArtifacts.VisualFilteredMesh);
+
+            if (_lodFilteredVisualMeshes != null)
+            {
+                for (int i = 0; i < _lodFilteredVisualMeshes.Count; i++)
+                {
+                    if (_lodFilteredVisualMeshes[i] != null)
+                        Destroy(_lodFilteredVisualMeshes[i]);
+                }
+                _lodFilteredVisualMeshes = null;
+            }
+
+            // Decal projectors are parented outside this brush, so destroy them explicitly.
+            if (_decalProjectors != null)
+            {
+                for (int i = 0; i < _decalProjectors.Count; i++)
+                {
+                    if (_decalProjectors[i] != null)
+                        Destroy(_decalProjectors[i]);
+                }
+                _decalProjectors = null;
+            }
         }
     }
 }
