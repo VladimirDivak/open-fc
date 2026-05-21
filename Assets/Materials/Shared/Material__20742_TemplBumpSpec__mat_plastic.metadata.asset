@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fe3b056cdd68f392d8f689ac1390eac2, type: 3}
+  m_Name: Material__20742_TemplBumpSpec__mat_plastic.metadata
+  m_EditorClassIdentifier: OpenFarCry.Importer.Editor::OpenFarCry.Importer.Editor.FcMaterialMetadata
+  SourceCgfVirtualPath: objects/indoor/props/office_items/fan_desk_ani.cga
+  SourceChunkId: 5
+  SourceTableIndex: 2
+  ChunkName: Material #20742(TemplBumpSpec)/mat_plastic
+  OverrideName: 
+  ContentHash: 06023b9927a42317
+  DiffuseTexturePath: 
+  NormalTexturePath: 
+  SpecularTexturePath: 
+  OpacityTexturePath: 
+  GlossTexturePath: 

@@ -32,6 +32,8 @@ namespace OpenFarCry.Level.Editor
         bool _attachCachedPrefabsToScene = true;
         bool _disableRuntimeLoaders = true;
         bool _includeEntityObjectGeometryInAuthoringCache = false;
+        bool _bakeUseGpuLightmapper = true;
+        string _bakeExcludedVegetationCategories = "bushes,bushes_nonhideable,plants_nonhideable,underwater";
 
         List<string> _levelNames = new List<string>();
         List<string> _missionNames = new List<string>();
@@ -134,6 +136,15 @@ namespace OpenFarCry.Level.Editor
             _includeEntityObjectGeometryInAuthoringCache = EditorGUILayout.Toggle(
                 "Include Entities/Objects Geometry In Authoring Cache",
                 _includeEntityObjectGeometryInAuthoringCache);
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("APV Bake Options", EditorStyles.boldLabel);
+            _bakeUseGpuLightmapper = EditorGUILayout.Toggle("Use GPU Lightmapper for APV", _bakeUseGpuLightmapper);
+            _bakeExcludedVegetationCategories = EditorGUILayout.TextField(
+                new GUIContent(
+                    "Excluded Vegetation Categories",
+                    "CSV of leveldata.xml vegetation Category values to skip when placing bake-time wrappers. Case-insensitive. Default skips grass/bush/underwater so only large foliage contributes to APV."),
+                _bakeExcludedVegetationCategories);
         }
 
         void DrawActionButtons()
@@ -147,7 +158,13 @@ namespace OpenFarCry.Level.Editor
 
                 if (GUILayout.Button("Build Authoring Scene (FCData Cache)", GUILayout.Height(30)))
                     BuildAuthoringScene();
+
+                if (GUILayout.Button("Prepare Scene For APV Bake", GUILayout.Height(30)))
+                    PrepareSceneForApvBake();
             }
+
+            if (GUILayout.Button("Strip APV Cached Geometry (Run After Bake)"))
+                StripApvCachedGeometry();
 
             if (GUILayout.Button("Clear Scene"))
                 ClearScene();
@@ -229,6 +246,7 @@ namespace OpenFarCry.Level.Editor
             RegisterMeshEntityProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
 
             FcMaterialManifest cgfManifest = null;
+            int overrideRequestCount = 0;
 
             try
             {
@@ -237,6 +255,22 @@ namespace OpenFarCry.Level.Editor
                 if (profilesByPath.Count > 0)
                     cgfManifest = CgfMaterialEditorBakeService.BakeOrUpdateLevelManifest(
                         levelName, profilesByPath.Keys);
+
+                // Bake level-specific override materials (brush.lst + entity XML + vegetation
+                // type). Appends override entries to the manifest so the runtime override
+                // service can resolve a baked, user-editable .mat per (CGF, overrideName).
+                if (cgfManifest != null)
+                {
+                    var overrideRequests = CollectOverrideBakeRequests(levelName);
+                    overrideRequestCount = overrideRequests.Count;
+                    if (overrideRequestCount > 0)
+                    {
+                        EditorUtility.DisplayProgressBar(
+                            "Baking level override materials", levelName, 0.5f);
+                        CgfMaterialEditorBakeService.BakeLevelOverrideMaterials(
+                            levelName, cgfManifest, overrideRequests);
+                    }
+                }
             }
             finally
             {
@@ -245,10 +279,79 @@ namespace OpenFarCry.Level.Editor
             }
 
             string cgfInfo = cgfManifest != null
-                ? $"\nCGF material manifest: {cgfManifest.EntryCount} entries"
+                ? $"\nCGF material manifest: {cgfManifest.EntryCount} entries ({overrideRequestCount} override requests)"
                 : "\nCGF material manifest: none";
 
             Debug.Log($"[FcLevelBuilder] Material bake complete for '{levelName}'.{cgfInfo}");
+        }
+
+        // Collects (CGF, overrideName) pairs from the three override sources: brush.lst
+        // material overrides, entity XML "Material" attributes, vegetation type Material.
+        // De-dup happens inside CgfMaterialEditorBakeService.BakeLevelOverrideMaterials.
+        static List<CgfMaterialEditorBakeService.OverrideBakeRequest> CollectOverrideBakeRequests(
+            string levelName)
+        {
+            var requests = new List<CgfMaterialEditorBakeService.OverrideBakeRequest>();
+
+            // Brushes — brush.lst material overrides.
+            var brushes = FcBrushLoader.LoadBrushes(levelName);
+            if (brushes != null)
+            {
+                for (int i = 0; i < brushes.Count; i++)
+                {
+                    var brush = brushes[i];
+                    if (brush == null ||
+                        string.IsNullOrWhiteSpace(brush.VirtualPath) ||
+                        string.IsNullOrWhiteSpace(brush.MaterialOverride))
+                        continue;
+                    requests.Add(new CgfMaterialEditorBakeService.OverrideBakeRequest(
+                        brush.VirtualPath, brush.MaterialOverride));
+                }
+            }
+
+            // Vegetation — per-type Material override.
+            var supplement = FcLevelSupplementLoader.Load(levelName);
+            if (supplement?.VegetationTypes != null)
+            {
+                for (int i = 0; i < supplement.VegetationTypes.Length; i++)
+                {
+                    var type = supplement.VegetationTypes[i];
+                    if (string.IsNullOrWhiteSpace(type.FileName) ||
+                        string.IsNullOrWhiteSpace(type.Material))
+                        continue;
+                    requests.Add(new CgfMaterialEditorBakeService.OverrideBakeRequest(
+                        type.FileName, type.Material));
+                }
+            }
+
+            // Entities — XML "Material" root attribute ("LibraryName.MaterialName").
+            var missionNames = FcLevelLoader.ListMissionNames(levelName);
+            if (missionNames != null)
+            {
+                foreach (var missionName in missionNames)
+                {
+                    FcMissionDesc mission;
+                    try { mission = FcLevelLoader.LoadMission(levelName, missionName); }
+                    catch { continue; }
+
+                    if (mission?.Entities == null)
+                        continue;
+
+                    for (int i = 0; i < mission.Entities.Count; i++)
+                    {
+                        var entity = mission.Entities[i];
+                        string cgfPath = entity?.GetModelVirtualPath();
+                        string overrideName = entity?.GetMaterialOverride();
+                        if (string.IsNullOrWhiteSpace(cgfPath) ||
+                            string.IsNullOrWhiteSpace(overrideName))
+                            continue;
+                        requests.Add(new CgfMaterialEditorBakeService.OverrideBakeRequest(
+                            cgfPath, overrideName));
+                    }
+                }
+            }
+
+            return requests;
         }
 
         void BuildAuthoringScene()
@@ -299,12 +402,144 @@ namespace OpenFarCry.Level.Editor
             Debug.Log($"[FcLevelBuilder] {_lastBuildStats}");
         }
 
+        // APV-only prep: build runtime topology, graft cached geometry as temporary
+        // __FCDataCached children (brushes + temporary vegetation wrappers), configure
+        // sun/lighting/receiveGI, place ProbeVolume, bind BakingSet. Stops before the
+        // bake — user triggers the actual APV bake manually from the Unity Lighting
+        // window. After the bake completes, the user runs the Strip APV Cached
+        // Geometry button to drop the temporary __FCDataCached children.
+        void PrepareSceneForApvBake()
+        {
+            _lastError = null;
+            _lastBuildStats = null;
+
+            FcFileSystem.Initialize();
+
+            string levelName = _levelNames[_levelIndex];
+            string missionName = _missionNames[_missionIndex];
+
+            Scene target = EnsureLevelScene(levelName);
+            if (!target.IsValid()) { _lastError = "Failed to open/create level scene."; return; }
+
+            FcLevelSceneBuilder.ClearScene(target);
+            var stats = FcLevelSceneBuilder.BuildScene(
+                levelName,
+                missionName,
+                _registry,
+                target,
+                _skipHidden,
+                _buildBrushes,
+                FcLevelSceneBuilder.SceneBuildMode.Runtime);
+
+            // Vegetation runtime path uses GPU instancing with no MeshRenderers, so it
+            // cannot occlude probes during bake. Add per-instance wrappers under a
+            // temporary root that the strip step will tear down post-bake.
+            var roots = target.GetRootGameObjects();
+            GameObject levelRoot = null;
+            string expectedRootName = $"Level_{levelName}";
+            for (int i = 0; i < roots.Length; i++)
+            {
+                if (roots[i] != null && roots[i].name == expectedRootName)
+                {
+                    levelRoot = roots[i];
+                    break;
+                }
+            }
+
+            int tempVegPlaced = 0;
+            if (levelRoot != null)
+            {
+                var terrain = levelRoot.GetComponentInChildren<Terrain>(includeInactive: true);
+                var excludedCategories = ParseExcludedVegetationCategories(_bakeExcludedVegetationCategories);
+                tempVegPlaced = FcLevelSceneBuilder.PlaceVegetationAuthoringWrappersInExistingScene(
+                    levelName,
+                    levelRoot,
+                    terrain,
+                    rootName: "Vegetation_AuthoringForBake",
+                    excludedCategories: excludedCategories);
+            }
+
+            // Bake the level material manifest BEFORE caching geometry. Without this,
+            // EnsureCachedPrefabsForProfiles writes prefabs whose materials reference
+            // temporary runtime Texture2D objects; those refs go null after the next
+            // domain reload / scene reopen, so brush textures load partially (only when
+            // a brush.lst override forces a separate persist path) and vegetation loses
+            // them entirely (no override path at all).
+            BakeLevelMaterials(levelName);
+
+            var cacheContext = BuildDataDrivenCacheContext(levelName);
+            var materialOverrideService = ConfigureSceneMaterialOverrides(target, levelName);
+            var cacheStats = CacheSceneGeometryToProject(
+                target,
+                cacheContext,
+                levelName,
+                materialOverrideService,
+                attachCachedPrefabsToScene: true,
+                disableRuntimeLoaders: false,
+                includeEntityObjectGeometry: false);
+            ApplyAuthoringStaticFlagsToTerrainAndWater(target);
+            AttachMaterialManifestBinding(target, levelName);
+
+            bool prepared = FcLevelApvBakePipeline.PrepareSceneForApvBake(
+                target,
+                levelName,
+                _bakeUseGpuLightmapper);
+
+            _lastBuildStats =
+                $"APV scene prepared for '{levelName}/{missionName}':\n{stats}\n\n" +
+                $"FCData cache (temp for bake):\n{cacheStats}\n\n" +
+                $"Temporary vegetation wrappers: {tempVegPlaced}\n" +
+                $"Prepare result: {(prepared ? "OK" : "FAILED")}\n" +
+                "Next: trigger APV bake from Window > Rendering > Lighting > Generate Lighting. " +
+                "After bake completes, run 'Strip APV Cached Geometry' to clean the scene.";
+            Debug.Log($"[FcLevelBuilder] {_lastBuildStats}");
+        }
+
+        static HashSet<string> ParseExcludedVegetationCategories(string csv)
+        {
+            var set = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(csv))
+                return set;
+
+            foreach (var part in csv.Split(','))
+            {
+                var trimmed = part?.Trim();
+                if (!string.IsNullOrEmpty(trimmed))
+                    set.Add(trimmed.ToLowerInvariant());
+            }
+            return set;
+        }
+
+        // Removes temporary __FCDataCached children and the Vegetation_AuthoringForBake
+        // root from the active scene. Intended to be run by the user after the manual
+        // APV bake completes, leaving only commit-safe placeholders + probe data.
+        void StripApvCachedGeometry()
+        {
+            _lastError = null;
+            var active = SceneManager.GetActiveScene();
+            if (!active.IsValid() || !active.isLoaded)
+            {
+                _lastError = "No active loaded scene.";
+                return;
+            }
+
+            int stripped = FcLevelApvBakePipeline.StripCachedGeometry(active);
+            _lastBuildStats = $"Stripped {stripped} cached geometry root(s) from '{active.name}'.";
+        }
+
         // Attaches an FcLevelMaterialManifestBinding to the level root so a player build can
         // reuse pre-baked .mat assets. No-op when the level manifest has not been baked yet.
-        void AttachMaterialManifestBinding(Scene target, string levelName)
+        internal void AttachMaterialManifestBinding(Scene target, string levelName)
         {
             string manifestPath = CgfMaterialEditorBakeService.GetLevelManifestPath(levelName);
             var manifest = AssetDatabase.LoadAssetAtPath<FcMaterialManifest>(manifestPath);
+            if (manifest == null)
+            {
+                // Fall back to the legacy Assets/FCData/Materials manifest so previously
+                // built levels keep working until they are re-baked into the new layout.
+                string legacyPath = CgfMaterialEditorBakeService.GetLegacyLevelManifestPath(levelName);
+                manifest = AssetDatabase.LoadAssetAtPath<FcMaterialManifest>(legacyPath);
+            }
             if (manifest == null)
                 return;
 
@@ -547,6 +782,7 @@ namespace OpenFarCry.Level.Editor
             RegisterMeshEntityProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
 
             var paths = new List<string>(profilesByPath.Keys);
+            CgfMaterialEditorBakeService.BeginBakeSession();
             try
             {
                 for (int i = 0; i < paths.Count; i++)
@@ -572,12 +808,11 @@ namespace OpenFarCry.Level.Editor
                         if (chunk == null || chunk.MtlType == CgfMtlType.Multi)
                             continue;
 
-                        string assetPath = CgfMaterialEditorBakeService.GetBakedMaterialPath(virtualPath, chunk);
-                        bool existed = AssetDatabase.LoadAssetAtPath<Material>(assetPath) != null;
-                        var mat = CgfMaterialEditorBakeService.GetOrBakeMaterial(virtualPath, chunk);
+                        var mat = CgfMaterialEditorBakeService.GetOrBakeMaterial(
+                            virtualPath, chunk, out bool wasCreated);
                         if (mat != null)
                         {
-                            if (existed) reused++; else baked++;
+                            if (wasCreated) baked++; else reused++;
                         }
                         else
                         {
@@ -588,6 +823,7 @@ namespace OpenFarCry.Level.Editor
             }
             finally
             {
+                CgfMaterialEditorBakeService.EndBakeSession();
                 EditorUtility.ClearProgressBar();
             }
 
@@ -598,7 +834,7 @@ namespace OpenFarCry.Level.Editor
         }
 
         [System.Flags]
-        enum GeometryUsageFlags
+        internal enum GeometryUsageFlags
         {
             None = 0,
             Brush = 1 << 0,
@@ -606,7 +842,7 @@ namespace OpenFarCry.Level.Editor
             MeshEntity = 1 << 2,
         }
 
-        readonly struct GeometryImportProfile
+        internal readonly struct GeometryImportProfile
         {
             public readonly bool ImportSkeleton;
             public readonly float ImportScale;
@@ -631,7 +867,7 @@ namespace OpenFarCry.Level.Editor
             public bool IsBrushOrVegetation => (UsageFlags & (GeometryUsageFlags.Brush | GeometryUsageFlags.Vegetation)) != 0;
         }
 
-        struct GeometryCacheStats
+        internal struct GeometryCacheStats
         {
             public int SourceInstances;
             public int UniquePaths;
@@ -773,7 +1009,7 @@ namespace OpenFarCry.Level.Editor
             }
         }
 
-        sealed class GeometryCacheContext
+        internal sealed class GeometryCacheContext
         {
             public readonly Dictionary<string, GeometryImportProfile> ProfilesByPath =
                 new Dictionary<string, GeometryImportProfile>(System.StringComparer.Ordinal);
@@ -798,7 +1034,7 @@ namespace OpenFarCry.Level.Editor
             }
         }
 
-        GeometryCacheContext BuildDataDrivenCacheContext(string levelName)
+        internal GeometryCacheContext BuildDataDrivenCacheContext(string levelName)
         {
             var context = new GeometryCacheContext();
             if (_buildBrushes)
@@ -815,18 +1051,37 @@ namespace OpenFarCry.Level.Editor
             string levelName,
             FcLevelMaterialOverrideService materialOverrideService)
         {
+            return CacheSceneGeometryToProject(
+                scene,
+                preCacheContext,
+                levelName,
+                materialOverrideService,
+                attachCachedPrefabsToScene: _attachCachedPrefabsToScene,
+                disableRuntimeLoaders: _disableRuntimeLoaders,
+                includeEntityObjectGeometry: _includeEntityObjectGeometryInAuthoringCache);
+        }
+
+        internal GeometryCacheStats CacheSceneGeometryToProject(
+            Scene scene,
+            GeometryCacheContext preCacheContext,
+            string levelName,
+            FcLevelMaterialOverrideService materialOverrideService,
+            bool attachCachedPrefabsToScene,
+            bool disableRuntimeLoaders,
+            bool includeEntityObjectGeometry)
+        {
             var context = preCacheContext ?? new GeometryCacheContext();
             var materialOverridePersistContext = BuildMaterialOverridePersistContext(levelName);
             var brushes = CollectComponentsInScene<FcBrushInstance>(scene);
             var vegetation = CollectComponentsInScene<FcVegetationInstance>(scene);
-            var meshEntities = _includeEntityObjectGeometryInAuthoringCache
+            var meshEntities = includeEntityObjectGeometry
                 ? CollectComponentsInScene<FcMeshEntity>(scene)
                 : new List<FcMeshEntity>();
 
             context.Stats.SourceInstances = brushes.Count + vegetation.Count + meshEntities.Count;
 
             RegisterBrushAndVegetationProfiles(brushes, vegetation, context.ProfilesByPath);
-            if (_includeEntityObjectGeometryInAuthoringCache)
+            if (includeEntityObjectGeometry)
                 RegisterMeshEntityProfiles(meshEntities, context.ProfilesByPath);
             context.Stats.UniquePaths = context.ProfilesByPath.Count;
 
@@ -835,7 +1090,7 @@ namespace OpenFarCry.Level.Editor
                 context.CachedPrefabsByPath,
                 ref context.Stats);
 
-            if (_attachCachedPrefabsToScene)
+            if (attachCachedPrefabsToScene)
             {
                 context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
                     brushes,
@@ -851,7 +1106,7 @@ namespace OpenFarCry.Level.Editor
                     levelName,
                     materialOverridePersistContext,
                     ref context.Stats);
-                if (_includeEntityObjectGeometryInAuthoringCache)
+                if (includeEntityObjectGeometry)
                 {
                     context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
                         meshEntities,
@@ -863,11 +1118,11 @@ namespace OpenFarCry.Level.Editor
                 }
             }
 
-            if (_disableRuntimeLoaders)
+            if (disableRuntimeLoaders)
             {
                 context.Stats.DisabledLoaderComponents += DisableLoadedComponents(brushes, context.CachedPrefabsByPath);
                 context.Stats.DisabledLoaderComponents += DisableLoadedComponents(vegetation, context.CachedPrefabsByPath);
-                if (_includeEntityObjectGeometryInAuthoringCache)
+                if (includeEntityObjectGeometry)
                     context.Stats.DisabledLoaderComponents += DisableLoadedComponents(meshEntities, context.CachedPrefabsByPath);
             }
 
@@ -889,6 +1144,7 @@ namespace OpenFarCry.Level.Editor
             var cacheService = new CgfAssetCacheService();
             var lodService = new CgfLodImportService();
 
+            CgfMaterialEditorBakeService.BeginBakeSession();
             try
             {
                 int index = 0;
@@ -953,6 +1209,7 @@ namespace OpenFarCry.Level.Editor
             }
             finally
             {
+                CgfMaterialEditorBakeService.EndBakeSession();
                 EditorUtility.ClearProgressBar();
             }
         }
@@ -2225,7 +2482,7 @@ namespace OpenFarCry.Level.Editor
                 StaticEditorFlags.ContributeGI;
         }
 
-        static void ApplyAuthoringStaticFlagsToTerrainAndWater(Scene scene)
+        internal static void ApplyAuthoringStaticFlagsToTerrainAndWater(Scene scene)
         {
             var roots = scene.GetRootGameObjects();
             for (int i = 0; i < roots.Length; i++)
@@ -2292,7 +2549,7 @@ namespace OpenFarCry.Level.Editor
             return disabled;
         }
 
-        static void RemoveExistingCachedChildren(Transform parent)
+        internal static void RemoveExistingCachedChildren(Transform parent)
         {
             for (int i = parent.childCount - 1; i >= 0; i--)
             {
@@ -2330,7 +2587,7 @@ namespace OpenFarCry.Level.Editor
             }
         }
 
-        static List<T> CollectComponentsInScene<T>(Scene scene) where T : Component
+        internal static List<T> CollectComponentsInScene<T>(Scene scene) where T : Component
         {
             var result = new List<T>();
             var roots = scene.GetRootGameObjects();
@@ -2346,7 +2603,7 @@ namespace OpenFarCry.Level.Editor
             return result;
         }
 
-        static FcLevelMaterialOverrideService ConfigureSceneMaterialOverrides(Scene scene, string levelName)
+        internal static FcLevelMaterialOverrideService ConfigureSceneMaterialOverrides(Scene scene, string levelName)
         {
             var services = CollectComponentsInScene<FcLevelMaterialOverrideService>(scene);
             if (services.Count == 0 || services[0] == null)
@@ -3079,7 +3336,7 @@ namespace OpenFarCry.Level.Editor
                 Object.DestroyImmediate(root.gameObject);
         }
 
-        static void EnsureDir(string dir)
+        internal static void EnsureDir(string dir)
         {
             if (AssetDatabase.IsValidFolder(dir))
                 return;
@@ -3091,7 +3348,7 @@ namespace OpenFarCry.Level.Editor
             AssetDatabase.CreateFolder(parent, leaf);
         }
 
-        static string GetLevelAssetCacheDir(string levelName)
+        internal static string GetLevelAssetCacheDir(string levelName)
         {
             return $"Assets/FCData/Levels/{NormalizeLevelAssetKey(levelName)}";
         }
@@ -3158,7 +3415,7 @@ namespace OpenFarCry.Level.Editor
                     AssetDatabase.GUIDToAssetPath(guids[0]));
         }
 
-        static Scene EnsureLevelScene(string levelName)
+        internal static Scene EnsureLevelScene(string levelName)
         {
             string dir = "Assets/Scenes/Levels";
             string path = $"{dir}/{levelName}.unity";

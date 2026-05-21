@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fe3b056cdd68f392d8f689ac1390eac2, type: 3}
+  m_Name: Material__232_TemplBumpSpec_HP__mat_metal_sheet_nd.metadata
+  m_EditorClassIdentifier: OpenFarCry.Importer.Editor::OpenFarCry.Importer.Editor.FcMaterialMetadata
+  SourceCgfVirtualPath: objects/outdoor/towers/watch_tower3.cgf
+  SourceChunkId: 7
+  SourceTableIndex: 4
+  ChunkName: Material #232(TemplBumpSpec_HP)/mat_metal_sheet_nd
+  OverrideName: 
+  ContentHash: 72f140c4a0fabbda
+  DiffuseTexturePath: 
+  NormalTexturePath: 
+  SpecularTexturePath: 
+  OpacityTexturePath: 
+  GlossTexturePath: 

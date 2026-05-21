@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fe3b056cdd68f392d8f689ac1390eac2, type: 3}
+  m_Name: s_rackframe_TemplBumpSpec_hp_GlossAlpha__mat_metal_plate.metadata
+  m_EditorClassIdentifier: OpenFarCry.Importer.Editor::OpenFarCry.Importer.Editor.FcMaterialMetadata
+  SourceCgfVirtualPath: objects/indoor/props/labs/lab_medicalsmallshelf.cgf
+  SourceChunkId: 14
+  SourceTableIndex: 3
+  ChunkName: s_rackframe(TemplBumpSpec_hp_GlossAlpha)/mat_metal_plate
+  OverrideName: 
+  ContentHash: 25b50232b856b82f
+  DiffuseTexturePath: 
+  NormalTexturePath: 
+  SpecularTexturePath: 
+  OpacityTexturePath: 
+  GlossTexturePath: 

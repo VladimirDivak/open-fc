@@ -85,6 +85,8 @@ namespace OpenFarCry.Level.Entities
 
             output.Root.transform.SetParent(transform, worldPositionStays: false);
 
+            ConfigureForApvSampling(output.Root);
+
             _lodFilteredVisualMeshes = FcLevelRuntimeLodGroupBuilder.Apply(
                 output.Root,
                 output.MeshRenderer,
@@ -161,6 +163,22 @@ namespace OpenFarCry.Level.Entities
             }
 
             return textures;
+        }
+
+        // Tells URP to skip lightmap UV2 sampling and rely only on Adaptive Probe Volumes.
+        // CGF meshes have no UV2; lightmap mode would smear or warn. APV is sampled per-pixel
+        // by world position in the URP shader, so no per-renderer setup is needed beyond this.
+        static void ConfigureForApvSampling(GameObject visualRoot)
+        {
+            if (visualRoot == null)
+                return;
+
+            var renderers = visualRoot.GetComponentsInChildren<MeshRenderer>(includeInactive: true);
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                if (renderers[i] != null)
+                    renderers[i].receiveGI = ReceiveGI.LightProbes;
+            }
         }
 
         // Fallback when FcBrushLoadService is absent (e.g. editor without full scene).

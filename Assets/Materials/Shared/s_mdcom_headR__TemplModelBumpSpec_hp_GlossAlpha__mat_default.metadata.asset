@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fe3b056cdd68f392d8f689ac1390eac2, type: 3}
+  m_Name: s_mdcom_headR__TemplModelBumpSpec_hp_GlossAlpha__mat_default.metadata
+  m_EditorClassIdentifier: OpenFarCry.Importer.Editor::OpenFarCry.Importer.Editor.FcMaterialMetadata
+  SourceCgfVirtualPath: objects/characters/mercenaries/accessories/backpack2.cgf
+  SourceChunkId: 4
+  SourceTableIndex: 2
+  ChunkName: s_mdcom_headR(#TemplModelBumpSpec_hp_GlossAlpha)/mat_default
+  OverrideName: 
+  ContentHash: cf26ed976668e52a
+  DiffuseTexturePath: 
+  NormalTexturePath: 
+  SpecularTexturePath: 
+  OpacityTexturePath: 
+  GlossTexturePath: 

@@ -21,13 +21,22 @@ namespace OpenFarCry.Level.Services
             if (_manifest == null)
                 return;
 
-            CgfRuntimeImporter.MaterialService.ProjectMaterialLookup =
-                CgfMaterialManifestLookup.Build(new[] { _manifest });
+            var service = CgfRuntimeImporter.MaterialService;
+            var manifests = new[] { _manifest };
+            service.ProjectMaterialEntryLookup = CgfMaterialManifestLookup.BuildEntryLookup(manifests);
+            service.ProjectMaterialLookup = CgfMaterialManifestLookup.Build(manifests);
+
+            // Feed the manifest to the override service so it can overlay baked,
+            // user-editable shader knobs onto resolved override materials.
+            if (FcLevelMaterialOverrideService.Current != null)
+                FcLevelMaterialOverrideService.Current.SetBakedOverrideManifest(_manifest);
         }
 
         void OnDisable()
         {
-            CgfRuntimeImporter.MaterialService.ProjectMaterialLookup = null;
+            var service = CgfRuntimeImporter.MaterialService;
+            service.ProjectMaterialLookup = null;
+            service.ProjectMaterialEntryLookup = null;
         }
     }
 }

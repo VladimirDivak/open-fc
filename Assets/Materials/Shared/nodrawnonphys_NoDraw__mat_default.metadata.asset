@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fe3b056cdd68f392d8f689ac1390eac2, type: 3}
+  m_Name: nodrawnonphys_NoDraw__mat_default.metadata
+  m_EditorClassIdentifier: OpenFarCry.Importer.Editor::OpenFarCry.Importer.Editor.FcMaterialMetadata
+  SourceCgfVirtualPath: objects/buildings/m03/fort_ruin/fruin_canonplace_700dia_onestair_open.cgf
+  SourceChunkId: 10
+  SourceTableIndex: 7
+  ChunkName: nodrawnonphys(NoDraw)/mat_default
+  OverrideName: 
+  ContentHash: e1e8da75630a02c6
+  DiffuseTexturePath: 
+  NormalTexturePath: 
+  SpecularTexturePath: 
+  OpacityTexturePath: 
+  GlossTexturePath: 

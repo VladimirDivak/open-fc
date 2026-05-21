@@ -139,6 +139,41 @@ namespace OpenFarCry.Level.Editor
             return stats;
         }
 
+        // Places per-instance vegetation wrappers into an already-built scene as a temporary
+        // bake-only root. Used by the APV bake pipeline so vegetation occludes probes (the
+        // production runtime path uses FcVegetationTerrainService with no MeshRenderers).
+        public static int PlaceVegetationAuthoringWrappersInExistingScene(
+            string levelName,
+            GameObject levelRoot,
+            Terrain terrain,
+            string rootName = "Vegetation_AuthoringForBake",
+            HashSet<string> excludedCategories = null)
+        {
+            if (levelRoot == null)
+                return 0;
+
+            var supplement = FcLevelSupplementLoader.Load(levelName);
+            if (supplement == null ||
+                supplement.VegetationInstances == null || supplement.VegetationInstances.Length == 0 ||
+                supplement.VegetationTypes == null || supplement.VegetationTypes.Length == 0)
+                return 0;
+
+            var typeByIndex = new Dictionary<int, FcLevelSupplementData.VegetationTypeDesc>();
+            foreach (var t in supplement.VegetationTypes)
+            {
+                if (t.Index >= 0 && !string.IsNullOrEmpty(t.FileName))
+                    typeByIndex[t.Index] = t;
+            }
+
+            return PlaceVegetationAsAuthoringInstances(
+                supplement.VegetationInstances,
+                typeByIndex,
+                levelRoot,
+                terrain,
+                rootName,
+                excludedCategories);
+        }
+
         // V2 adapter: keeps current scene build path while layout format evolves.
         public static BuildStats RebuildFromLayoutData(
             FcLevelLayoutDataV2 layoutData,
@@ -305,11 +340,20 @@ namespace OpenFarCry.Level.Editor
             Dictionary<int, FcLevelSupplementData.VegetationTypeDesc> typeByIndex,
             GameObject levelRoot,
             Terrain terrain)
+            => PlaceVegetationAsAuthoringInstances(instances, typeByIndex, levelRoot, terrain, "Vegetation_Authoring", excludedCategories: null);
+
+        static int PlaceVegetationAsAuthoringInstances(
+            FcLevelSupplementData.VegetationInstanceDesc[] instances,
+            Dictionary<int, FcLevelSupplementData.VegetationTypeDesc> typeByIndex,
+            GameObject levelRoot,
+            Terrain terrain,
+            string rootName,
+            HashSet<string> excludedCategories)
         {
             if (instances == null || instances.Length == 0 || levelRoot == null)
                 return 0;
 
-            var root = new GameObject("Vegetation_Authoring");
+            var root = new GameObject(rootName);
             root.transform.SetParent(levelRoot.transform, worldPositionStays: false);
 
             Vector3 terrainOrigin = terrain != null ? terrain.transform.position : Vector3.zero;
@@ -317,6 +361,7 @@ namespace OpenFarCry.Level.Editor
             float terrainSizeZ = terrain != null && terrain.terrainData != null ? terrain.terrainData.size.z : 1f;
 
             int placed = 0;
+            int skippedByCategory = 0;
             for (int i = 0; i < instances.Length; i++)
             {
                 var inst = instances[i];
@@ -324,6 +369,14 @@ namespace OpenFarCry.Level.Editor
                     continue;
                 if (string.IsNullOrWhiteSpace(typeDef.FileName))
                     continue;
+
+                if (excludedCategories != null && excludedCategories.Count > 0 &&
+                    TryGetVegetationCategory(typeDef, out var category) &&
+                    excludedCategories.Contains(category))
+                {
+                    skippedByCategory++;
+                    continue;
+                }
 
                 float nx = inst.X / 65535f;
                 float nz = inst.Y / 65535f;
@@ -347,7 +400,28 @@ namespace OpenFarCry.Level.Editor
                 placed++;
             }
 
+            if (skippedByCategory > 0)
+                Debug.Log($"[FcLevelSceneBuilder] Vegetation authoring placement: placed={placed}, skippedByCategory={skippedByCategory}.");
             return placed;
+        }
+
+        static bool TryGetVegetationCategory(
+            FcLevelSupplementData.VegetationTypeDesc typeDef,
+            out string category)
+        {
+            category = null;
+            if (typeDef.Attributes == null) return false;
+            for (int i = 0; i < typeDef.Attributes.Length; i++)
+            {
+                var pair = typeDef.Attributes[i];
+                if (pair.Key != null &&
+                    string.Equals(pair.Key, "Category", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    category = pair.Value != null ? pair.Value.Trim().ToLowerInvariant() : string.Empty;
+                    return true;
+                }
+            }
+            return false;
         }
 
         // Attaches FcVegetationTerrainService to the terrain GO with serialized VirtualPaths + instance data.

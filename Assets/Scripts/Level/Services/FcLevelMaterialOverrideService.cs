@@ -74,6 +74,24 @@ namespace OpenFarCry.Level.Services
         readonly Dictionary<string, Material> _materialCache =
             new Dictionary<string, Material>(StringComparer.Ordinal);
 
+        // Baked override materials: (chunkName + overrideName) → editable level .mat asset.
+        // Built lazily from the level's FcMaterialManifest (carried by
+        // FcLevelMaterialManifestBinding). The runtime keeps Instantiating the resolved
+        // base material; this index only supplies user-editable shader knobs overlaid on
+        // top, so the baked .mat stays editable without changing visuals when untouched.
+        readonly Dictionary<string, Material> _bakedOverrideByKey =
+            new Dictionary<string, Material>(StringComparer.Ordinal);
+        bool _bakedOverrideIndexBuilt;
+
+        // Shader knobs copied from a baked override .mat onto the resolved override material.
+        // Curated whitelist: only obvious user-facing knobs, never blend/surface/channel
+        // internals — so a freshly-baked (unedited) override is a no-op overlay.
+        static readonly string[] OverlayKnobNames =
+        {
+            "_BaseColor", "_Color", "_Smoothness", "_Metallic", "_SpecColor",
+            "_EmissionColor", "_Cutoff", "_BumpScale", "_OcclusionStrength",
+        };
+
         void Awake()
         {
             Current = this;
@@ -136,6 +154,117 @@ namespace OpenFarCry.Level.Services
                     DestroyImmediate(mat);
             }
             _materialCache.Clear();
+
+            // Baked override .mat assets are persistent project assets — never destroy them.
+            _bakedOverrideByKey.Clear();
+            _bakedOverrideIndexBuilt = false;
+        }
+
+        // Pushes the level material manifest so override resolution can overlay baked,
+        // user-editable shader knobs. Called by FcLevelMaterialManifestBinding.
+        public void SetBakedOverrideManifest(FcMaterialManifest manifest)
+        {
+            _bakedOverrideByKey.Clear();
+            _bakedOverrideIndexBuilt = true;
+            if (manifest == null)
+                return;
+            BuildBakedOverrideIndex(manifest);
+        }
+
+        void BuildBakedOverrideIndex(FcMaterialManifest manifest)
+        {
+            if (manifest == null)
+                return;
+
+            var entries = manifest.Entries;
+
+            // The runtime base material name equals the DEFAULT baked .mat asset name
+            // (GetOrBuild copies projectMat.name). Map (vpath|tableIndex) → that name so
+            // the override index keys match what OverlayBakedOverrideKnobs sees at runtime.
+            var defaultNameByChunk = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (!string.IsNullOrEmpty(e.OverrideName) || e.Material == null)
+                    continue;
+                defaultNameByChunk[e.VirtualPath + "|" + e.TableIndex] = e.Material.name;
+            }
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (string.IsNullOrEmpty(e.OverrideName) || e.Material == null)
+                    continue;
+
+                // Prefer the default .mat asset name; fall back to the raw chunk name
+                // (factory path materials keep chunk.Name when no baked default exists).
+                if (!defaultNameByChunk.TryGetValue(e.VirtualPath + "|" + e.TableIndex, out var baseName) ||
+                    string.IsNullOrEmpty(baseName))
+                    baseName = e.ChunkName;
+                if (string.IsNullOrEmpty(baseName))
+                    continue;
+
+                _bakedOverrideByKey[BuildBakedOverrideKey(baseName, e.OverrideName)] = e.Material;
+            }
+        }
+
+        // Lazily resolves the level manifest from the scene's FcLevelMaterialManifestBinding
+        // when SetBakedOverrideManifest has not been called explicitly.
+        void EnsureBakedOverrideIndex()
+        {
+            if (_bakedOverrideIndexBuilt)
+                return;
+            _bakedOverrideIndexBuilt = true;
+
+            var binding = FindFirstObjectByType<FcLevelMaterialManifestBinding>();
+            if (binding != null && binding.Manifest != null)
+                BuildBakedOverrideIndex(binding.Manifest);
+        }
+
+        static string BuildBakedOverrideKey(string chunkName, string overrideName)
+            => string.Concat(NormalizeKey(chunkName), "|", NormalizeKey(overrideName));
+
+        // Overlays user-editable shader knobs from a baked override .mat onto the resolved
+        // runtime override material. No-op when no baked override exists, or when the baked
+        // override is an unedited chunk-clone (its knobs equal the base's). Shaders must
+        // match — different shaders skip the overlay to avoid mismatched property semantics.
+        void OverlayBakedOverrideKnobs(Material target, string chunkName, string overrideName)
+        {
+            if (target == null || _bakedOverrideByKey.Count == 0 ||
+                string.IsNullOrEmpty(chunkName) || string.IsNullOrEmpty(overrideName))
+                return;
+
+            if (!_bakedOverrideByKey.TryGetValue(
+                    BuildBakedOverrideKey(chunkName, overrideName), out var baked) ||
+                baked == null)
+                return;
+
+            // Link the override instance to its baked .mat so an editor tool can write
+            // Play Mode tweaks back into the asset.
+            FcRuntimeMaterialAssetLink.Register(target, baked);
+
+            if (baked.shader == null || target.shader == null || baked.shader != target.shader)
+                return;
+
+            for (int i = 0; i < OverlayKnobNames.Length; i++)
+            {
+                string prop = OverlayKnobNames[i];
+                if (!baked.HasProperty(prop) || !target.HasProperty(prop))
+                    continue;
+
+                switch (prop)
+                {
+                    case "_BaseColor":
+                    case "_Color":
+                    case "_SpecColor":
+                    case "_EmissionColor":
+                        target.SetColor(prop, baked.GetColor(prop));
+                        break;
+                    default:
+                        target.SetFloat(prop, baked.GetFloat(prop));
+                        break;
+                }
+            }
         }
 
         public bool HasResolvableOverride(string overrideName, int materialId)
@@ -229,6 +358,8 @@ namespace OpenFarCry.Level.Services
             if (slots == null || slots.Length == 0)
                 return false;
 
+            EnsureBakedOverrideIndex();
+
             bool hasOverrideToken = !string.IsNullOrWhiteSpace(overrideName);
             bool targetedAny = false;
             bool replacedAny = false;
@@ -315,9 +446,9 @@ namespace OpenFarCry.Level.Services
                 Material fb = null;
                 bool ok = false;
                 if (fallbackDesc.Name != null)
-                    ok = TryApplyTextureOverride(slots[i], fallbackDesc, scopeId, out fb);
+                    ok = TryApplyTextureOverride(slots[i], fallbackDesc, scopeId, overrideName, out fb);
                 if (!ok && !string.IsNullOrWhiteSpace(overrideName))
-                    ok = TryApplyTexturePathOverride(slots[i], overrideName, scopeId, out fb);
+                    ok = TryApplyTexturePathOverride(slots[i], overrideName, scopeId, overrideName, out fb);
 
                 if (ok && fb != null)
                 {
@@ -509,10 +640,12 @@ namespace OpenFarCry.Level.Services
 
         // Instantiates baseMaterial and applies override textures from desc.
         // Returns false if no textures resolved (nothing to override).
+        // overrideName routes the baked-override knob overlay (editable level .mat).
         bool TryApplyTextureOverride(
             Material baseMaterial,
             FcLevelSupplementData.MaterialDesc desc,
             string scopeId,
+            string overrideName,
             out Material result)
         {
             result = null;
@@ -528,15 +661,18 @@ namespace OpenFarCry.Level.Services
             string descName = string.IsNullOrWhiteSpace(desc.FullName) ? desc.Name : desc.FullName;
             result.name = $"{baseMaterial.name}_ovr_{descName}";
             CgfMaterialBuilder.ApplyResolvedTextures(result, resolved);
+            OverlayBakedOverrideKnobs(result, baseMaterial.name, overrideName);
             return true;
         }
 
         // Instantiates baseMaterial and applies a single diffuse texture from rawPath.
         // Returns false if the texture cannot be loaded.
+        // overrideName routes the baked-override knob overlay (editable level .mat).
         bool TryApplyTexturePathOverride(
             Material baseMaterial,
             string rawPath,
             string scopeId,
+            string overrideName,
             out Material result)
         {
             result = null;
@@ -567,6 +703,7 @@ namespace OpenFarCry.Level.Services
             result = UnityEngine.Object.Instantiate(baseMaterial);
             result.name = $"{baseMaterial.name}_ovrtex";
             CgfMaterialBuilder.ApplyResolvedTextures(result, resolved);
+            OverlayBakedOverrideKnobs(result, baseMaterial.name, overrideName);
             return true;
         }
 
@@ -896,7 +1033,7 @@ namespace OpenFarCry.Level.Services
                     return true;
                 }
 
-                if (TryApplyTextureOverride(baseMaterial, selectedDesc, scopeId, out material) && material != null)
+                if (TryApplyTextureOverride(baseMaterial, selectedDesc, scopeId, overrideName, out material) && material != null)
                 {
                     _materialCache[descCacheKey] = material;
                     _materialCache[slotCacheKey] = material;
@@ -907,7 +1044,7 @@ namespace OpenFarCry.Level.Services
             }
 
             if (!string.IsNullOrWhiteSpace(overrideName) &&
-                TryApplyTexturePathOverride(baseMaterial, overrideName, scopeId, out material) && material != null)
+                TryApplyTexturePathOverride(baseMaterial, overrideName, scopeId, overrideName, out material) && material != null)
             {
                 _materialCache[slotCacheKey] = material;
                 outcome = "fallback-tex-path";

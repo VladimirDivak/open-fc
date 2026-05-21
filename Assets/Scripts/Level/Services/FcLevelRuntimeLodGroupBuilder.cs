@@ -7,17 +7,21 @@ namespace OpenFarCry.Level.Services
 {
     static class FcLevelRuntimeLodGroupBuilder
     {
-        public static void Apply(
+        // Returns the brush-owned filtered LOD visual meshes (caller must Destroy them on
+        // teardown), or null when none were created.
+        public static List<Mesh> Apply(
             GameObject root,
             Renderer lod0Renderer,
             IReadOnlyList<CgfRuntimeImportResult> lodResults,
             string levelScopeId,
-            Func<Material[], int[], Material[]> materialOverrider = null)
+            Func<Material[], int[], Material[]> materialOverrider = null,
+            bool stripProxySubmeshes = false)
         {
             if (root == null || lod0Renderer == null || lodResults == null || lodResults.Count == 0)
-                return;
+                return null;
 
             var renderers = new List<Renderer>(lodResults.Count + 1) { lod0Renderer };
+            List<Mesh> filteredLodMeshes = null;
 
             for (int i = 0; i < lodResults.Count; i++)
             {
@@ -38,6 +42,24 @@ namespace OpenFarCry.Level.Services
                 meshRenderer.sharedMaterials = materialOverrider != null
                     ? materialOverrider(lodMats, result.BuildResult.SubmeshMaterialIds) ?? lodMats
                     : lodMats;
+
+                // Brush LOD0 gets proxy/no-draw submeshes stripped via
+                // FcBrushGeometryPostProcessor; mirror that here so LOD1+ do not render
+                // collision-only (NoDraw) materials. Vegetation does not strip LOD0, so it
+                // leaves stripProxySubmeshes false to keep LODs consistent with LOD0.
+                if (stripProxySubmeshes)
+                {
+                    var lodSubmeshMatIds = result.BuildResult.SubmeshMaterialIds != null
+                        ? (int[])result.BuildResult.SubmeshMaterialIds.Clone()
+                        : null;
+                    Mesh filtered = FcBrushGeometryPostProcessor.StripProxySubmeshesFromVisual(
+                        lodGo, result.BuildResult, result.ParsedFile, ref lodSubmeshMatIds);
+                    FcBrushGeometryPostProcessor.StampCacheMetadata(
+                        lodGo, brushRuntimeParity: true, lodSubmeshMatIds);
+                    if (filtered != null)
+                        (filteredLodMeshes ??= new List<Mesh>()).Add(filtered);
+                }
+
                 renderers.Add(meshRenderer);
             }
 
@@ -48,6 +70,7 @@ namespace OpenFarCry.Level.Services
             lodGroup.animateCrossFading = false;
             lodGroup.SetLODs(BuildLods(renderers));
             lodGroup.RecalculateBounds();
+            return filteredLodMeshes;
         }
 
         static LOD[] BuildLods(List<Renderer> renderers)

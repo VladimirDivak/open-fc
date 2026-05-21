@@ -95,10 +95,17 @@ namespace OpenFarCry.Importer.Cgf
         }
 
         // Optional project-asset lookup: (cgfVirtualPath, chunkTableIndex) → persistent Material.
-        // Set by editor init to return pre-baked .mat assets; null in runtime builds.
-        // When set, GetOrBuild instantiates the project asset and injects textures instead of
-        // building a material from scratch.
+        // Legacy 2-arg form. Kept for callers that don't carry an overrideName. Prefer
+        // ProjectMaterialEntryLookup, which honors the (vpath, tableIndex, overrideName)
+        // priority chain through FcMaterialManifest.SharedFallback.
         public Func<string, int, Material> ProjectMaterialLookup { get; set; }
+
+        // Entry-aware lookup: (cgfVirtualPath, chunkTableIndex, overrideName?) → manifest Entry.
+        // Returns null when no manifest has a match. When the entry is non-null, GetOrBuild
+        // Instantiates entry.Material and overlays runtime textures into the copy.
+        // overrideName comes from brush.lst, entity XML "Material" attribute or vegetation
+        // type Material — see FcLevelMaterialOverrideService for the canonical source list.
+        public Func<string, int, string, FcMaterialManifest.Entry?> ProjectMaterialEntryLookup { get; set; }
 
         public CgfMaterialImportService(
             CgfMaterialRuntimeCache cache = null,
@@ -113,6 +120,18 @@ namespace OpenFarCry.Importer.Cgf
             Mesh mesh,
             int[] submeshMaterialIds = null,
             string textureScopeId = null)
+            => ResolveSubmeshMaterials(parsedFile, mesh, submeshMaterialIds, textureScopeId, overrideName: null);
+
+        // overrideName routes the manifest lookup through (vpath, tableIndex, overrideName).
+        // Sourced from brush.lst, entity XML "Material" attribute (Library. prefix already
+        // stripped by the caller) or vegetation type Material — same name space as the
+        // bake's override sidecars. Null/empty resolves to the default material.
+        public Material[] ResolveSubmeshMaterials(
+            CgfFile parsedFile,
+            Mesh mesh,
+            int[] submeshMaterialIds,
+            string textureScopeId,
+            string overrideName)
         {
             int subCount = mesh != null ? mesh.subMeshCount : 0;
             if (subCount == 0 || parsedFile == null)
@@ -133,7 +152,7 @@ namespace OpenFarCry.Importer.Cgf
                 int matId = fromArray ? submeshMaterialIds[i] : i;
                 var chunk = ResolveLeafByFaceMatId(leaves, matId);
                 mats[i] = chunk != null
-                    ? GetOrBuild(parsedFile, chunk, textureScopeId)
+                    ? GetOrBuild(parsedFile, chunk, textureScopeId, overrideName)
                     : GetSharedFallback(textureScopeId);
 
                 if (diag)
@@ -318,6 +337,7 @@ namespace OpenFarCry.Importer.Cgf
         {
             _cache.Clear();
             _emissionMasks.Clear();
+            FcRuntimeMaterialAssetLink.Clear();
         }
 
         public void ReleaseLevelScope(string scopeId)
@@ -452,26 +472,51 @@ namespace OpenFarCry.Importer.Cgf
         }
 
         Material GetOrBuild(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)
+            => GetOrBuild(parsedFile, chunk, textureScopeId, overrideName: null);
+
+        Material GetOrBuild(
+            CgfFile parsedFile,
+            CgfMaterialChunk chunk,
+            string textureScopeId,
+            string overrideName)
         {
-            // Key by chunk identity (source file + chunk id). A given (file, chunk) always
-            // resolves to the same textures, so the cache lookup can run before any texture
-            // is loaded. Texture resolution happens inside the factory, on a miss only.
-            string key = BuildMaterialCacheKey(parsedFile, chunk);
-            var lookup = ProjectMaterialLookup;
+            // Key by chunk identity (source file + chunk id + override). A given (file,
+            // chunk, override) always resolves to the same textures, so the cache lookup
+            // can run before any texture is loaded. Texture resolution happens inside the
+            // factory, on a miss only.
+            string key = BuildMaterialCacheKey(parsedFile, chunk, overrideName);
+            var entryLookup = ProjectMaterialEntryLookup;
+            var legacyLookup = ProjectMaterialLookup;
             return _cache.GetOrCreate(key, textureScopeId, () =>
             {
                 var textures = ResolveTextures(parsedFile, chunk, textureScopeId);
                 Material mat = null;
-                if (lookup != null && !string.IsNullOrEmpty(parsedFile?.SourceVirtualPath))
+
+                if (!string.IsNullOrEmpty(parsedFile?.SourceVirtualPath))
                 {
-                    var projectMat = lookup(parsedFile.SourceVirtualPath, chunk.TableIndex);
+                    Material projectMat = null;
+                    if (entryLookup != null)
+                    {
+                        var entry = entryLookup(parsedFile.SourceVirtualPath, chunk.TableIndex, overrideName);
+                        if (entry.HasValue)
+                            projectMat = entry.Value.Material;
+                    }
+                    else if (legacyLookup != null)
+                    {
+                        projectMat = legacyLookup(parsedFile.SourceVirtualPath, chunk.TableIndex);
+                    }
+
                     if (projectMat != null)
                     {
                         mat = UnityEngine.Object.Instantiate(projectMat);
                         mat.name = projectMat.name;
                         CgfMaterialBuilder.ApplyResolvedTextures(mat, textures);
+                        // Link the instance to its source asset so an editor tool can
+                        // write Play Mode material tweaks back into the baked .mat.
+                        FcRuntimeMaterialAssetLink.Register(mat, projectMat);
                     }
                 }
+
                 if (mat == null)
                     mat = CgfMaterialBuilder.Build(chunk, textures);
 
@@ -510,12 +555,13 @@ namespace OpenFarCry.Importer.Cgf
                 mat.SetTexture("_EmissionMap", mask);
         }
 
-        static string BuildMaterialCacheKey(CgfFile parsedFile, CgfMaterialChunk chunk)
+        static string BuildMaterialCacheKey(CgfFile parsedFile, CgfMaterialChunk chunk, string overrideName = null)
         {
             string source = parsedFile != null && !string.IsNullOrEmpty(parsedFile.SourceVirtualPath)
                 ? parsedFile.SourceVirtualPath.ToLowerInvariant()
                 : "__nofile";
-            return string.Concat(source, "#", chunk.ChunkID.ToString());
+            string ov = string.IsNullOrEmpty(overrideName) ? string.Empty : overrideName.ToLowerInvariant();
+            return string.Concat(source, "#", chunk.ChunkID.ToString(), "#", ov);
         }
 
         CgfResolvedMaterialTextures ResolveTextures(CgfFile parsedFile, CgfMaterialChunk chunk, string textureScopeId)

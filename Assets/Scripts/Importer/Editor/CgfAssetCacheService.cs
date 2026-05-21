@@ -96,7 +96,7 @@ namespace OpenFarCry.Importer.Editor
                 if (dirCreated)
                     AssetDatabase.Refresh();
 
-                Unwrapping.GenerateSecondaryUVSet(mesh);
+                TryGenerateSecondaryUVSet(mesh, virtualPath);
 
                 var existingMesh = AssetDatabase.LoadAssetAtPath<Mesh>(paths.MeshPath);
                 if (existingMesh != null)
@@ -123,6 +123,34 @@ namespace OpenFarCry.Importer.Editor
             catch (Exception e)
             {
                 Debug.LogError($"[CgfImporter] Save failed: {e}");
+            }
+        }
+
+        static void TryGenerateSecondaryUVSet(Mesh mesh, string virtualPath)
+        {
+            if (mesh == null) return;
+            if (mesh.vertexCount == 0 || mesh.subMeshCount == 0)
+                return;
+
+            bool hasIndices = false;
+            for (int i = 0; i < mesh.subMeshCount; i++)
+            {
+                if (mesh.GetIndexCount(i) > 0)
+                {
+                    hasIndices = true;
+                    break;
+                }
+            }
+            if (!hasIndices)
+                return;
+
+            try
+            {
+                Unwrapping.GenerateSecondaryUVSet(mesh);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[CgfImporter] UV2 generation skipped for '{virtualPath}': {e.Message}");
             }
         }
 
@@ -236,7 +264,7 @@ namespace OpenFarCry.Importer.Editor
             }
         }
 
-        static Texture2D PersistTextureAsset(
+        internal static Texture2D PersistTextureAsset(
             Texture2D source,
             string propertyName,
             string texturesDir,
@@ -409,7 +437,7 @@ namespace OpenFarCry.Importer.Editor
             return true;
         }
 
-        static bool EnsureDirectory(string assetPath)
+        internal static bool EnsureDirectory(string assetPath)
         {
             if (string.IsNullOrEmpty(assetPath))
                 return false;

@@ -29,17 +29,23 @@ namespace OpenFarCry.Importer.Editor
 
         static void RefreshFromManifests()
         {
-            const string searchFolder = "Assets/FCData/Materials";
-            if (!AssetDatabase.IsValidFolder(searchFolder))
+            var service = CgfRuntimeImporter.MaterialService;
+
+            // Scan both the new Assets/Materials root and the legacy Assets/FCData/Materials
+            // root so unbaked-yet-in-new-layout levels keep working during the migration.
+            var searchRoots = CgfMaterialEditorBakeService.GetManifestSearchRoots();
+            if (searchRoots.Length == 0)
             {
-                CgfRuntimeImporter.MaterialService.ProjectMaterialLookup = null;
+                service.ProjectMaterialLookup = null;
+                service.ProjectMaterialEntryLookup = null;
                 return;
             }
 
-            var guids = AssetDatabase.FindAssets("t:FcMaterialManifest", new[] { searchFolder });
+            var guids = AssetDatabase.FindAssets("t:FcMaterialManifest", searchRoots);
             if (guids.Length == 0)
             {
-                CgfRuntimeImporter.MaterialService.ProjectMaterialLookup = null;
+                service.ProjectMaterialLookup = null;
+                service.ProjectMaterialEntryLookup = null;
                 return;
             }
 
@@ -52,8 +58,8 @@ namespace OpenFarCry.Importer.Editor
                     manifests.Add(manifest);
             }
 
-            CgfRuntimeImporter.MaterialService.ProjectMaterialLookup =
-                CgfMaterialManifestLookup.Build(manifests);
+            service.ProjectMaterialEntryLookup = CgfMaterialManifestLookup.BuildEntryLookup(manifests);
+            service.ProjectMaterialLookup = CgfMaterialManifestLookup.Build(manifests);
         }
     }
 }
