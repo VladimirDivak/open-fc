@@ -25,6 +25,25 @@ sysinfo.txt
 # Unity crash/debug artifacts
 *.stackdump
 crashlytics-build.properties
+mono_crash.mem.*
+mono_crash.*.json
+
+# Local debug captures (screenshots, error dumps)
+/Screenshot_*.png
+/errors/
+
+# Generated level scenes (rebuilt by the level builder)
+/Assets/Scenes/Levels/
+
+# Vendored third-party plugins (re-import from Asset Store, not tracked)
+/Assets/HTraceAO/
+/Assets/HTraceAO.meta
+/Assets/HTraceSSGI/
+/Assets/HTraceSSGI.meta
+/Assets/Plugins/Sirenix/Demos/
+/Assets/Plugins/Sirenix/Demos.meta
+/Assets/Plugins/Sirenix/Readme.txt
+/Assets/Plugins/Sirenix/Readme.txt.meta
 
 # IDE/editor local state
 .vs/
