@@ -169,6 +169,30 @@ Current behavior:
 
 Next level-loading architecture work is documented in `LEVEL_LOADING_REFACTOR_PLAN.md`.
 
+### Water Rendering
+
+Assembly: `OpenFarCry.Rendering.Water` (+ `.Editor`)
+
+Key files:
+
+- `Assets/Scripts/Rendering/Water/FcWaterSettings.cs`
+- `Assets/Scripts/Rendering/Water/FcWaterQualityTier.cs`
+- `Assets/Scripts/Rendering/Water/FcWaterSurface.cs`
+- `Assets/Scripts/Rendering/Water/FcPlanarReflectionRendererFeature.cs`
+- `Assets/Scripts/Rendering/Water/FcWaterRuntimeBootstrap.cs`
+- `Assets/Shaders/Water/FarCryWater.shader`
+- `Assets/Resources/FcWaterSettings.asset` (auto-created on first level build)
+
+Current behavior:
+
+- Ocean spawns from `FcLevelSceneBuilder.BuildWaterPlane` (editor build time) on `Water` Unity layer (auto-installed via `FcWaterLayerInstaller`), with `FcWaterSurface` MonoBehaviour and shared `FarCryWater.mat`.
+- `FcPlanarReflectionRendererFeature` subscribes to `RenderPipelineManager.beginCameraRendering`, renders a mirrored camera (oblique near plane = water surface, `GL.invertCulling`) into `_FcWaterReflectionTex` via `RenderPipeline.SubmitRenderRequest(UniversalRenderPipeline.SingleCameraRequest)`.
+- Quality tiers (Off/Low/Medium/High/Ultra) gate planar/refraction/fallback. Auto-detect from `SystemInfo.graphicsMemorySize` and `Application.isMobilePlatform`. Manual override in `FcWaterSettings`.
+- Shader keywords pushed at startup by `FcWaterRuntimeBootstrap`: `_FC_WATER_PLANAR_ON`, `_FC_WATER_REFRACTION_ON`, `_FC_WATER_FALLBACK_PROBE_ON`.
+- Refraction relies on URP `_CameraOpaqueTexture` (already enabled in `PC_RPAsset.asset`).
+
+**Manual setup required after first compile:** add `FcPlanarReflectionRendererFeature` to `Assets/Settings/PC_Renderer.asset` via the Renderer asset inspector (Add Renderer Feature). Open `OpenFarCry → Rendering → Water Settings` to edit knobs.
+
 ## Tests And Verification
 
 EditMode tests exist under `Assets/Scripts/Importer/Tests/Editor/`.

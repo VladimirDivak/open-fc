@@ -11,6 +11,8 @@ using OpenFarCry.Level.Services;
 using OpenFarCry.Level.Volumes;
 using OpenFarCry.FileSystem;
 using OpenFarCry.Importer.Texture;
+using OpenFarCry.Rendering.Water;
+using OpenFarCry.Rendering.Water.Editor;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -1073,6 +1075,9 @@ namespace OpenFarCry.Level.Editor
             }
         }
 
+        const string WaterMaterialPath = "Assets/Shaders/Water/FarCryWater.mat";
+        const string WaterShaderName = "FarCry/Water";
+
         static void BuildWaterPlane(Transform terrainRoot, int resolution, float metersPerSample, float waterLevel)
         {
             float size = (resolution - 1) * metersPerSample;
@@ -1083,14 +1088,41 @@ namespace OpenFarCry.Level.Editor
             water.transform.localScale = new Vector3(size / 10f, 1f, size / 10f);
             Object.DestroyImmediate(water.GetComponent<Collider>());
 
-            var mr = water.GetComponent<MeshRenderer>();
-            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null)
-                shader = Shader.Find("Standard");
+            int waterLayer = FcWaterLayerInstaller.EnsureLayer();
+            if (waterLayer >= 0)
+                water.layer = waterLayer;
 
-            var mat = new Material(shader) { name = "WaterFallback" };
-            mat.color = new Color(0.15f, 0.3f, 0.45f, 0.65f);
-            mr.sharedMaterial = mat;
+            FcWaterSettingsEditor.LoadOrCreateSettings();
+
+            var mr = water.GetComponent<MeshRenderer>();
+            mr.sharedMaterial = LoadOrCreateWaterMaterial();
+
+            var surface = water.AddComponent<FcWaterSurface>();
+            var so = new SerializedObject(surface);
+            so.FindProperty("waterMaterial").objectReferenceValue = mr.sharedMaterial;
+            so.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        static Material LoadOrCreateWaterMaterial()
+        {
+            var existing = AssetDatabase.LoadAssetAtPath<Material>(WaterMaterialPath);
+            if (existing != null) return existing;
+
+            var shader = Shader.Find(WaterShaderName);
+            if (shader == null)
+            {
+                Debug.LogWarning($"[FcLevelSceneBuilder] Shader '{WaterShaderName}' not found; falling back to URP/Lit.");
+                shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            }
+
+            var dir = Path.GetDirectoryName(WaterMaterialPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            var mat = new Material(shader) { name = "FarCryWater" };
+            AssetDatabase.CreateAsset(mat, WaterMaterialPath);
+            AssetDatabase.SaveAssets();
+            return mat;
         }
 
         // ── Layout data ───────────────────────────────────────────────────────────

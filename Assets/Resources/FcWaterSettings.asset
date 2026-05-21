@@ -1,0 +1,42 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 30add9392faeb60c3b8446796f779022, type: 3}
+  m_Name: FcWaterSettings
+  m_EditorClassIdentifier: OpenFarCry.Rendering.Water::OpenFarCry.Rendering.Water.FcWaterSettings
+  DefaultTier: 3
+  AutoDetectTier: 0
+  EnablePlanarReflection: 1
+  ReflectionLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  ReflectionResolution: 512
+  ReflectionHDR: 1
+  ReflectionFarClip: 0
+  ClipPlaneOffset: 0
+  ReflectShadows: 1
+  ReflectSkybox: 1
+  EnableRefraction: 1
+  DistortionStrength: 0.05
+  DepthFadeDistance: 4
+  ShallowColor: {r: 0.3, g: 0.6, b: 0.55, a: 1}
+  DeepColor: {r: 0.02, g: 0.08, b: 0.14, a: 1}
+  FresnelPower: 5
+  NormalsA: {fileID: 2800000, guid: 2def905742591c7a38d3c1f83ca97734, type: 3}
+  NormalsB: {fileID: 2800000, guid: 2def905742591c7a38d3c1f83ca97734, type: 3}
+  TilingA: {x: 0.25, y: 0.25}
+  TilingB: {x: 0.13, y: 0.13}
+  ScrollA: {x: 0.03, y: 0.02}
+  ScrollB: {x: -0.02, y: 0.04}
+  NormalStrength: 1
+  UseReflectionProbe: 0
+  FallbackCubemap: {fileID: 8900000, guid: 7a09c6edc5a18aa48ad88d95d06caaff, type: 3}
+  VerboseLogging: 0

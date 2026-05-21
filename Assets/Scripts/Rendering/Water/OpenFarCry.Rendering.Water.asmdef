@@ -1,0 +1,14 @@
+{
+    "name": "OpenFarCry.Rendering.Water",
+    "rootNamespace": "OpenFarCry.Rendering.Water",
+    "references": [
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.RenderPipelines.Core.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "noEngineReferences": false
+}

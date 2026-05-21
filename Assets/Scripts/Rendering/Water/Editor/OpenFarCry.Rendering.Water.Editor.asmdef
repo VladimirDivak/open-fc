@@ -1,13 +1,9 @@
 {
-    "name": "OpenFarCry.Level.Editor",
-    "rootNamespace": "OpenFarCry.Level.Editor",
+    "name": "OpenFarCry.Rendering.Water.Editor",
+    "rootNamespace": "OpenFarCry.Rendering.Water.Editor",
     "references": [
-        "OpenFarCry.Level",
-        "OpenFarCry.FileSystem",
-        "OpenFarCry.Importer",
-        "OpenFarCry.Importer.Editor",
         "OpenFarCry.Rendering.Water",
-        "OpenFarCry.Rendering.Water.Editor",
+        "Unity.RenderPipelines.Universal.Runtime",
         "Unity.RenderPipelines.Core.Runtime",
         "Unity.RenderPipelines.Core.Editor"
     ],
