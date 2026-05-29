@@ -6,12 +6,13 @@ namespace OpenFarCry.Rendering.Water
 {
     public sealed class FcPlanarReflectionRendererFeature : ScriptableRendererFeature
     {
+        const float MatrixEpsilon = 1e-4f;
+
         static readonly int s_ReflectionTexId = Shader.PropertyToID("_FcWaterReflectionTex");
 
-        Camera _reflectionCam;
-        RenderTexture _rt;
-        int _rtResolution;
-        bool _rtHDR;
+        readonly FcReflectionCache _cache = new FcReflectionCache();
+        readonly Plane[] _frustumPlanes = new Plane[6];
+        int _lastGcFrame = -1;
         bool _subscribed;
 
         public override void Create()
@@ -22,23 +23,7 @@ namespace OpenFarCry.Rendering.Water
         protected override void Dispose(bool disposing)
         {
             Unsubscribe();
-            if (_reflectionCam != null)
-            {
-                if (Application.isPlaying)
-                    Destroy(_reflectionCam.gameObject);
-                else
-                    DestroyImmediate(_reflectionCam.gameObject);
-                _reflectionCam = null;
-            }
-            if (_rt != null)
-            {
-                _rt.Release();
-                if (Application.isPlaying)
-                    Destroy(_rt);
-                else
-                    DestroyImmediate(_rt);
-                _rt = null;
-            }
+            _cache.ReleaseAll();
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
@@ -79,64 +64,116 @@ namespace OpenFarCry.Rendering.Water
             if (srcCam.transform.position.y < surface.WaterLevelY + 0.001f)
                 return; // camera below water: skip planar reflection (would mirror upward)
 
+            // P1 — frustum cull: skip entirely if the water surface AABB is outside the source frustum.
+            GeometryUtility.CalculateFrustumPlanes(srcCam, _frustumPlanes);
+            if (!GeometryUtility.TestPlanesAABB(_frustumPlanes, surface.WorldBounds))
+                return;
+
+            // P3 — drop views whose source cam was destroyed (once per frame).
+            if (Time.frameCount != _lastGcFrame)
+            {
+                _cache.CollectGarbage();
+                _lastGcFrame = Time.frameCount;
+            }
+
             int res = FcWaterQualityTierResolver.ReflectionResolution(tier, settings);
             float aspect = srcCam.aspect > 0f ? srcCam.aspect : 16f / 9f;
-            EnsureRT(res, aspect, settings.ReflectionHDR);
-            EnsureReflectionCamera(srcCam, settings);
 
-            CopyCameraData(srcCam, _reflectionCam, settings);
+            var view = _cache.GetOrCreate(srcCam);
+            EnsureRT(view, res, aspect, settings.ReflectionHDR);
+            EnsureReflectionCamera(view, srcCam, settings);
+
+            CopyCameraData(srcCam, view.MirrorCam, settings);
             // Exclude the "Water" layer to prevent recursive self-reflection. Only effective if the layer exists
             // AND the water GO is on it (BuildWaterPlane auto-installs and assigns). Layer 0 (Default) is never
             // excluded here because that would mask out most of the scene.
             int waterLayer = LayerMask.NameToLayer("Water");
             if (waterLayer > 0)
-                _reflectionCam.cullingMask &= ~(1 << waterLayer);
+                view.MirrorCam.cullingMask &= ~(1 << waterLayer);
             else if (surface.gameObject.layer > 0)
-                _reflectionCam.cullingMask &= ~(1 << surface.gameObject.layer);
-            SetupMirrorMatrices(srcCam, surface, settings);
+                view.MirrorCam.cullingMask &= ~(1 << surface.gameObject.layer);
+            SetupMirrorMatrices(srcCam, view.MirrorCam, surface, settings);
+
+            // P2 — temporal reuse: if the source view/projection is unchanged since the last render and the RT
+            // already holds valid content, skip the mirror render and rebind the cached RT.
+            if (settings.TemporalReuse && view.HasRendered &&
+                MatrixApprox(view.LastView, srcCam.worldToCameraMatrix) &&
+                MatrixApprox(view.LastProj, srcCam.projectionMatrix))
+            {
+                Shader.SetGlobalTexture(s_ReflectionTexId, view.Rt);
+                return;
+            }
 
             if (settings.VerboseLogging)
             {
                 float expectedMirrorY = 2f * surface.WaterLevelY - srcCam.transform.position.y;
                 Debug.Log(
-                    $"[FcWater] srcCam=({srcCam.transform.position}) waterY={surface.WaterLevelY:F2} " +
-                    $"mirrorCamPos=({_reflectionCam.transform.position}) expectedMirrorY={expectedMirrorY:F2} " +
-                    $"srcCamFwd={srcCam.transform.forward} mirrorFwd={_reflectionCam.transform.forward} " +
-                    $"RT={_rt.width}x{_rt.height} aspect={srcCam.aspect:F2}");
+                    $"[FcWater] srcCam={srcCam.name}({srcCam.transform.position}) waterY={surface.WaterLevelY:F2} " +
+                    $"mirrorCamPos=({view.MirrorCam.transform.position}) expectedMirrorY={expectedMirrorY:F2} " +
+                    $"RT={view.Rt.width}x{view.Rt.height} aspect={srcCam.aspect:F2}");
             }
 
-            var request = new UniversalRenderPipeline.SingleCameraRequest { destination = _rt };
-            if (!RenderPipeline.SupportsRenderRequest(_reflectionCam, request))
+            var request = new UniversalRenderPipeline.SingleCameraRequest { destination = view.Rt };
+            if (!RenderPipeline.SupportsRenderRequest(view.MirrorCam, request))
                 return;
 
+            // P4 — render the reflection cheaper than the main cam: pull LODs in, optionally cut shadows.
+            var urp = GraphicsSettings.currentRenderPipeline as UniversalRenderPipelineAsset;
+            float prevLodBias = QualitySettings.lodBias;
+            int prevMaxLod = QualitySettings.maximumLODLevel;
+            float prevShadowDist = urp != null ? urp.shadowDistance : 0f;
             bool prevInvert = GL.invertCulling;
+
+            QualitySettings.lodBias = prevLodBias / Mathf.Max(1f, settings.ReflectionLodBias);
+            if (settings.ReflectionMaximumLODLevel > 0)
+                QualitySettings.maximumLODLevel = Mathf.Max(prevMaxLod, settings.ReflectionMaximumLODLevel);
+            if (urp != null && settings.ReflectShadows)
+                urp.shadowDistance = settings.ReflectionMaxShadowDistance;
             GL.invertCulling = true;
             try
             {
-                RenderPipeline.SubmitRenderRequest(_reflectionCam, request);
+                RenderPipeline.SubmitRenderRequest(view.MirrorCam, request);
             }
             finally
             {
                 GL.invertCulling = prevInvert;
+                QualitySettings.lodBias = prevLodBias;
+                QualitySettings.maximumLODLevel = prevMaxLod;
+                if (urp != null && settings.ReflectShadows)
+                    urp.shadowDistance = prevShadowDist;
             }
 
-            Shader.SetGlobalTexture(s_ReflectionTexId, _rt);
+            view.LastView = srcCam.worldToCameraMatrix;
+            view.LastProj = srcCam.projectionMatrix;
+            view.HasRendered = true;
+
+            Shader.SetGlobalTexture(s_ReflectionTexId, view.Rt);
         }
 
-        void EnsureRT(int resolution, float aspect, bool hdr)
+        static bool MatrixApprox(Matrix4x4 a, Matrix4x4 b)
+        {
+            for (int i = 0; i < 16; i++)
+                if (Mathf.Abs(a[i] - b[i]) > MatrixEpsilon)
+                    return false;
+            return true;
+        }
+
+        void EnsureRT(FcReflectionView view, int resolution, float aspect, bool hdr)
         {
             int height = Mathf.Max(64, Mathf.RoundToInt(resolution / aspect));
-            if (_rt != null && _rt.width == resolution && _rt.height == height && _rtHDR == hdr)
+            if (view.Rt != null && view.RtWidth == resolution && view.RtHeight == height && view.RtHDR == hdr)
                 return;
 
-            if (_rt != null)
+            if (view.Rt != null)
             {
-                _rt.Release();
-                if (Application.isPlaying) Destroy(_rt); else DestroyImmediate(_rt);
+                view.Rt.Release();
+                if (Application.isPlaying) Destroy(view.Rt); else DestroyImmediate(view.Rt);
             }
 
-            var format = hdr ? RenderTextureFormat.RGB111110Float : RenderTextureFormat.ARGB32;
-            _rt = new RenderTexture(resolution, height, 24, format, RenderTextureReadWrite.Default)
+            // P4/P28 — HDR format with graceful fallback when the GPU lacks RGB111110Float support.
+            bool hdrOk = hdr && SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.RGB111110Float);
+            var format = hdrOk ? RenderTextureFormat.RGB111110Float : RenderTextureFormat.ARGB32;
+            view.Rt = new RenderTexture(resolution, height, 24, format, RenderTextureReadWrite.Default)
             {
                 name = "FcWater_PlanarReflection",
                 useMipMap = true,
@@ -146,24 +183,25 @@ namespace OpenFarCry.Rendering.Water
                 antiAliasing = 1,
                 hideFlags = HideFlags.HideAndDontSave
             };
-            _rt.Create();
-            _rtResolution = resolution;
-            _rtHDR = hdr;
+            view.Rt.Create();
+            view.RtWidth = resolution;
+            view.RtHeight = height;
+            view.RtHDR = hdrOk;
         }
 
-        void EnsureReflectionCamera(Camera src, FcWaterSettings settings)
+        void EnsureReflectionCamera(FcReflectionView view, Camera src, FcWaterSettings settings)
         {
-            if (_reflectionCam != null) return;
+            if (view.MirrorCam != null) return;
 
-            var go = new GameObject("FcWater_ReflectionCam")
+            var go = new GameObject($"FcWater_ReflectionCam ({src.name})")
             {
                 hideFlags = HideFlags.HideAndDontSave
             };
-            _reflectionCam = go.AddComponent<Camera>();
+            view.MirrorCam = go.AddComponent<Camera>();
             go.AddComponent<FcReflectionCameraTag>();
 
-            var data = _reflectionCam.GetUniversalAdditionalCameraData();
-            _reflectionCam.enabled = false;
+            var data = view.MirrorCam.GetUniversalAdditionalCameraData();
+            view.MirrorCam.enabled = false;
             data.renderShadows = settings.ReflectShadows;
             data.renderPostProcessing = false;
             data.requiresColorOption = CameraOverrideOption.Off;
@@ -179,6 +217,7 @@ namespace OpenFarCry.Rendering.Water
             dst.cullingMask = settings.ReflectionLayers.value;
             dst.allowHDR = settings.ReflectionHDR;
             dst.allowMSAA = false;
+            dst.useOcclusionCulling = false; // P4 — overridden view matrix breaks occlusion query anyway.
             dst.clearFlags = settings.ReflectSkybox ? CameraClearFlags.Skybox : CameraClearFlags.SolidColor;
             if (settings.ReflectionFarClip > 0f)
                 dst.farClipPlane = settings.ReflectionFarClip;
@@ -191,7 +230,7 @@ namespace OpenFarCry.Rendering.Water
             dstData.requiresDepthOption = CameraOverrideOption.Off;
         }
 
-        void SetupMirrorMatrices(Camera src, FcWaterSurface surface, FcWaterSettings settings)
+        void SetupMirrorMatrices(Camera src, Camera mirror, FcWaterSurface surface, FcWaterSettings settings)
         {
             var planeNormal = Vector3.up;
             float planeY = surface.WaterLevelY;
@@ -206,30 +245,30 @@ namespace OpenFarCry.Rendering.Water
             // Approximate transform (for editor display + culling); the exact view comes from worldToCameraMatrix.
             Vector3 reflectedPos = reflectionMatrix.MultiplyPoint(src.transform.position);
             Vector3 reflectedForward = Vector3.Reflect(src.transform.forward, planeNormal);
-            _reflectionCam.transform.position = reflectedPos;
-            _reflectionCam.transform.rotation = Quaternion.LookRotation(reflectedForward, Vector3.up);
+            mirror.transform.position = reflectedPos;
+            mirror.transform.rotation = Quaternion.LookRotation(reflectedForward, Vector3.up);
 
             // Exact reflected view matrix overrides Unity's transform-derived computation.
             // Quaternions cannot represent the left-handed reflected basis, so we must override.
-            _reflectionCam.worldToCameraMatrix = src.worldToCameraMatrix * reflectionMatrix;
+            mirror.worldToCameraMatrix = src.worldToCameraMatrix * reflectionMatrix;
 
             // Oblique near-plane clip in CAMERA space (use the overridden view matrix).
             // For a mirror cam below the water plane, world-up under mirror.worldToCameraMatrix maps to
             // cam-space -Y; CalculateObliqueMatrix keeps the half-space the normal points to, which is the
             // hemisphere containing above-water world geometry. No sign flip needed.
-            Vector3 camSpacePos = _reflectionCam.worldToCameraMatrix.MultiplyPoint(planePoint);
-            Vector3 camSpaceNormal = _reflectionCam.worldToCameraMatrix.MultiplyVector(planeNormal).normalized;
+            Vector3 camSpacePos = mirror.worldToCameraMatrix.MultiplyPoint(planePoint);
+            Vector3 camSpaceNormal = mirror.worldToCameraMatrix.MultiplyVector(planeNormal).normalized;
             var clipPlane = new Vector4(camSpaceNormal.x, camSpaceNormal.y, camSpaceNormal.z,
                 -Vector3.Dot(camSpacePos, camSpaceNormal));
 
             // Build base projection from src (CopyFrom already copied fov/near/far/aspect), then make oblique.
-            _reflectionCam.ResetProjectionMatrix();
-            _reflectionCam.projectionMatrix = _reflectionCam.CalculateObliqueMatrix(clipPlane);
+            mirror.ResetProjectionMatrix();
+            mirror.projectionMatrix = mirror.CalculateObliqueMatrix(clipPlane);
 
             // Frustum culling normally derives from the transform; since our view matrix is overridden
             // (and quaternions cannot represent the reflected basis), we must override cullingMatrix too
             // so URP renders everything the reflected camera actually sees, not the transform's view.
-            _reflectionCam.cullingMatrix = _reflectionCam.projectionMatrix * _reflectionCam.worldToCameraMatrix;
+            mirror.cullingMatrix = mirror.projectionMatrix * mirror.worldToCameraMatrix;
         }
 
         static Matrix4x4 CalculateReflectionMatrix(Vector3 n, float d)

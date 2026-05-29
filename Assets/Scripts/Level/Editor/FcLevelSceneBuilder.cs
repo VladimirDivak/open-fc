@@ -1081,12 +1081,19 @@ namespace OpenFarCry.Level.Editor
         static void BuildWaterPlane(Transform terrainRoot, int resolution, float metersPerSample, float waterLevel)
         {
             float size = (resolution - 1) * metersPerSample;
-            var water = GameObject.CreatePrimitive(PrimitiveType.Plane);
-            water.name = "Water";
+            var settings = FcWaterSettings.Instance;
+            int cells = settings != null ? Mathf.Clamp(settings.WaveGridResolution, 2, 254) : 128;
+
+            // Subdivided grid (P11): primitive Plane is too coarse for Gerstner vertex displacement.
+            // Mesh spans 0..size in local XZ; placed so world coverage matches the terrain footprint.
+            var water = new GameObject("Water");
             water.transform.SetParent(terrainRoot, worldPositionStays: false);
-            water.transform.localPosition = new Vector3(size * 0.5f, waterLevel, size * 0.5f);
-            water.transform.localScale = new Vector3(size / 10f, 1f, size / 10f);
-            Object.DestroyImmediate(water.GetComponent<Collider>());
+            water.transform.localPosition = new Vector3(0f, waterLevel, 0f);
+            water.transform.localScale = Vector3.one;
+
+            var mf = water.AddComponent<MeshFilter>();
+            mf.sharedMesh = BuildWaterGridMesh(size, cells);
+            var mr = water.AddComponent<MeshRenderer>();
 
             int waterLayer = FcWaterLayerInstaller.EnsureLayer();
             if (waterLayer >= 0)
@@ -1094,13 +1101,62 @@ namespace OpenFarCry.Level.Editor
 
             FcWaterSettingsEditor.LoadOrCreateSettings();
 
-            var mr = water.GetComponent<MeshRenderer>();
             mr.sharedMaterial = LoadOrCreateWaterMaterial();
 
             var surface = water.AddComponent<FcWaterSurface>();
             var so = new SerializedObject(surface);
             so.FindProperty("waterMaterial").objectReferenceValue = mr.sharedMaterial;
             so.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        // Builds an upward-facing (cells×cells) tessellated grid in local space [0..size] on XZ.
+        // Winding faces +Y under Cull Back. Index format stays 16-bit (cells clamped to 254).
+        static Mesh BuildWaterGridMesh(float size, int cells)
+        {
+            int vpr = cells + 1;
+            int vcount = vpr * vpr;
+            var verts = new Vector3[vcount];
+            var normals = new Vector3[vcount];
+            var uvs = new Vector2[vcount];
+            var tangents = new Vector4[vcount];
+            float step = size / cells;
+
+            for (int z = 0; z < vpr; z++)
+            {
+                for (int x = 0; x < vpr; x++)
+                {
+                    int idx = z * vpr + x;
+                    verts[idx] = new Vector3(x * step, 0f, z * step);
+                    normals[idx] = Vector3.up;
+                    uvs[idx] = new Vector2((float)x / cells, (float)z / cells);
+                    tangents[idx] = new Vector4(1f, 0f, 0f, -1f);
+                }
+            }
+
+            var tris = new int[cells * cells * 6];
+            int t = 0;
+            for (int z = 0; z < cells; z++)
+            {
+                for (int x = 0; x < cells; x++)
+                {
+                    int bl = z * vpr + x;
+                    int br = bl + 1;
+                    int tl = bl + vpr;
+                    int tr = tl + 1;
+                    tris[t++] = bl; tris[t++] = tl; tris[t++] = br;
+                    tris[t++] = br; tris[t++] = tl; tris[t++] = tr;
+                }
+            }
+
+            var mesh = new Mesh { name = "FcWaterGrid" };
+            mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt16;
+            mesh.vertices = verts;
+            mesh.normals = normals;
+            mesh.uv = uvs;
+            mesh.tangents = tangents;
+            mesh.triangles = tris;
+            mesh.RecalculateBounds();
+            return mesh;
         }
 
         static Material LoadOrCreateWaterMaterial()

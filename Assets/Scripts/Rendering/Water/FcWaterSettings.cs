@@ -22,6 +22,16 @@ namespace OpenFarCry.Rendering.Water
         public bool ReflectShadows = false;
         public bool ReflectSkybox = true;
 
+        [Header("Reflection Performance")]
+        [Tooltip("Skip rebuilding the reflection RT when the source camera view/projection is unchanged (P2).")]
+        public bool TemporalReuse = true;
+        [Tooltip("Divides QualitySettings.lodBias while rendering the reflection cam. 2 = LODs switch twice as early (P4).")]
+        [Min(1f)] public float ReflectionLodBias = 2f;
+        [Tooltip("Forces maximum LOD level while rendering the reflection cam (drops the most detailed LODs). 0 = no change.")]
+        [Min(0)] public int ReflectionMaximumLODLevel = 1;
+        [Tooltip("Shadow distance used while rendering the reflection cam, only when ReflectShadows is on. 0 = none.")]
+        [Min(0f)] public float ReflectionMaxShadowDistance = 0f;
+
         [Header("Refraction")]
         public bool EnableRefraction = true;
         [Range(0f, 1f)] public float DistortionStrength = 0.05f;
@@ -40,6 +50,8 @@ namespace OpenFarCry.Rendering.Water
         public Vector2 ScrollA = new Vector2(0.03f, 0.02f);
         public Vector2 ScrollB = new Vector2(-0.02f, 0.04f);
         [Range(0f, 4f)] public float NormalStrength = 1f;
+        [Tooltip("Vertex grid resolution per side for the ocean mesh (Gerstner displacement, P11). Higher = smoother swell, more verts. Clamped to keep a 16-bit index buffer.")]
+        [Range(2, 254)] public int WaveGridResolution = 128;
 
         [Header("Fallback")]
         public bool UseReflectionProbe = true;
