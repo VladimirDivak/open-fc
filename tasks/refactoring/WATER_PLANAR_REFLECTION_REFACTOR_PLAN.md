@@ -1,7 +1,13 @@
 # Water Planar Reflection — Optimization & Improvement Plan
 
 Date: 2026-05-21
-Status: not started — proposed after initial planar reflection landed.
+Status: in progress — P1–P6 and P9–P11 landed (2026-05-29). Remaining: P7, P8, P12–P15. See Update notes below.
+
+> **Update 2026-05-29: P1–P5 sprint landed (perf/robustness).** Implemented: frustum cull via `FcWaterSurface.WorldBounds` + `TestPlanesAABB` (P1); temporal reuse comparing source view/proj with new `FcReflectionCache` (P2); per-source-camera mirror cam + RT pool replacing single global state (P3); reflection LOD/shadow downgrade via temp `QualitySettings.lodBias`/`maximumLODLevel`/`shadowDistance` + `useOcclusionCulling=false` + HDR format fallback (P4); stencil bit 16 write pass in `FarCryWater.shader` + CLAUDE.md reservation (P5). Deferred within these phases: P4 decal exclusion (needs dedicated renderer index), P5 reflection re-sample/clip resolve. Remaining NOT STARTED: P6–P15 (SSPR, Volume, underwater, foam, Beer-Lambert/GGX, Gerstner, caustics, editor preview/profiler, bake, tessellation).
+
+> **Update 2026-05-29 (2): P9–P11 visual sprint landed.** `FarCryWater.shader` rewritten: Gerstner vertex displacement (4 golden-angle waves, analytic TBN, `_FC_WATER_GERSTNER_ON` gated to High/Ultra by `FcWaterRuntimeBootstrap`) with `waveHeight` passed to fragment (P11); Beer-Lambert per-channel `exp(-_ExtinctionRGB*depth)` tint toward `_DeepColor` + GGX sun glint replacing Blinn-Phong (P10); shoreline (depth-fade) + crest (waveHeight threshold) foam with panning `_FoamTexture` (P9). `FcLevelSceneBuilder.BuildWaterPlane` now builds a subdivided grid mesh (`FcWaterSettings.WaveGridResolution`, default 128, 16-bit indices) instead of the primitive Plane. Visual params live on the material asset (not synced from settings). Deferred: P9 intersection/wake foam (needs per-object depth).
+
+> **Update 2026-05-29 (3): P6 SSPR landed (isolated behind new tier).** New `FcSsprCompute.compute` (KClear/KProject/KResolve, InterlockedMin atomic hash, reversed-Z, no-roll column assumption) + `FcSsprRendererFeature.cs` (RenderGraph compute pass at BeforeRenderingTransparents, binds result to global `_FcWaterReflectionTex` via `SetGlobalTextureAfterPass`). New `FcWaterQualityTier.Sspr` (appended = 5, keeps serialized ints stable) with helpers `UsesSspr`/`UsesReflectionTexture`; bootstrap drives sampling+Gerstner keywords off `UsesReflectionTexture`. No shader change — SSPR reuses the planar sampling branch. Zero risk to default tiers (only `Sspr` activates it). **Needs:** in-Unity compile verification (RenderGraph API field/overload names: `TextureDesc.format`, handle→param binding) + manual add of feature to `PC_Renderer.asset` + assign `FcSsprCompute.compute`. Limits: no offscreen reflections, no camera roll.
 
 ## Context
 
@@ -76,17 +82,17 @@ Distilled from URP/HDRP samples, Unity Boat Attack project, Crytek tech-blog (Cr
 
 Phases ordered by ROI (perf wins first, then visual, then tooling). Each is independent and revertable.
 
-- [ ] P1 — Frustum cull + visibility skip (cheapest, biggest win on inland missions)
-- [ ] P2 — Temporal reuse (skip render when main cam stationary)
-- [ ] P3 — Per-camera RT pool + per-camera mirror cam
-- [ ] P4 — Reflection cam LOD/shadow/decal downgrade
-- [ ] P5 — Stencil mask water area
-- [ ] P6 — SSPR alternative path (new tier between Medium and High)
+- [x] P1 — Frustum cull + visibility skip (cheapest, biggest win on inland missions) — done 2026-05-29
+- [x] P2 — Temporal reuse (skip render when main cam stationary) — done 2026-05-29
+- [x] P3 — Per-camera RT pool + per-camera mirror cam — done 2026-05-29
+- [x] P4 — Reflection cam LOD/shadow downgrade — done 2026-05-29 (decal exclusion deferred: needs dedicated renderer index)
+- [x] P5 — Stencil mask water area — done 2026-05-29 (write pass + bit 16 reserved; reflection re-sample/clip resolve deferred)
+- [x] P6 — SSPR alternative path (new tier) — done 2026-05-29 (needs in-Unity compile pass + manual feature add; no-roll/offscreen limits documented)
 - [ ] P7 — Volume system integration (per-area overrides)
 - [ ] P8 — Underwater rendering path (post + shader branch)
-- [ ] P9 — Shoreline + intersection + crest foam
-- [ ] P10 — Beer-Lambert depth absorption + GGX sun specular
-- [ ] P11 — Gerstner waves (vertex offset, no tess)
+- [x] P9 — Shoreline + crest foam — done 2026-05-29 (intersection/wake foam deferred: needs per-object depth)
+- [x] P10 — Beer-Lambert depth absorption + GGX sun specular — done 2026-05-29
+- [x] P11 — Gerstner waves (vertex offset, no tess) — done 2026-05-29
 - [ ] P12 — Caustics projection
 - [ ] P13 — Editor preview + profiler markers + Scene-view opt-in
 - [ ] P14 — Reflection bake mode (static cubemap capture for cinematics)
