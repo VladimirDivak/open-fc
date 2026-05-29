@@ -1,0 +1,98 @@
+// Screen-Space Planar Reflection (P6).
+// Reflects opaque scene geometry across a horizontal water plane into a screen-space RT,
+// consumed by FarCryWater.shader through the same _FcWaterReflectionTex as the planar path.
+//
+// Limitations (documented):
+//  - Cannot reflect geometry outside the camera frustum (no offscreen horizon mountains).
+//  - Source-column == reflected-column assumption holds only for non-rolled cameras (FPS).
+#pragma kernel KClear
+#pragma kernel KProject
+#pragma kernel KResolve
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+RWStructuredBuffer<uint> _HashBuffer;
+RWTexture2D<float4>      _ReflectionResult;
+Texture2D<float>        _SsprDepth;
+Texture2D<float4>       _SsprColor;
+SamplerState            sampler_LinearClamp;
+
+float4x4 _SsprInvVP;
+float4x4 _SsprVP;
+float4   _SsprRTSize;     // x=W, y=H, z=1/W, w=1/H
+float    _SsprWaterHeight;
+
+#define SSPR_THREADS 8
+#define SSPR_INVALID 0xFFFFFFFF
+
+[numthreads(SSPR_THREADS, SSPR_THREADS, 1)]
+void KClear(uint3 id : SV_DispatchThreadID)
+{
+    uint W = (uint)_SsprRTSize.x;
+    uint H = (uint)_SsprRTSize.y;
+    if (id.x >= W || id.y >= H) return;
+    _HashBuffer[id.y * W + id.x] = SSPR_INVALID;
+    _ReflectionResult[id.xy] = float4(0, 0, 0, 0);
+}
+
+[numthreads(SSPR_THREADS, SSPR_THREADS, 1)]
+void KProject(uint3 id : SV_DispatchThreadID)
+{
+    uint W = (uint)_SsprRTSize.x;
+    uint H = (uint)_SsprRTSize.y;
+    if (id.x >= W || id.y >= H) return;
+
+    float2 uv = (float2(id.xy) + 0.5) * _SsprRTSize.zw;
+    float deviceDepth = _SsprDepth.SampleLevel(sampler_LinearClamp, uv, 0).r;
+    if (deviceDepth <= 0.0) return; // reversed-Z: 0 = far / sky
+
+    // Reconstruct world position from device depth.
+    float4 ndc = float4(uv * 2.0 - 1.0, deviceDepth, 1.0);
+#if UNITY_UV_STARTS_AT_TOP
+    ndc.y = -ndc.y;
+#endif
+    float4 worldH = mul(_SsprInvVP, ndc);
+    float3 worldPos = worldH.xyz / worldH.w;
+
+    if (worldPos.y <= _SsprWaterHeight) return; // only reflect geometry above water
+
+    // Mirror across the water plane and reproject.
+    float3 reflWorld = float3(worldPos.x, 2.0 * _SsprWaterHeight - worldPos.y, worldPos.z);
+    float4 clip = mul(_SsprVP, float4(reflWorld, 1.0));
+    if (clip.w <= 0.0) return;
+    float3 ndcR = clip.xyz / clip.w;
+    float2 uvR = ndcR.xy * 0.5 + 0.5;
+#if UNITY_UV_STARTS_AT_TOP
+    uvR.y = 1.0 - uvR.y;
+#endif
+    if (uvR.x < 0.0 || uvR.x > 1.0 || uvR.y < 0.0 || uvR.y > 1.0) return;
+
+    uint2 rID = uint2(uvR * float2(W, H));
+    if (rID.x >= W || rID.y >= H) return;
+
+    // Nearer reflected fragment wins. Reversed-Z: larger ndcR.z = nearer, so key on (1-z).
+    uint depthKey = (uint)(saturate(1.0 - ndcR.z) * 65535.0);
+    uint packed = (depthKey << 16) | (id.y & 0xFFFF);
+    InterlockedMin(_HashBuffer[rID.y * W + rID.x], packed);
+}
+
+[numthreads(SSPR_THREADS, SSPR_THREADS, 1)]
+void KResolve(uint3 id : SV_DispatchThreadID)
+{
+    uint W = (uint)_SsprRTSize.x;
+    uint H = (uint)_SsprRTSize.y;
+    if (id.x >= W || id.y >= H) return;
+
+    uint packed = _HashBuffer[id.y * W + id.x];
+    if (packed == SSPR_INVALID)
+    {
+        _ReflectionResult[id.xy] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    uint sy = packed & 0xFFFF;
+    // No-roll assumption: source column == reflected column.
+    float2 srcUV = (float2(id.x, sy) + 0.5) * _SsprRTSize.zw;
+    float3 col = _SsprColor.SampleLevel(sampler_LinearClamp, srcUV, 0).rgb;
+    _ReflectionResult[id.xy] = float4(col, 1.0);
+}

@@ -7,6 +7,7 @@ namespace OpenFarCry.Rendering.Water
         public const string KeywordPlanar = "_FC_WATER_PLANAR_ON";
         public const string KeywordRefraction = "_FC_WATER_REFRACTION_ON";
         public const string KeywordFallbackProbe = "_FC_WATER_FALLBACK_PROBE_ON";
+        public const string KeywordGerstner = "_FC_WATER_GERSTNER_ON";
 
         static readonly int s_FallbackCubemapId = Shader.PropertyToID("_FcWaterFallbackCubemap");
 
@@ -26,10 +27,14 @@ namespace OpenFarCry.Rendering.Water
             var settings = FcWaterSettings.Instance;
             ActiveTier = FcWaterQualityTierResolver.Resolve(settings);
 
-            SetKeyword(KeywordPlanar, FcWaterQualityTierResolver.UsesPlanar(ActiveTier));
+            // Sampling keyword fires for any tier that produces a screen-space reflection RT
+            // (mirror planar High/Ultra OR screen-space SSPR), since both fill _FcWaterReflectionTex.
+            SetKeyword(KeywordPlanar, FcWaterQualityTierResolver.UsesReflectionTexture(ActiveTier));
             SetKeyword(KeywordRefraction, FcWaterQualityTierResolver.UsesRefraction(ActiveTier));
             SetKeyword(KeywordFallbackProbe,
                 FcWaterQualityTierResolver.UsesProbeFallback(ActiveTier) && settings.UseReflectionProbe);
+            // Gerstner vertex displacement on the reflection-texture tiers (High/Ultra/Sspr) — heavy on the vertex stage.
+            SetKeyword(KeywordGerstner, FcWaterQualityTierResolver.UsesReflectionTexture(ActiveTier));
 
             if (settings.FallbackCubemap != null)
                 Shader.SetGlobalTexture(s_FallbackCubemapId, settings.FallbackCubemap);
