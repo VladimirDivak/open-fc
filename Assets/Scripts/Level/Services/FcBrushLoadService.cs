@@ -167,6 +167,10 @@ namespace OpenFarCry.Level.Services
             catch (OperationCanceledException) { }
             finally
             {
+                // Guarantee the state below is only ever touched from the main thread,
+                // regardless of which thread the try block's exception/cancellation
+                // surfaced on (imports can throw off a pool thread).
+                await UniTask.SwitchToMainThread(CancellationToken.None);
                 _activeCount--;
                 double elapsed = sw.Elapsed.TotalMilliseconds;
                 _report.RecordBrushLoad(success, elapsed);

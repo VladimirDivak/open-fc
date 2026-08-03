@@ -89,6 +89,11 @@ namespace OpenFarCry.Importer.Texture
         readonly Dictionary<string, int> _ddsFormatFailureCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         readonly HashSet<string> _warnedMissingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         readonly HashSet<string> _warnedDecodePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Guards every field above plus the plain counters below: TryLoadWithInfoAsync's
+        // continuations are not guaranteed to resume on the main thread, so the fan-out
+        // preload in CgfMaterialImportService can touch these from multiple pool threads
+        // concurrently.
+        readonly object _diagnosticsLock = new object();
         int _successfulLoadCount;
         int _unsupportedPathCount;
         int _readFailureCount;
@@ -170,7 +175,7 @@ namespace OpenFarCry.Importer.Texture
 
             if (!_resourceService.IsSupportedVirtualPath(virtualPath))
             {
-                _unsupportedPathCount++;
+                lock (_diagnosticsLock) { _unsupportedPathCount++; }
                 return false;
             }
 
@@ -191,14 +196,14 @@ namespace OpenFarCry.Importer.Texture
             }
             catch (Exception e)
             {
-                _readFailureCount++;
+                lock (_diagnosticsLock) { _readFailureCount++; }
                 LogMissingPath(normalizedVirtualPath, e.Message);
                 return false;
             }
 
             if (bytes == null || bytes.Length == 0)
             {
-                _emptyPayloadCount++;
+                lock (_diagnosticsLock) { _emptyPayloadCount++; }
                 LogMissingPath(normalizedVirtualPath, "empty payload");
                 return false;
             }
@@ -214,11 +219,14 @@ namespace OpenFarCry.Importer.Texture
                     out string decodeError,
                     out bool usedNativeDdsPath))
             {
-                _decodeFailureCount++;
-                if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+                lock (_diagnosticsLock)
                 {
-                    _ddsDecodeFailureCount++;
-                    IncrementFormatCount(_ddsFormatFailureCounts, ddsFormatTag);
+                    _decodeFailureCount++;
+                    if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ddsDecodeFailureCount++;
+                        IncrementFormatCount(_ddsFormatFailureCounts, ddsFormatTag);
+                    }
                 }
                 LogDecodeFailure(normalizedVirtualPath, decodeError);
                 return false;
@@ -243,35 +251,41 @@ namespace OpenFarCry.Importer.Texture
                 texture = loadedInfo.Texture;
             }
 
-            if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+            lock (_diagnosticsLock)
             {
-                _ddsDecodeSuccessCount++;
-                string successTag = usedNativeDdsPath ? $"{ddsFormatTag}|native" : ddsFormatTag;
-                IncrementFormatCount(_ddsFormatSuccessCounts, successTag);
-            }
+                if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+                {
+                    _ddsDecodeSuccessCount++;
+                    string successTag = usedNativeDdsPath ? $"{ddsFormatTag}|native" : ddsFormatTag;
+                    IncrementFormatCount(_ddsFormatSuccessCounts, successTag);
+                }
 
-            _successfulLoadCount++;
+                _successfulLoadCount++;
+            }
             return texture != null;
         }
 
         public void ClearRuntimeCache()
         {
             _runtimeCache.Clear();
-            _ddsFormatSuccessCounts.Clear();
-            _ddsFormatFailureCounts.Clear();
-            _warnedMissingPaths.Clear();
-            _warnedDecodePaths.Clear();
-            _successfulLoadCount = 0;
-            _unsupportedPathCount = 0;
-            _readFailureCount = 0;
-            _emptyPayloadCount = 0;
-            _decodeFailureCount = 0;
-            _ddsDecodeSuccessCount = 0;
-            _ddsDecodeFailureCount = 0;
-            _missingPathWarningCount = 0;
-            _missingPathWarningSuppressedCount = 0;
-            _decodeWarningCount = 0;
-            _decodeWarningSuppressedCount = 0;
+            lock (_diagnosticsLock)
+            {
+                _ddsFormatSuccessCounts.Clear();
+                _ddsFormatFailureCounts.Clear();
+                _warnedMissingPaths.Clear();
+                _warnedDecodePaths.Clear();
+                _successfulLoadCount = 0;
+                _unsupportedPathCount = 0;
+                _readFailureCount = 0;
+                _emptyPayloadCount = 0;
+                _decodeFailureCount = 0;
+                _ddsDecodeSuccessCount = 0;
+                _ddsDecodeFailureCount = 0;
+                _missingPathWarningCount = 0;
+                _missingPathWarningSuppressedCount = 0;
+                _decodeWarningCount = 0;
+                _decodeWarningSuppressedCount = 0;
+            }
         }
 
         public void ReleaseLevelScope(string scopeId)
@@ -300,7 +314,7 @@ namespace OpenFarCry.Importer.Texture
 
             if (!_resourceService.IsSupportedVirtualPath(virtualPath))
             {
-                _unsupportedPathCount++;
+                lock (_diagnosticsLock) { _unsupportedPathCount++; }
                 return (false, default);
             }
 
@@ -321,14 +335,14 @@ namespace OpenFarCry.Importer.Texture
             }
             catch (Exception e)
             {
-                _readFailureCount++;
+                lock (_diagnosticsLock) { _readFailureCount++; }
                 LogMissingPath(normalizedVirtualPath, e.Message);
                 return (false, default);
             }
 
             if (bytes == null || bytes.Length == 0)
             {
-                _emptyPayloadCount++;
+                lock (_diagnosticsLock) { _emptyPayloadCount++; }
                 LogMissingPath(normalizedVirtualPath, "empty payload");
                 return (false, default);
             }
@@ -341,11 +355,14 @@ namespace OpenFarCry.Importer.Texture
 
             if (!decodeResult.Success)
             {
-                _decodeFailureCount++;
-                if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+                lock (_diagnosticsLock)
                 {
-                    _ddsDecodeFailureCount++;
-                    IncrementFormatCount(_ddsFormatFailureCounts, decodeResult.DdsFormatTag);
+                    _decodeFailureCount++;
+                    if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ddsDecodeFailureCount++;
+                        IncrementFormatCount(_ddsFormatFailureCounts, decodeResult.DdsFormatTag);
+                    }
                 }
 
                 LogDecodeFailure(normalizedVirtualPath, decodeResult.DecodeError);
@@ -374,14 +391,17 @@ namespace OpenFarCry.Importer.Texture
             if (resolvedOptions.UseRuntimeMemoryCache && texture != null)
                 loadedInfo = _runtimeCache.Store(cacheKey, scopeId, texture, loadedInfo);
 
-            if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+            lock (_diagnosticsLock)
             {
-                _ddsDecodeSuccessCount++;
-                string successTag = usedNativeDdsPath ? $"{ddsFormatTag}|native" : ddsFormatTag;
-                IncrementFormatCount(_ddsFormatSuccessCounts, successTag);
-            }
+                if (Path.GetExtension(normalizedVirtualPath).Equals(".dds", StringComparison.OrdinalIgnoreCase))
+                {
+                    _ddsDecodeSuccessCount++;
+                    string successTag = usedNativeDdsPath ? $"{ddsFormatTag}|native" : ddsFormatTag;
+                    IncrementFormatCount(_ddsFormatSuccessCounts, successTag);
+                }
 
-            _successfulLoadCount++;
+                _successfulLoadCount++;
+            }
             return (true, loadedInfo);
         }
 
@@ -495,21 +515,25 @@ namespace OpenFarCry.Importer.Texture
 
         public RuntimeDiagnostics GetRuntimeDiagnostics()
         {
-            return new RuntimeDiagnostics(
-                cacheStats: _runtimeCache.GetStats(),
-                successfulLoadCount: _successfulLoadCount,
-                unsupportedPathCount: _unsupportedPathCount,
-                readFailureCount: _readFailureCount,
-                emptyPayloadCount: _emptyPayloadCount,
-                decodeFailureCount: _decodeFailureCount,
-                ddsDecodeSuccessCount: _ddsDecodeSuccessCount,
-                ddsDecodeFailureCount: _ddsDecodeFailureCount,
-                missingPathWarningCount: _missingPathWarningCount,
-                missingPathWarningSuppressedCount: _missingPathWarningSuppressedCount,
-                decodeWarningCount: _decodeWarningCount,
-                decodeWarningSuppressedCount: _decodeWarningSuppressedCount,
-                ddsFormatSuccessReport: BuildFormatReport(_ddsFormatSuccessCounts),
-                ddsFormatFailureReport: BuildFormatReport(_ddsFormatFailureCounts));
+            var cacheStats = _runtimeCache.GetStats();
+            lock (_diagnosticsLock)
+            {
+                return new RuntimeDiagnostics(
+                    cacheStats: cacheStats,
+                    successfulLoadCount: _successfulLoadCount,
+                    unsupportedPathCount: _unsupportedPathCount,
+                    readFailureCount: _readFailureCount,
+                    emptyPayloadCount: _emptyPayloadCount,
+                    decodeFailureCount: _decodeFailureCount,
+                    ddsDecodeSuccessCount: _ddsDecodeSuccessCount,
+                    ddsDecodeFailureCount: _ddsDecodeFailureCount,
+                    missingPathWarningCount: _missingPathWarningCount,
+                    missingPathWarningSuppressedCount: _missingPathWarningSuppressedCount,
+                    decodeWarningCount: _decodeWarningCount,
+                    decodeWarningSuppressedCount: _decodeWarningSuppressedCount,
+                    ddsFormatSuccessReport: BuildFormatReport(_ddsFormatSuccessCounts),
+                    ddsFormatFailureReport: BuildFormatReport(_ddsFormatFailureCounts));
+            }
         }
 
         public string BuildRuntimeDebugReport()
@@ -1025,22 +1049,25 @@ namespace OpenFarCry.Importer.Texture
         {
             if (string.IsNullOrEmpty(normalizedVirtualPath))
                 return;
-            if (_warnedMissingPaths.Contains(normalizedVirtualPath))
-                return;
 
-            _warnedMissingPaths.Add(normalizedVirtualPath);
-            if (_missingPathWarningCount < MaxUniqueWarningLogs)
+            lock (_diagnosticsLock)
             {
-                _missingPathWarningCount++;
-                Debug.LogWarning($"[TextureRuntime] Missing texture '{normalizedVirtualPath}': {reason}");
-                return;
-            }
+                if (!_warnedMissingPaths.Add(normalizedVirtualPath))
+                    return;
 
-            _missingPathWarningSuppressedCount++;
-            if (_missingPathWarningSuppressedCount == 1)
-            {
-                Debug.LogWarning(
-                    $"[TextureRuntime] Suppressing additional missing-texture warnings after {MaxUniqueWarningLogs} unique paths.");
+                if (_missingPathWarningCount < MaxUniqueWarningLogs)
+                {
+                    _missingPathWarningCount++;
+                    Debug.LogWarning($"[TextureRuntime] Missing texture '{normalizedVirtualPath}': {reason}");
+                    return;
+                }
+
+                _missingPathWarningSuppressedCount++;
+                if (_missingPathWarningSuppressedCount == 1)
+                {
+                    Debug.LogWarning(
+                        $"[TextureRuntime] Suppressing additional missing-texture warnings after {MaxUniqueWarningLogs} unique paths.");
+                }
             }
         }
 
@@ -1048,22 +1075,25 @@ namespace OpenFarCry.Importer.Texture
         {
             if (string.IsNullOrEmpty(normalizedVirtualPath))
                 return;
-            if (_warnedDecodePaths.Contains(normalizedVirtualPath))
-                return;
 
-            _warnedDecodePaths.Add(normalizedVirtualPath);
-            if (_decodeWarningCount < MaxUniqueWarningLogs)
+            lock (_diagnosticsLock)
             {
-                _decodeWarningCount++;
-                Debug.LogWarning($"[TextureRuntime] Failed to decode '{normalizedVirtualPath}': {reason}");
-                return;
-            }
+                if (!_warnedDecodePaths.Add(normalizedVirtualPath))
+                    return;
 
-            _decodeWarningSuppressedCount++;
-            if (_decodeWarningSuppressedCount == 1)
-            {
-                Debug.LogWarning(
-                    $"[TextureRuntime] Suppressing additional decode-failure warnings after {MaxUniqueWarningLogs} unique paths.");
+                if (_decodeWarningCount < MaxUniqueWarningLogs)
+                {
+                    _decodeWarningCount++;
+                    Debug.LogWarning($"[TextureRuntime] Failed to decode '{normalizedVirtualPath}': {reason}");
+                    return;
+                }
+
+                _decodeWarningSuppressedCount++;
+                if (_decodeWarningSuppressedCount == 1)
+                {
+                    Debug.LogWarning(
+                        $"[TextureRuntime] Suppressing additional decode-failure warnings after {MaxUniqueWarningLogs} unique paths.");
+                }
             }
         }
     }

@@ -86,6 +86,23 @@ namespace OpenFarCry.Level.Services
             IsLoadInProgress = true;
             IsPreloadComplete = false;
 
+            try
+            {
+                return await LoadLevelInnerAsync(levelName, missionName, ct);
+            }
+            finally
+            {
+                // Belt-and-braces: the success path already clears this below, but a throw
+                // or cancellation anywhere above must not leave it stuck true forever.
+                IsLoadInProgress = false;
+            }
+        }
+
+        async UniTask<FcLevelLoadReport> LoadLevelInnerAsync(
+            string levelName,
+            string missionName,
+            CancellationToken ct)
+        {
             _loadedLevelName = levelName;
             _loadedMissionName = missionName;
 

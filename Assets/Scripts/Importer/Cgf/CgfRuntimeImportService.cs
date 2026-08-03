@@ -347,9 +347,10 @@ namespace OpenFarCry.Importer.Cgf
 
             if (!isOwner)
             {
-                var joined = await tcs.Task;
-                ct.ThrowIfCancellationRequested();
-                return joined;
+                // AttachExternalCancellation detaches this joiner as soon as its own ct
+                // cancels, without touching the shared tcs.Task other waiters/the owner
+                // still depend on.
+                return await tcs.Task.AttachExternalCancellation(ct);
             }
 
             try
@@ -462,9 +463,8 @@ namespace OpenFarCry.Importer.Cgf
                 }
             }
 
-            var waitedArtifact = await tcs.Task;
-            ct.ThrowIfCancellationRequested();
-            return waitedArtifact;
+            // Same detach-without-disturbing-the-owner reasoning as ParseCoalescedAsync.
+            return await tcs.Task.AttachExternalCancellation(ct);
         }
 
         internal static List<PreloadRequestEntry> BuildUniquePreloadRequests(

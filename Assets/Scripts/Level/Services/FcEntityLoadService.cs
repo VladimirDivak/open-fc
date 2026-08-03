@@ -390,6 +390,10 @@ namespace OpenFarCry.Level.Services
 
                 var request = entity.CreateLoadRequest();
                 var artifact = await _meshLoadService.LoadAsync(request, scopeToken);
+                // LoadAsync's continuation may resume off the main thread; every state
+                // mutation below (queues, _stateByEntity, _report) must run on the main
+                // thread only.
+                await UniTask.SwitchToMainThread(CancellationToken.None);
                 if (scopeToken.IsCancellationRequested || entity == null)
                 {
                     if (entity != null)
@@ -445,6 +449,9 @@ namespace OpenFarCry.Level.Services
             }
             catch (OperationCanceledException)
             {
+                // The awaited call may have thrown from a pool thread; force back to the
+                // main thread before touching any shared state below.
+                await UniTask.SwitchToMainThread(CancellationToken.None);
                 if (entity != null)
                 {
                     _stateByEntity[entity] = EntityLoadState.Cancelled;
@@ -454,6 +461,7 @@ namespace OpenFarCry.Level.Services
             }
             catch (Exception e)
             {
+                await UniTask.SwitchToMainThread(CancellationToken.None);
                 if (TryEnqueueRetry(item, scopeToken, e.Message))
                     return;
 
@@ -467,6 +475,7 @@ namespace OpenFarCry.Level.Services
             }
             finally
             {
+                await UniTask.SwitchToMainThread(CancellationToken.None);
                 if (entity != null)
                     _active.Remove(entity);
                 _activeCount = Mathf.Max(0, _activeCount - 1);

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -17,16 +18,24 @@ namespace OpenFarCry.Importer.Cgf
             "^(.*)_lod\\d+$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-        static readonly Dictionary<string, Regex> s_siblingRegexCache =
-            new Dictionary<string, Regex>(StringComparer.OrdinalIgnoreCase);
+        // Per-basename patterns, one entry per unique model loaded this session — matched a
+        // handful of times each, so RegexOptions.Compiled would only grow IL that's never
+        // reclaimed. ConcurrentDictionary because loads can resume off the main thread.
+        static readonly ConcurrentDictionary<string, Regex> s_siblingRegexCache =
+            new ConcurrentDictionary<string, Regex>(StringComparer.OrdinalIgnoreCase);
 
         static Regex GetSiblingLodRegex(string baseName)
         {
-            if (!s_siblingRegexCache.TryGetValue(baseName, out var rx))
-                s_siblingRegexCache[baseName] = rx = new Regex(
-                    $"^{Regex.Escape(baseName)}_lod(\\d+)$",
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-            return rx;
+            return s_siblingRegexCache.GetOrAdd(baseName, static name => new Regex(
+                $"^{Regex.Escape(name)}_lod(\\d+)$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
+        }
+
+        /// Drops the per-basename sibling-LOD regex cache. Called from CgfRuntimeImporter.TrimUnused
+        /// so it doesn't grow unbounded across a long session with many distinct models.
+        public static void ClearSiblingRegexCache()
+        {
+            s_siblingRegexCache.Clear();
         }
 
         public List<string> FindSiblingLodPaths(string modelVirtualPath)

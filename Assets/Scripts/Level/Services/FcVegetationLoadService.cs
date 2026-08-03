@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Cysharp.Threading.Tasks;
 using OpenFarCry.Importer.Cgf;
 using OpenFarCry.Level.Entities;
@@ -166,6 +167,10 @@ namespace OpenFarCry.Level.Services
             catch (OperationCanceledException) { }
             finally
             {
+                // Guarantee _activeCount is only ever touched from the main thread,
+                // regardless of which thread the try block's exception/cancellation
+                // surfaced on (imports can throw off a pool thread).
+                await UniTask.SwitchToMainThread(CancellationToken.None);
                 _activeCount--;
             }
         }

@@ -75,6 +75,7 @@ namespace OpenFarCry.Importer.Cgf
             int removed = SharedService.TrimUnused();
             removed += TextureImportService.TrimUnusedRuntimeCache();
             removed += SharedMaterialService.TrimUnused();
+            CgfLodImportService.ClearSiblingRegexCache();
             return removed;
         }
 

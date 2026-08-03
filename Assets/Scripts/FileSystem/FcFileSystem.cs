@@ -140,16 +140,23 @@ namespace OpenFarCry.FileSystem
             throw new FileNotFoundException($"[FcFileSystem] Virtual path not found: '{virtualPath}'");
         }
 
-        /// Offloads decompression to the thread pool; returns to main thread when done.
+        /// Offloads decompression to the thread pool; always returns to the main thread,
+        /// even when the read throws (e.g. FileNotFoundException) — callers must never
+        /// observe a continuation running off the main thread.
         public static async UniTask<byte[]> ReadAllBytesAsync(
             string virtualPath,
             CancellationToken cancellationToken = default)
         {
-            await UniTask.SwitchToThreadPool();
             cancellationToken.ThrowIfCancellationRequested();
-            var result = ReadAllBytes(virtualPath);
-            await UniTask.SwitchToMainThread(cancellationToken);
-            return result;
+            await UniTask.SwitchToThreadPool();
+            try
+            {
+                return ReadAllBytes(virtualPath);
+            }
+            finally
+            {
+                await UniTask.SwitchToMainThread();
+            }
         }
 
         /// Returns all virtual paths under the given virtual directory (across all mounted PAKs).
