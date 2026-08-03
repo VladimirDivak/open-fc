@@ -85,12 +85,20 @@ void FcTriplanarDetail_float(
 }
 
 // Samples the terrain holes texture (_TerrainHolesTexture is already declared
-// by the Terrain Lit target; do not redeclare it). Returns 1 for solid terrain
-// and 0 for a hole cell. Feed Hole into the fragment Alpha block with Alpha
-// Clipping enabled (threshold 0.5) so the shader discards hole pixels.
+// by the Terrain Lit target when _ALPHATEST_ON is active; do not redeclare it).
+// Returns 1 for solid terrain and 0 for a hole cell. Feed Hole into the
+// fragment Alpha block with Alpha Clipping enabled (threshold 0.5) so the
+// shader discards hole pixels. The BaseMapGen hidden pass (used to bake the
+// terrain base color map) is a separate subshader that never defines
+// _ALPHATEST_ON and never declares the texture, so referencing it there is
+// an undeclared-identifier error; guard it and report "solid" instead.
 void FcTerrainHole_float(float2 TerrainUV, out float Hole)
 {
+#ifdef _ALPHATEST_ON
     Hole = SAMPLE_TEXTURE2D(_TerrainHolesTexture, sampler_TerrainHolesTexture, TerrainUV).r;
+#else
+    Hole = 1.0;
+#endif
 }
 
 #endif
