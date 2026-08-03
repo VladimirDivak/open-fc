@@ -35,15 +35,18 @@ mono_crash.*.json
 # Generated level scenes (rebuilt by the level builder)
 /Assets/Scenes/Levels/
 
-# Vendored third-party plugins (re-import from Asset Store, not tracked)
+# Vendored third-party / paid Asset Store plugins (re-import locally, never tracked)
 /Assets/HTraceAO/
 /Assets/HTraceAO.meta
 /Assets/HTraceSSGI/
 /Assets/HTraceSSGI.meta
-/Assets/Plugins/Sirenix/Demos/
-/Assets/Plugins/Sirenix/Demos.meta
-/Assets/Plugins/Sirenix/Readme.txt
-/Assets/Plugins/Sirenix/Readme.txt.meta
+/Assets/Plugins/Sirenix/
+/Assets/AmplifyImpostors/
+/Assets/AmplifyImpostors.meta
+/Assets/BOXOPHOBIC/
+/Assets/BOXOPHOBIC.meta
+/Assets/BOXOPHOBIC+/
+/Assets/BOXOPHOBIC+.meta
 
 # IDE/editor local state
 .vs/
