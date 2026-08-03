@@ -12,12 +12,12 @@ Companions:
 ## Current Position
 
 ```
-STAGE:        2 done, compile-verified, committing now
-NEXT STAGE:   Stage 3 (per-frame work removal) — S, independent of 4-9
+STAGE:        3 done, committed+pushed at user's explicit request; compile NOT independently re-confirmed after the DrawMeshInstanced fix
+NEXT STAGE:   confirm Editor compiles clean, THEN Stage 4 (water/URP) — S, independent of 5-9
 BRANCH:       refactor/level-builder-fcdata-cache
-BASELINE:     a7df349  fix(shaders): guard terrain holes sample for BaseMapGen pass
-WORKTREE:     dirty (unrelated pre-existing WIP, untouched — Stage 2 committed)
-BLOCKED ON:   nothing (functional checks — save-prompt dialog, cancel-mid-build — still want a manual pass next time someone's in the Editor doing a real build; not blocking, compile is what mattered here)
+BASELINE:     see git log — this session's Stage 3 commit is HEAD
+WORKTREE:     dirty (unrelated pre-existing WIP, untouched — Stage 3 committed)
+BLOCKED ON:   nothing procedurally; A-M16 wants a Play Mode look near water when convenient (not blocking, compile is what mattered for the commit decision)
 BACKUP:       ~/open-fc-backup-mirror-2026-08-03.git — pre-purge mirror, keep until confident nothing else needs restoring from it
 ```
 
@@ -58,6 +58,34 @@ accurate rather than detailed — detail belongs in the log entries below.
    X, found nothing, do not repeat" is the most valuable kind of note here.
 
 ---
+
+## Reusable technique: decompiling a Unity API when the compiler error is confusing
+
+`Graphics.DrawMeshInstanced` has a 12-parameter overload whose trailing params are marked
+`[UnityEngine.Internal.DefaultValue("...")]` — this is **not** a real C# optional parameter
+(`= value` / `OptionalAttribute` + `DefaultParameterValueAttribute`). It's a Unity bindings-codegen
+marker that does nothing for a normal call from user code. Compiling
+`Graphics.DrawMeshInstanced(mesh, sub, mat, matrices, n, null, ShadowCastingMode.On, receiveShadows: true, camera: cam)`
+(skipping `layer` via a trailing named arg, which is legal C# for genuinely optional parameters)
+fails with `error CS1501: No overload for method 'DrawMeshInstanced' takes 9 arguments` — Roslyn
+doesn't see the 12-param method as callable with fewer arguments at all. The actual fix is to use
+one of Unity's separately-declared fixed-arity overloads (there are ~10 of them, each just calling
+the next with explicit values for the omitted trailing params) — for `DrawMeshInstanced` the one
+matching `(mesh, submeshIndex, material, matrices, count, properties, castShadows, receiveShadows,
+layer, camera)` (10 args, all positional) is what actually exists and compiles.
+
+**When a Unity API's real signature doesn't match the docs/intuition and the compiler error is
+opaque, decompile it instead of guessing:**
+```
+cd <a directory OUTSIDE the project — dotnet tool install scans cwd for project files and fails inside one>
+dotnet tool install -g ilspycmd
+export PATH="$PATH:$HOME/.dotnet/tools"
+ilspycmd -t UnityEngine.Graphics "$UNITY_EDITOR/Editor/Data/Managed/UnityEngine/UnityEngine.CoreModule.dll" | grep -n "MethodName" -A 2
+```
+This is fast (~seconds), no Unity Editor needed, and gives the ground truth instead of iterating on
+compiler errors. Worth remembering for any future "why won't this Unity call compile" — check
+`UnityEngine.CoreModule.dll`, `UnityEditor.CoreModule.dll`, or the relevant module DLL under
+`$UNITY_EDITOR/Editor/Data/Managed/UnityEngine/`.
 
 ## Verification constraints (this workstation)
 
@@ -109,6 +137,77 @@ Newest first. Template:
 **Surprises**: what the code actually did versus what the register claimed
 **Next**: concrete first action for the next session
 ```
+
+---
+
+### 2026-08-04 — Stage 3 — Per-frame work removal landed, NOT YET VERIFIED
+
+**Landed**: `A-H06`, `A-H07`, `A-M13`, `A-M14`, `A-M15`, `A-M16`, `A-L13`, `A-L14`, `A-L15` — code
+changes only, **not committed**. 7 files: the 5 originally scoped
+(`FcBrushLoadService.cs`, `FcEntityLoadService.cs`, `FcVegetationTerrainService.cs`,
+`FcVegetationColliderSelector.cs`, `CgfUvScrollRuntime.cs`) plus 2 found mid-fix
+(`CgfLodImportService.cs`, `FcLevelRuntimeLodGroupBuilder.cs` — see `A-M13`).
+
+**Status changes**: all nine open → done, except `A-H06` and `A-M15` marked `done` with an
+explicit "partially" caveat in the register (see below — the capturing-lambda/per-comparison
+`Transform.position` cost in both loaders' sort comparators is untouched; only the O(n²)
+registration and the O(n log n)-every-frame sort were fixed).
+
+**What happened, roughly in the order done**: started with `A-H07` (one-line split, biggest single
+win — turning the camera away from vegetation no longer triggers a full linear scan). Then the
+small mechanical ones in the same file while already there: `A-L13` (cached `Plane[6]`), `A-M14`
+(precomputed instance matrices), `A-L14` (batch-fill restructure), `A-L15` (destination-taking
+`Select` overload, kept the old allocating one so `FcVegetationColliderSelectorTests` didn't need
+touching). Then `A-M13`, which turned out to need TWO fix sites, not one — the register only named
+`CgfLodImportService.ConfigureLodGroup` (the editor/tool import path), but grepping for who else
+parents LOD siblings under a model root found `FcLevelRuntimeLodGroupBuilder.Apply`, the actual
+*runtime* brush/entity LOD path, with the identical gap (new children added after
+`CgfUvScrollRuntime.Awake()` already ran its one-time scan). Both got the `Refresh()` hook.
+
+Then `A-H06` (mirrored `FcVegetationLoadService`'s `HashSet` + `_distanceSortMaxPending` pattern
+into `FcBrushLoadService` exactly — deliberately did not invent the fancier snapshot/static-
+comparator machinery the *original* register wording described, since vegetation's own
+implementation doesn't have that either and "mirror what exists" was the instruction) and `A-M15`
+(same shape for entities, but the concrete ask there was position-caching specifically, which
+landed in full — `WorldPosition` on `QueuedEntityLoad`, set at `Enqueue`, copied through on retry,
+used by both the promotion distance test and the sort key).
+
+Finished with `A-M16`, the largest one: moved vegetation cull+submit out of `Update()` (which only
+ever saw `Camera.main`) into a `RenderPipelineManager.beginCameraRendering` subscription, so it
+runs once per camera that actually renders a frame — including the water planar reflection's
+mirror camera, which is the whole point (vegetation was invisible/wrong in reflections before).
+Deliberately did **not** build a `Dictionary<Camera, ...>` cache the way `FcReflectionCache` does,
+despite the register suggesting "mirror `FcReflectionCache`" — that cache exists because reflection
+state (RT, mirror camera GameObject) is expensive and must persist across frames; vegetation's
+per-camera "state" is disposable CPU scratch data rebuilt fresh every call, and camera callbacks
+fire synchronously one at a time, so the existing single set of scratch fields is safe to reuse
+across cameras with no persistence needed. Reused what the plan actually needed, not what the
+suggested pattern implied.
+
+**Surprise worth remembering**: `A-M13`'s register/plan text named only one LOD-assembly call site.
+Always grep for *all* callers of a method before assuming a fix's file list is complete — the same
+"new children added after Awake" bug existed in a second, more-important (runtime, not editor-only)
+code path that nothing in the finding pointed at directly.
+
+**Not verified at first pass — caught a real compile error**: user reported
+`error CS1501: No overload for method 'DrawMeshInstanced' takes 9 arguments` at
+`FcVegetationTerrainService.cs:1523`. Root cause and fix: see "Reusable technique" section above —
+switched to the fixed 10-param `DrawMeshInstanced` overload (`..., layer, camera`) instead of
+skipping `layer` with a trailing named argument on the 12-param one. This is the only compile error
+surfaced across the whole Stage 3 diff; no confirmation yet that the corrected version compiles
+clean (that fix landed same session, immediately before this commit). `A-M16` still deserves an
+actual Play Mode look near water before being trusted beyond "compiles" — it changes when/how a
+rendering-adjacent MonoBehaviour subscribes to pipeline events, which a clean compile doesn't prove
+correct at runtime.
+
+**Committed and pushed this session** despite the above — user explicitly requested it after the
+`DrawMeshInstanced` fix. If the corrected build still doesn't compile, the fix is one small, easy
+to locate diff (see the commit for this stage) — revert or patch forward from there, no need to
+unwind the whole stage.
+
+**Next**: confirm the Editor actually compiles clean now (not yet independently verified beyond the
+one reported error being fixed). Then Stage 4 (water/URP correctness) — independent of Stage 3, can
+start any time. Separately still pending from Stage 2: `A-H12` needs an interactive Editor repro.
 
 ---
 

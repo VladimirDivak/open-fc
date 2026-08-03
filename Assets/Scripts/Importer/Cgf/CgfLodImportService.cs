@@ -182,6 +182,14 @@ namespace OpenFarCry.Importer.Cgf
                 }
             }
 
+            // LOD siblings just got parented under root as new children; a CgfUvScrollRuntime
+            // on root (added at build time, before this LOD assembly step) only saw the base
+            // LOD0 renderer in its constructor-time scan. Refresh it now instead of relying on
+            // a per-frame rescan in Update.
+            var uvScroll = root.GetComponent<CgfUvScrollRuntime>();
+            if (uvScroll != null)
+                uvScroll.Refresh();
+
             var lods = BuildLodSettings(lodRenderers);
             if (lods.Length == 0)
                 return;

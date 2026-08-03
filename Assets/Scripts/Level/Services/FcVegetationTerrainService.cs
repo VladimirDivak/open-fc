@@ -125,13 +125,14 @@ namespace OpenFarCry.Level.Services
         Vector3[] _positions;   // world positions
         float[] _scales;
         int[] _protoIndices;    // index into _runtimeTypes
+        Matrix4x4[] _instanceMatrices; // TRS(position, identity, scale) per instance, built once
 
         // Per-frame scratch: [protoIdx][lodLevel] -> growable list of matrices.
         // Pre-allocated to avoid GC each frame.
         List<Matrix4x4>[][] _scratch; // [proto][lod]
         readonly Matrix4x4[] _batchBuf = new Matrix4x4[BatchSize];
         readonly List<int> _visibleCellScratch = new List<int>(256);
-        Plane[] _frustumPlanes;
+        readonly Plane[] _frustumPlanes = new Plane[6];
 
         string _levelScopeId;
         bool _warnedMissingLevelPreloadService;
@@ -246,13 +247,24 @@ namespace OpenFarCry.Level.Services
         void OnEnable()
         {
             _nextColliderUpdateTime = 0f;
+            RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
         }
 
         bool _loggedCameraNull;
 
+        // Collider proximity is a gameplay/physics concern tied to the player's viewpoint,
+        // not a per-render-camera one — Camera.main remains correct here. Visual culling
+        // and instanced draws moved to OnBeginCameraRendering (below) since submitting a
+        // batch culled against Camera.main to every camera that renders this frame (the
+        // old behavior) drew nothing for cameras facing a different direction and, for the
+        // water planar reflection specifically, showed the main camera's view instead of
+        // the mirror camera's.
         void Update()
         {
             if (_positions == null || _runtimeTypes == null || _scratch == null)
+                return;
+
+            if (Time.unscaledTime < _nextColliderUpdateTime)
                 return;
 
             var cam = Camera.main;
@@ -261,23 +273,34 @@ namespace OpenFarCry.Level.Services
                 if (!_loggedCameraNull)
                 {
                     _loggedCameraNull = true;
-                    Debug.LogWarning("[FcVegetationTerrainService] Camera.main is null — GPU instancing disabled. Tag your camera as MainCamera.");
+                    Debug.LogWarning("[FcVegetationTerrainService] Camera.main is null — collider proximity updates disabled. Tag your camera as MainCamera.");
                 }
                 return;
             }
             _loggedCameraNull = false;
-            var camPos = cam.transform.position;
 
+            UpdateNearbyColliders(cam.transform.position);
+            _nextColliderUpdateTime = Time.unscaledTime + Mathf.Max(0.05f, _colliderUpdateInterval);
+        }
+
+        // Fires once per camera that renders this frame (Game cameras, Scene View, and the
+        // water planar reflection's mirror camera) — cull and submit against that specific
+        // camera instead of Camera.main only. Scratch buffers (_scratch, _visibleCellScratch,
+        // _batchBuf, _frustumPlanes) are reused across calls: beginCameraRendering fires
+        // synchronously per camera on the main thread, never interleaved, so there is no
+        // cross-camera state corruption from sharing them.
+        void OnBeginCameraRendering(ScriptableRenderContext ctx, Camera cam)
+        {
+            if (_positions == null || _runtimeTypes == null || _scratch == null)
+                return;
+            if (cam == null || cam.cameraType == CameraType.Preview)
+                return;
+
+            var camPos = cam.transform.position;
             ClearScratchBuckets();
             CollectVisibleCells(cam, camPos);
             CollectVisibleInstances(camPos);
-            SubmitInstancedDraws();
-
-            if (Time.unscaledTime >= _nextColliderUpdateTime)
-            {
-                UpdateNearbyColliders(camPos);
-                _nextColliderUpdateTime = Time.unscaledTime + Mathf.Max(0.05f, _colliderUpdateInterval);
-            }
+            SubmitInstancedDraws(cam);
         }
 
         Dictionary<int, int> BuildRuntimeTypes(CgfLodImportService lodService)
@@ -340,6 +363,7 @@ namespace OpenFarCry.Level.Services
             _positions = new Vector3[total];
             _scales = new float[total];
             _protoIndices = new int[total];
+            _instanceMatrices = new Matrix4x4[total];
 
             int count = 0;
             for (int i = 0; i < _instances.Length; i++)
@@ -356,9 +380,16 @@ namespace OpenFarCry.Level.Services
                 float wz = origin.z + inst.PosZ * sizeZ;
                 float wy = terrain != null ? terrain.SampleHeight(new Vector3(wx, 0f, wz)) : 0f;
 
-                _positions[count] = new Vector3(wx, wy, wz);
-                _scales[count] = inst.Scale > 0f ? inst.Scale : 1f;
+                var pos = new Vector3(wx, wy, wz);
+                float scale = inst.Scale > 0f ? inst.Scale : 1f;
+
+                _positions[count] = pos;
+                _scales[count] = scale;
                 _protoIndices[count] = pi;
+                // Rotation is always identity for vegetation instances, so this TRS is fixed
+                // for the instance's lifetime — compute it once here instead of every frame
+                // a visible instance is submitted.
+                _instanceMatrices[count] = Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one * scale);
                 count++;
             }
 
@@ -367,6 +398,7 @@ namespace OpenFarCry.Level.Services
                 Array.Resize(ref _positions, count);
                 Array.Resize(ref _scales, count);
                 Array.Resize(ref _protoIndices, count);
+                Array.Resize(ref _instanceMatrices, count);
             }
         }
 
@@ -524,7 +556,7 @@ namespace OpenFarCry.Level.Services
             if (_runtimeCells == null || _runtimeCells.Length == 0)
                 return;
 
-            _frustumPlanes = GeometryUtility.CalculateFrustumPlanes(cam);
+            GeometryUtility.CalculateFrustumPlanes(cam, _frustumPlanes);
             float maxCullSqr = _maxCullDistanceSqr > 0f
                 ? _maxCullDistanceSqr
                 : BuildCullDistanceSqr(_lod0Distance, _cullDistance);
@@ -536,7 +568,7 @@ namespace OpenFarCry.Level.Services
                 float sqr = (closest - camPos).sqrMagnitude;
                 if (sqr >= maxCullSqr)
                     continue;
-                if (_frustumPlanes != null && !GeometryUtility.TestPlanesAABB(_frustumPlanes, cell.Bounds))
+                if (!GeometryUtility.TestPlanesAABB(_frustumPlanes, cell.Bounds))
                     continue;
 
                 _visibleCellScratch.Add(i);
@@ -547,7 +579,7 @@ namespace OpenFarCry.Level.Services
 
         void CollectVisibleInstances(Vector3 camPos)
         {
-            if (_runtimeCells == null || _runtimeCells.Length == 0 || _visibleCellScratch.Count == 0)
+            if (_runtimeCells == null || _runtimeCells.Length == 0)
             {
                 // Fallback for old scenes/edge cases where cells are not available.
                 _visibleInstanceCount = _positions != null ? _positions.Length : 0;
@@ -555,6 +587,15 @@ namespace OpenFarCry.Level.Services
                     AddVisibleInstance(i, camPos);
                 return;
             }
+
+            // Cells exist but none passed CollectVisibleCells this frame (camera facing
+            // away, or nothing within cull distance) — that's a legitimate empty result,
+            // not the "cells unavailable" fallback case above. _visibleInstanceCount is
+            // already 0 from CollectVisibleCells. Do NOT fall through to scanning every
+            // instance — that would make looking away from vegetation more expensive than
+            // looking at it.
+            if (_visibleCellScratch.Count == 0)
+                return;
 
             for (int c = 0; c < _visibleCellScratch.Count; c++)
             {
@@ -582,7 +623,7 @@ namespace OpenFarCry.Level.Services
             if (lod < 0)
                 return;
 
-            _scratch[pi][lod].Add(Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one * _scales[instanceIndex]));
+            _scratch[pi][lod].Add(_instanceMatrices[instanceIndex]);
         }
 
         void UpdateNearbyColliders(Vector3 camPos)
@@ -608,12 +649,17 @@ namespace OpenFarCry.Level.Services
 
         void CollectColliderCandidates(Vector3 camPos)
         {
-            if (_runtimeCells == null || _runtimeCells.Length == 0 || _visibleCellScratch.Count == 0)
+            if (_runtimeCells == null || _runtimeCells.Length == 0)
             {
                 for (int i = 0; i < _positions.Length; i++)
                     TryAddColliderCandidate(i, camPos);
                 return;
             }
+
+            // Same reasoning as CollectVisibleInstances: an empty visible-cell set this
+            // frame is a legitimate "nothing to do" result, not the legacy fallback.
+            if (_visibleCellScratch.Count == 0)
+                return;
 
             for (int c = 0; c < _visibleCellScratch.Count; c++)
             {
@@ -648,10 +694,8 @@ namespace OpenFarCry.Level.Services
 
         void BuildWantedColliderSet()
         {
-            var wanted = FcVegetationColliderSelector.Select(_candidateScratch, _perTypeBudgets, _maxActiveCollidersGlobal);
-            _wantedInstancesScratch.Clear();
-            foreach (int id in wanted)
-                _wantedInstancesScratch.Add(id);
+            FcVegetationColliderSelector.Select(
+                _candidateScratch, _perTypeBudgets, _maxActiveCollidersGlobal, _wantedInstancesScratch);
         }
 
         void ApplyWantedColliderSet()
@@ -968,7 +1012,7 @@ namespace OpenFarCry.Level.Services
             }
         }
 
-        void SubmitInstancedDraws()
+        void SubmitInstancedDraws(Camera cam)
         {
             for (int pi = 0; pi < _runtimeTypes.Length; pi++)
             {
@@ -987,15 +1031,7 @@ namespace OpenFarCry.Level.Services
                         continue;
 
                     var mats = rt.LodMaterials[li];
-
-                    for (int sub = 0; sub < mesh.subMeshCount; sub++)
-                    {
-                        var mat = mats != null && sub < mats.Length ? mats[sub] : null;
-                        if (mat == null)
-                            continue;
-
-                        DrawBucketInstanced(mesh, sub, mat, bucket);
-                    }
+                    DrawBucketInstanced(mesh, mats, bucket, cam);
                 }
             }
         }
@@ -1462,7 +1498,10 @@ namespace OpenFarCry.Level.Services
             return null;
         }
 
-        void DrawBucketInstanced(Mesh mesh, int sub, Material mat, List<Matrix4x4> bucket)
+        // Fills _batchBuf once per BatchSize page and issues one DrawMeshInstanced per
+        // submesh against that same fill, instead of refilling _batchBuf from `bucket`
+        // once per submesh (meshes commonly have 2+ submeshes).
+        void DrawBucketInstanced(Mesh mesh, Material[] mats, List<Matrix4x4> bucket, Camera cam)
         {
             int offset = 0;
             while (offset < bucket.Count)
@@ -1470,21 +1509,41 @@ namespace OpenFarCry.Level.Services
                 int n = Mathf.Min(BatchSize, bucket.Count - offset);
                 for (int j = 0; j < n; j++)
                     _batchBuf[j] = bucket[offset + j];
-                Graphics.DrawMeshInstanced(
-                    mesh,
-                    sub,
-                    mat,
-                    _batchBuf,
-                    n,
-                    null,
-                    ShadowCastingMode.On,
-                    receiveShadows: true);
+
+                for (int sub = 0; sub < mesh.subMeshCount; sub++)
+                {
+                    var mat = mats != null && sub < mats.Length ? mats[sub] : null;
+                    if (mat == null)
+                        continue;
+
+                    // Explicit camera: this batch was culled against `cam`'s frustum, so it
+                    // must only be submitted to `cam` — not every camera rendering this
+                    // frame (the old `camera: null` behavior), which is what made vegetation
+                    // miss/mismatch in the water planar reflection's mirror camera.
+                    // NOTE: the 12-param DrawMeshInstanced overload's trailing parameters are
+                    // marked [UnityEngine.Internal.DefaultValue], not real C# optional
+                    // parameters — the compiler requires an exact-arity overload from user
+                    // code, so this calls the fixed 10-param (..., layer, camera) overload.
+                    Graphics.DrawMeshInstanced(
+                        mesh,
+                        sub,
+                        mat,
+                        _batchBuf,
+                        n,
+                        null,
+                        ShadowCastingMode.On,
+                        true,
+                        0,
+                        cam);
+                }
+
                 offset += n;
             }
         }
 
         void OnDisable()
         {
+            RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
             // Make sure collider hosts do not hold mesh references while service is disabled/unloading.
             ReleaseAllColliderHosts();
             _nextColliderUpdateTime = 0f;

@@ -63,6 +63,14 @@ namespace OpenFarCry.Level.Services
                 renderers.Add(meshRenderer);
             }
 
+            // LOD siblings just got parented under root as new children; a CgfUvScrollRuntime
+            // on root (added at build time, before this LOD assembly step) only saw the base
+            // LOD0 renderer in its constructor-time scan. Refresh it now instead of relying on
+            // a per-frame rescan in Update.
+            var uvScroll = root.GetComponent<CgfUvScrollRuntime>();
+            if (uvScroll != null)
+                uvScroll.Refresh();
+
             var lodGroup = root.GetComponent<LODGroup>();
             if (lodGroup == null)
                 lodGroup = root.AddComponent<LODGroup>();

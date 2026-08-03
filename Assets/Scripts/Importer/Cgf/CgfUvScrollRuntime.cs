@@ -6,8 +6,14 @@ namespace OpenFarCry.Importer.Cgf
     [DisallowMultipleComponent]
     public sealed class CgfUvScrollRuntime : MonoBehaviour
     {
+        static readonly int s_baseMapId = Shader.PropertyToID("_BaseMap");
+
         [SerializeField] Vector2 _scrollPerSecond = new Vector2(0.05f, 0f);
+        // Every cloned material (for OnDestroy cleanup).
         readonly List<Material> _instancedMaterials = new List<Material>();
+        // Subset of _instancedMaterials that actually has _BaseMap, checked once at clone
+        // time instead of every frame — this is what Update() animates.
+        readonly List<Material> _scrollableMaterials = new List<Material>();
         readonly HashSet<int> _processedRendererIds = new HashSet<int>();
 
         void Awake()
@@ -15,18 +21,26 @@ namespace OpenFarCry.Importer.Cgf
             ProcessCurrentRenderers();
         }
 
-        void Update()
+        // Rescans for renderers not seen yet (already-processed ones are skipped via
+        // _processedRendererIds). Call after anything reparents new renderers under this
+        // GameObject post-Awake — LOD siblings are added after the component's own Awake
+        // runs, so they're otherwise invisible to it. See CgfLodImportService.ConfigureLodGroup
+        // and FcLevelRuntimeLodGroupBuilder.Apply.
+        public void Refresh()
         {
             ProcessCurrentRenderers();
+        }
 
-            if (_instancedMaterials.Count == 0)
+        void Update()
+        {
+            if (_scrollableMaterials.Count == 0)
                 return;
 
             Vector2 delta = _scrollPerSecond * Time.deltaTime;
-            for (int i = 0; i < _instancedMaterials.Count; i++)
+            for (int i = 0; i < _scrollableMaterials.Count; i++)
             {
-                var mat = _instancedMaterials[i];
-                if (mat == null || !mat.HasProperty("_BaseMap"))
+                var mat = _scrollableMaterials[i];
+                if (mat == null)
                     continue;
                 mat.mainTextureOffset += delta;
             }
@@ -64,6 +78,8 @@ namespace OpenFarCry.Importer.Cgf
                     };
                     unique[i] = clone;
                     _instancedMaterials.Add(clone);
+                    if (clone.HasProperty(s_baseMapId))
+                        _scrollableMaterials.Add(clone);
                 }
 
                 renderer.sharedMaterials = unique;
@@ -84,6 +100,7 @@ namespace OpenFarCry.Importer.Cgf
                     DestroyImmediate(mat);
             }
             _instancedMaterials.Clear();
+            _scrollableMaterials.Clear();
             _processedRendererIds.Clear();
         }
     }

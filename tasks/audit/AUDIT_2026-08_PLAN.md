@@ -28,7 +28,7 @@ widest blast radius.
 - [x] **Stage 0** — Repo hygiene / licensing · **S** · `A-M29` · done 2026-08-03
 - [x] **Stage 1** — Async main-thread contract · **S** · `A-H01 A-H02 A-H03 A-M01 A-M02 A-M03 A-L11` · done 2026-08-03
 - [x] **Stage 2** — Editor safety net · **S** · `A-H10 A-H11 A-H12 A-L17 A-L18` · done 2026-08-03 (A-H12 still `needs-repro`, everything else landed)
-- [ ] **Stage 3** — Per-frame work removal · **S** · `A-H06 A-H07 A-M13 A-M14 A-M15 A-M16 A-L13 A-L14 A-L15`
+- [x] **Stage 3** — Per-frame work removal · **S** · `A-H06 A-H07 A-M13 A-M14 A-M15 A-M16 A-L13 A-L14 A-L15` · done 2026-08-04
 - [ ] **Stage 4** — Water / URP correctness · **S** · `A-M17 A-M18 A-M19 A-M20 A-M21 A-M22 A-L19 A-L20 A-L21 A-L22 A-L23 A-L24`
 - [ ] **Stage 5** — Mesh correctness · **M** · `A-H09 A-L25`
 - [ ] **Stage 6** — Ownership, teardown, parser hardening · **M/L** · `A-H04 A-H05 A-M04 A-M05 A-M06 A-M07 A-M08 A-M09 A-L01…A-L11`
@@ -137,6 +137,8 @@ then stop relying on it implicitly.
 
 ## Stage 3 — Per-Frame Work Removal
 
+## Stage 3 — Per-Frame Work Removal · DONE 2026-08-04
+
 **Goal**: stop recomputing immutable data every frame. Everything here derives from state the
 scene builder baked and that never changes at runtime.
 
@@ -146,22 +148,25 @@ scene builder baked and that never changes at runtime.
 - `Assets/Scripts/Level/Services/FcVegetationTerrainService.cs`
 - `Assets/Scripts/Level/Services/FcVegetationColliderSelector.cs`
 - `Assets/Scripts/Importer/Cgf/CgfUvScrollRuntime.cs`
+- (touched, not originally listed) `Assets/Scripts/Importer/Cgf/CgfLodImportService.cs`,
+  `Assets/Scripts/Level/Services/FcLevelRuntimeLodGroupBuilder.cs` — see `A-M13` below
 
 **Tasks**:
-- [ ] `A-H07` — split the `_visibleCellScratch.Count == 0` guard from the legacy `_runtimeCells == null` guard; empty visible set → `return`. Same at :601 for `CollectColliderCandidates`. **Do this first — one line, largest single win.**
-- [ ] `A-H06` — `FcBrushLoadService`: snapshot positions to `Vector3[]` at `Register`; `HashSet` for dedup; cached static `Comparison<T>`; re-sort only past a camera-movement threshold; add a `_distanceSortMaxPending`-style guard. Mirror the existing `FcVegetationLoadService` implementation rather than inventing a new one.
-- [ ] `A-M15` — same treatment for `FcEntityLoadService:329` (cache the world position into `QueuedEntityLoad` at enqueue).
-- [ ] `A-M14` — `Matrix4x4[] _instanceMatrices` built in `BuildRuntimeInstances` next to `_positions`/`_scales`; :575 becomes an array read.
-- [ ] `A-M13` — `CgfUvScrollRuntime`: public `Refresh()` called from `Awake` and after LOD assembly (`FcBrushInstance.ApplyLoadResult`, `FcMeshEntity.ConfigureLodGroup`); remove discovery from `Update`; `Shader.PropertyToID` into `static readonly`; `HasProperty` once at clone time.
-- [ ] `A-M16` — build the vegetation visible set **per camera** inside `RenderPipelineManager.beginCameraRendering` (cache keyed by `Camera`, mirroring `FcReflectionCache`) and pass the camera to `DrawMeshInstanced`. Removes the `Camera.main` dependency and fixes vegetation in the water reflection.
-- [ ] `A-L13` — cached `Plane[6]` field for `CalculateFrustumPlanes`.
-- [ ] `A-L14` — fill `_batchBuf` once per 1023-instance page, then issue one `DrawMeshInstanced` per submesh against the filled buffer.
-- [ ] `A-L15` — `FcVegetationColliderSelector.Select` takes a caller-owned destination `HashSet` and `Clear()`s it.
+- [x] `A-H07` — split the `_visibleCellScratch.Count == 0` guard from the legacy `_runtimeCells == null` guard; empty visible set → `return`, in both `CollectVisibleInstances` and `CollectColliderCandidates`.
+- [x] `A-H06` — `FcBrushLoadService`: mirrored `FcVegetationLoadService` exactly — `HashSet<FcBrushInstance>` for O(1) `Register`/`Unregister`, `_distanceSortMaxPending` guard (default 5000) skipping the sort above that count. The capturing-lambda/per-comparison `Transform.position` reads from the original finding are **not** fixed — vegetation doesn't have that fix either, so "mirror the existing implementation" stopped short of inventing it new here. Track separately if it turns out to matter.
+- [x] `A-M15` — `FcEntityLoadService`: added `WorldPosition` to `QueuedEntityLoad`, captured once in `Enqueue` (and copied through in `TryEnqueueRetry`), used by `UpdateDeferredPromotions` and `SortList` instead of `Entity.transform.position`. Comparator itself is still a capturing lambda (not in this task's scope).
+- [x] `A-M14` — `Matrix4x4[] _instanceMatrices` built in `BuildRuntimeInstances` next to `_positions`/`_scales`/`_protoIndices`, including the `Array.Resize` when the built count is less than allocated. `AddVisibleInstance` reads the cached matrix instead of calling `Matrix4x4.TRS`.
+- [x] `A-M13` — **found a second LOD-assembly path the finding didn't name**: `CgfLodImportService.ConfigureLodGroup` is the editor/tool-time path, but the actual runtime brush/entity path goes through `FcLevelRuntimeLodGroupBuilder.Apply` — both parent new LOD-sibling GameObjects under `root` after `CgfUvScrollRuntime.Awake()` already ran, so both needed the `Refresh()` hook. Added it to both. `Update()` no longer scans; `Shader.PropertyToID("_BaseMap")` cached as `static readonly int`; `HasProperty` checked once at clone time — materials without the property are still cloned (renderer slot integrity preserved) but excluded from the animated list, tracked in a separate `_scrollableMaterials` list alongside the original `_instancedMaterials` (kept for `OnDestroy` cleanup of every clone, scrollable or not).
+- [x] `A-M16` — subscribed `RenderPipelineManager.beginCameraRendering` in `OnEnable`/unsubscribed in `OnDisable`; moved cull+submit there (runs once per camera: Game, Scene View, and now the water mirror camera — excluded only `CameraType.Preview`). **No `Dictionary<Camera,...>` cache was needed**, unlike `FcReflectionCache`: vegetation's per-camera "state" is just CPU scratch buffers rebuilt fresh every call, and `beginCameraRendering` fires synchronously/non-interleaved per camera, so reusing the existing single set of scratch fields (`_scratch`, `_visibleCellScratch`, `_frustumPlanes`, `_batchBuf`) across camera callbacks is safe — only the *subscription pattern* needed mirroring, not the persistent-view-cache part. `Update()` now only drives the `Camera.main`-based collider-proximity logic (a physics/gameplay concern, correctly tied to the player's camera, not a render-camera one). `DrawMeshInstanced` receives `camera: cam` instead of `null`.
+- [x] `A-L13` — `readonly Plane[] _frustumPlanes = new Plane[6]` field, non-allocating `CalculateFrustumPlanes(cam, _frustumPlanes)` overload; the now-always-true `!= null` guard at the `TestPlanesAABB` call site removed.
+- [x] `A-L14` — `DrawBucketInstanced` restructured: the submesh loop moved *inside* the page loop, so `_batchBuf` is filled once per 1023-instance page and reused across all of a mesh's submeshes instead of being refilled from `bucket` once per submesh.
+- [x] `A-L15` — added a `Select(..., HashSet<int> destination)` overload doing the zero-alloc fill; kept the original 3-arg allocating overload (now delegating to the new one) so the existing `FcVegetationColliderSelectorTests` didn't need to change. `Dictionary<int,int> perTypeCounts` replaced with a `static readonly` scratch dictionary reused across calls (`Clear()`ed each time) — single-threaded main-thread call site, safe to reuse. Caller (`BuildWantedColliderSet`) also lost its redundant `Clear()+foreach+Add` copy from the old return value into `_wantedInstancesScratch` — it's now filled directly.
 
 **Verification**:
-- Profiler, Play Mode, a dense level: capture main-thread ms and GC alloc/frame before and after, camera pointed at vegetation **and** turned away. Record both numbers in the log — turning away must be cheaper, not more expensive.
-- Confirm vegetation appears in the water reflection after `A-M16`.
-- Confirm brush registration no longer produces a multi-hundred-ms hitch on level start (Profiler timeline).
+- Profiler, Play Mode, a dense level: capture main-thread ms and GC alloc/frame before and after, camera pointed at vegetation **and** turned away. Record both numbers in the log — turning away must be cheaper, not more expensive. **Not run** — needs the Editor/Profiler, same constraint as prior stages.
+- Confirm vegetation appears in the water reflection after `A-M16`. **Not run** — needs a water level with vegetation nearby in Play Mode.
+- Confirm brush registration no longer produces a multi-hundred-ms hitch on level start (Profiler timeline). **Not run.**
+- Compile-level check only this session: manual re-read of every changed region, brace-balance check across all 7 touched files, `git status` confirming scope stayed to exactly those 7 files.
 
 **Non-goals**: converting vegetation culling to Jobs/Burst; that is a separate future plan.
 

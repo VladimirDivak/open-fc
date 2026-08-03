@@ -20,7 +20,9 @@ namespace OpenFarCry.Level.Services
 
         [SerializeField] int _maxConcurrent = 8;
         [SerializeField] int _loadsPerFrame  = 8;
+        [SerializeField] int _distanceSortMaxPending = 5000;
 
+        readonly HashSet<FcBrushInstance> _pendingSet = new HashSet<FcBrushInstance>();
         readonly List<FcBrushInstance> _pending = new List<FcBrushInstance>();
         readonly CgfLodImportService _lodService = new CgfLodImportService();
         int _activeCount;
@@ -44,7 +46,7 @@ namespace OpenFarCry.Level.Services
 
         public void Register(FcBrushInstance brush)
         {
-            if (brush != null && !_pending.Contains(brush))
+            if (brush != null && _pendingSet.Add(brush))
             {
                 _pending.Add(brush);
                 _totalRegistered++;
@@ -54,7 +56,8 @@ namespace OpenFarCry.Level.Services
 
         public void Unregister(FcBrushInstance brush)
         {
-            _pending.Remove(brush);
+            if (_pendingSet.Remove(brush))
+                _pending.Remove(brush);
         }
 
         void Update()
@@ -62,14 +65,25 @@ namespace OpenFarCry.Level.Services
             if (_pending.Count == 0 || _activeCount >= _maxConcurrent)
                 return;
 
-            SortByDistance();
+            // Skip the sort once the queue is large — a full level's worth of brushes
+            // registering in one burst turned this into an O(n log n) hitch on the very
+            // frame everything else is also starting up. Distance ordering only matters
+            // for the near-camera-first UX, not correctness.
+            if (_pending.Count <= Mathf.Max(0, _distanceSortMaxPending))
+                SortByDistance();
 
             int started = 0;
             for (int i = 0; i < _pending.Count && started < _loadsPerFrame && _activeCount < _maxConcurrent; )
             {
                 var brush = _pending[i];
-                if (brush == null) { _pending.RemoveAt(i); continue; }
+                if (brush == null)
+                {
+                    _pending.RemoveAt(i);
+                    _pendingSet.Remove(brush);
+                    continue;
+                }
                 _pending.RemoveAt(i);
+                _pendingSet.Remove(brush);
                 _activeCount++;
                 LoadOneAsync(brush).Forget();
                 started++;

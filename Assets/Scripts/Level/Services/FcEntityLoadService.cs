@@ -38,6 +38,10 @@ namespace OpenFarCry.Level.Services
             public long Sequence;
             public long EnqueuedAtTicks;
             public int Attempt;
+            // Captured once at Enqueue time. Level entities don't move once spawned, so
+            // re-reading Entity.transform.position (a matrix-compute-backed property, not
+            // a field) on every sort comparison and every promotion check is wasted work.
+            public Vector3 WorldPosition;
         }
 
         public static FcEntityLoadService Current { get; private set; }
@@ -176,7 +180,8 @@ namespace OpenFarCry.Level.Services
                 ScopeId = scopeId,
                 Sequence = ++_sequence,
                 EnqueuedAtTicks = Stopwatch.GetTimestamp(),
-                Attempt = 0
+                Attempt = 0,
+                WorldPosition = entity.transform.position
             };
 
             if (priority >= _deferredThreshold)
@@ -310,7 +315,7 @@ namespace OpenFarCry.Level.Services
                 if (item.Entity == null)
                     continue;
 
-                float distSq = Vector3.SqrMagnitude(item.Entity.transform.position - camPos);
+                float distSq = Vector3.SqrMagnitude(item.WorldPosition - camPos);
                 if (distSq <= radiusSq)
                 {
                     item.Priority = EntityLoadPriority.NearCamera;
@@ -334,8 +339,8 @@ namespace OpenFarCry.Level.Services
 
                 if (hasCamera)
                 {
-                    float da = a.Entity != null ? Vector3.SqrMagnitude(a.Entity.transform.position - camPos) : float.MaxValue;
-                    float db = b.Entity != null ? Vector3.SqrMagnitude(b.Entity.transform.position - camPos) : float.MaxValue;
+                    float da = a.Entity != null ? Vector3.SqrMagnitude(a.WorldPosition - camPos) : float.MaxValue;
+                    float db = b.Entity != null ? Vector3.SqrMagnitude(b.WorldPosition - camPos) : float.MaxValue;
                     int distanceCompare = da.CompareTo(db);
                     if (distanceCompare != 0)
                         return distanceCompare;
@@ -503,7 +508,8 @@ namespace OpenFarCry.Level.Services
                 ScopeId = item.ScopeId,
                 Sequence = ++_sequence,
                 EnqueuedAtTicks = Stopwatch.GetTimestamp(),
-                Attempt = item.Attempt + 1
+                Attempt = item.Attempt + 1,
+                WorldPosition = item.WorldPosition
             };
 
             if (retry.Priority >= _deferredThreshold)
