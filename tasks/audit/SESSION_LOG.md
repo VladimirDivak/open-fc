@@ -12,12 +12,12 @@ Companions:
 ## Current Position
 
 ```
-STAGE:        1 done, compile-verified, committing now
-NEXT STAGE:   Stage 2 (editor safety net) — S, independent of 3-9
+STAGE:        2 done, compile-verified, committing now
+NEXT STAGE:   Stage 3 (per-frame work removal) — S, independent of 4-9
 BRANCH:       refactor/level-builder-fcdata-cache
-BASELINE:     267cfe8  chore: ignore vendor Asset Store plugin dirs (history rewritten 2026-08-03)
-WORKTREE:     dirty (unrelated pre-existing WIP, untouched — Stage 1 + audit docs now committed)
-BLOCKED ON:   nothing
+BASELINE:     a7df349  fix(shaders): guard terrain holes sample for BaseMapGen pass
+WORKTREE:     dirty (unrelated pre-existing WIP, untouched — Stage 2 committed)
+BLOCKED ON:   nothing (functional checks — save-prompt dialog, cancel-mid-build — still want a manual pass next time someone's in the Editor doing a real build; not blocking, compile is what mattered here)
 BACKUP:       ~/open-fc-backup-mirror-2026-08-03.git — pre-purge mirror, keep until confident nothing else needs restoring from it
 ```
 
@@ -109,6 +109,60 @@ Newest first. Template:
 **Surprises**: what the code actually did versus what the register claimed
 **Next**: concrete first action for the next session
 ```
+
+---
+
+### 2026-08-03 — Stage 2 — Editor safety net landed, NOT YET VERIFIED IN EDITOR
+
+**Landed**: `A-H10`, `A-H11`, `A-L17`, `A-L18` — code changes only, **not committed**. `A-H12`
+still `needs-repro` (untouched). 6 files: the 4 originally scoped
+(`FcVegetationCatalogBuilder.cs`, `CgfAssetCacheService.cs`, `FcLevelBuilderWindow.cs`,
+`FcLevelSceneBuilder.cs`) plus 2 discovered mid-fix (`CgfImporterWindow.cs`,
+`FcVegetationTerrainService.cs` — see below).
+
+**Status changes**: `A-H10`, `A-H11`, `A-L17`, `A-L18` open → done (tentative, same caveat as
+Stage 1 — see Not Verified below). `A-H12` stays `needs-repro`.
+
+**What happened**: `A-H10` was a straight one-guard fix. `A-H11` turned out to have two
+identically-shaped loops in `FcLevelBuilderWindow.cs` (`EnsureCachedPrefabsForProfiles` and
+`PreBakeLevelMaterials`), both got the same treatment: `StartAssetEditing`/`StopAssetEditing`,
+cancelable bar with `break` + a log line explaining the partial result is kept. Audited the
+file's third (and last) `DisplayProgressBar` call site and left it alone — it wraps two opaque
+batch calls, not a per-item loop, so "cancelable" doesn't mean anything there.
+
+`A-L17`'s register entry pointed at the leaf `AssetDatabase.CreateAsset` calls inside
+`PersistMaterialAsset`/`PersistTextureAsset` (:1896/:1953), but those are helper methods called
+per-material/per-texture from deeper in the call graph — traced it up to the actual iteration
+point, `CacheSceneGeometryToProject`'s block that calls `AttachCachedPrefabsToScene` three times
+(brushes/vegetation/mesh entities), and wrapped *that* instead. Wrapping the leaves would have
+meant `StartAssetEditing`/`StopAssetEditing` pairs opening and closing once per material — no
+batching benefit at all.
+
+`A-L18` added `FcVegetationTerrainService.SetAuthoringData(...)` as **public**, not `internal` as
+the register suggested — the codebase's existing convention for editor-time population of runtime
+components is a public `Initialize()`-style method (see `FcBrushInstance`, `FcVegetationInstance`),
+and matching that beat introducing `InternalsVisibleTo` just for this one case. Covered both
+`_vegetationTypes` and `_instances` in the one method, not just `_instances` as literally named —
+same problem, same fix, right next to each other.
+
+**Surprise, caught before it caused damage**: removing the per-item `AssetDatabase.SaveAssets()`/
+`Refresh()` from `CgfAssetCacheService.SaveAssets` (the actual `A-H11` fix) would have silently
+broken `CgfImporterWindow` — the standalone single-CGF import tool. It's the *other* caller of that
+method, calls it exactly once per button click with no `StartAssetEditing` wrapper of its own, and
+had no other flush anywhere in the file — it was relying entirely on the per-item flush I just
+deleted. Grepped for every caller of `CgfAssetCacheService.SaveAssets` before finishing the change
+(exactly 2: the batch loop now wrapped, and this single-shot tool) and re-added the flush there,
+scoped to that one call site only.
+
+**Compile verified 2026-08-04**: user confirmed clean compile in the Editor. **Functional
+verification still not done** — the three Stage 2 checks in the plan (save-prompt dialog appears
+and Cancel aborts, cache build progress bar is cancelable and a cancel doesn't corrupt the cache,
+wall-clock comparison) need someone actually exercising these tools, not just a clean compile. Do
+them the next time a real level build touches this code path; update this entry if anything's off.
+
+**Next**: Stage 3 (per-frame work removal). Separately, still pending: `A-H12` needs someone at
+the Editor to build a level, reimport an entity prefab, and check whether the fields revert — a
+5-minute manual check whenever someone's next in the Editor for something else.
 
 ---
 

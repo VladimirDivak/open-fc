@@ -174,6 +174,16 @@ namespace OpenFarCry.Level.Services
         }
         public int ActiveColliderCount => _activeHostByInstance.Count;
 
+        // Editor-time authoring: assigns both serialized arrays in one call instead of
+        // going through SerializedProperty element-by-element (4 property lookups per
+        // instance — up to 50K instances per level). Caller must EditorUtility.SetDirty
+        // afterward since this bypasses SerializedObject.ApplyModifiedProperties.
+        public void SetAuthoringData(VegetationTypeEntry[] types, VegetationInstanceData[] instances)
+        {
+            _vegetationTypes = types ?? System.Array.Empty<VegetationTypeEntry>();
+            _instances = instances ?? System.Array.Empty<VegetationInstanceData>();
+        }
+
         void Start()
         {
             StartAsync(this.GetCancellationTokenOnDestroy()).Forget();

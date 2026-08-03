@@ -470,31 +470,12 @@ namespace OpenFarCry.Level.Editor
                 };
             }
 
-            // Attach the runtime service; populate via SerializedObject so data persists in scene.
+            // Attach the runtime service and assign both arrays in one call — going through
+            // SerializedProperty element-by-element here cost 4 property lookups per
+            // instance (up to 50K instances per level).
             var vegService = terrain.gameObject.AddComponent<FcVegetationTerrainService>();
-            var so = new SerializedObject(vegService);
-
-            var typesProp = so.FindProperty("_vegetationTypes");
-            typesProp.arraySize = typeEntries.Count;
-            for (int i = 0; i < typeEntries.Count; i++)
-            {
-                var elem = typesProp.GetArrayElementAtIndex(i);
-                elem.FindPropertyRelative("TypeIndex").intValue      = typeEntries[i].TypeIndex;
-                elem.FindPropertyRelative("VirtualPath").stringValue = typeEntries[i].VirtualPath;
-            }
-
-            var instProp = so.FindProperty("_instances");
-            instProp.arraySize = instanceData.Length;
-            for (int i = 0; i < instanceData.Length; i++)
-            {
-                var elem = instProp.GetArrayElementAtIndex(i);
-                elem.FindPropertyRelative("TypeIndex").intValue  = instanceData[i].TypeIndex;
-                elem.FindPropertyRelative("PosX").floatValue     = instanceData[i].PosX;
-                elem.FindPropertyRelative("PosZ").floatValue     = instanceData[i].PosZ;
-                elem.FindPropertyRelative("Scale").floatValue    = instanceData[i].Scale;
-            }
-
-            so.ApplyModifiedPropertiesWithoutUndo();
+            vegService.SetAuthoringData(typeEntries.ToArray(), instanceData);
+            EditorUtility.SetDirty(vegService);
 
             return instances.Length;
         }

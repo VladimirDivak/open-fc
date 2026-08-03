@@ -497,6 +497,10 @@ namespace OpenFarCry.Importer.Editor
         void SaveAssets(Mesh mesh, GameObject go, IReadOnlyList<CgfImportedAnimationClip> clips)
         {
             _assetCacheService.SaveAssets(_parsedPath, mesh, go, clips);
+            // Single-shot manual import (not a batch loop under StartAssetEditing), so this
+            // is where the created assets get flushed.
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
         }
 
         Mesh PersistMeshAssetForVirtualPath(Mesh mesh, string virtualPath)

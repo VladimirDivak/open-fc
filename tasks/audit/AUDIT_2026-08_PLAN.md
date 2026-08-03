@@ -27,7 +27,7 @@ widest blast radius.
 
 - [x] **Stage 0** — Repo hygiene / licensing · **S** · `A-M29` · done 2026-08-03
 - [x] **Stage 1** — Async main-thread contract · **S** · `A-H01 A-H02 A-H03 A-M01 A-M02 A-M03 A-L11` · done 2026-08-03
-- [ ] **Stage 2** — Editor safety net · **S** · `A-H10 A-H11 A-H12 A-L17 A-L18`
+- [x] **Stage 2** — Editor safety net · **S** · `A-H10 A-H11 A-H12 A-L17 A-L18` · done 2026-08-03 (A-H12 still `needs-repro`, everything else landed)
 - [ ] **Stage 3** — Per-frame work removal · **S** · `A-H06 A-H07 A-M13 A-M14 A-M15 A-M16 A-L13 A-L14 A-L15`
 - [ ] **Stage 4** — Water / URP correctness · **S** · `A-M17 A-M18 A-M19 A-M20 A-M21 A-M22 A-L19 A-L20 A-L21 A-L22 A-L23 A-L24`
 - [ ] **Stage 5** — Mesh correctness · **M** · `A-H09 A-L25`
@@ -103,7 +103,7 @@ then stop relying on it implicitly.
 
 ---
 
-## Stage 2 — Editor Safety Net
+## Stage 2 — Editor Safety Net · DONE 2026-08-03 (A-H12 needs-repro)
 
 **Goal**: editor tooling must not destroy user work or lock the Editor with no way out.
 
@@ -112,19 +112,24 @@ then stop relying on it implicitly.
 - `Assets/Scripts/Importer/Editor/CgfAssetCacheService.cs`
 - `Assets/Scripts/Level/Editor/FcLevelBuilderWindow.cs`
 - `Assets/Scripts/Level/Editor/FcLevelSceneBuilder.cs`
+- (touched, not originally listed) `Assets/Scripts/Importer/Editor/CgfImporterWindow.cs`,
+  `Assets/Scripts/Level/Services/FcVegetationTerrainService.cs`
 
 **Tasks**:
-- [ ] `A-H10` — `SaveCurrentModifiedScenesIfUserWantsTo()` guard at the top of `BuildCatalogScene`; correct the dialog text so it names scene loss, not just asset overwrite.
-- [ ] `A-H11` — wrap the `FcLevelBuilderWindow:1148-1209` loop in `AssetDatabase.StartAssetEditing()/StopAssetEditing()` (`try/finally`); remove per-item `SaveAssets`/`Refresh` from `CgfAssetCacheService:97,118-119`; one `Refresh` after the loop.
-- [ ] `A-H11` — switch every long editor loop to `EditorUtility.DisplayCancelableProgressBar` and break out on cancel; `ClearProgressBar` in `finally`. Repo currently has zero cancelable bars — audit all call sites.
-- [ ] `A-H12` — **first reproduce**: build a level, reimport an entity prefab, inspect entity fields and transforms. If values revert, add `PrefabUtility.RecordPrefabInstancePropertyModifications` for the entity and its transform (or switch to `SerializedObject` as brushes do). If they do not revert, set `A-H12` to `wontfix` in the register with the observation recorded in the log.
-- [ ] `A-L17` — same `StartAssetEditing` treatment for the per-material/per-texture `CreateAsset` loops at `FcLevelBuilderWindow:1896`.
-- [ ] `A-L18` — `FcLevelSceneBuilder:486`: internal setter for the vegetation instance array, assign once + `EditorUtility.SetDirty`, instead of 4N `SerializedProperty` calls.
+- [x] `A-H10` — `SaveCurrentModifiedScenesIfUserWantsTo()` guard at the top of `BuildCatalogScene`; dialog text now names scene closure, not just asset overwrite.
+- [x] `A-H11` — `EnsureCachedPrefabsForProfiles` (:1148-1209) wrapped in `AssetDatabase.StartAssetEditing()/StopAssetEditing()`; per-item `SaveAssets`/`Refresh` removed from `CgfAssetCacheService.SaveAssets`; one `SaveAssets`/`Refresh` after the loop instead.
+- [x] `A-H11` — bar switched to `EditorUtility.DisplayCancelableProgressBar`, `break` + warning log on cancel (partial cache kept, rest picked up next build). Audited all `DisplayProgressBar` call sites in this file (3 total): the geometry-cache loop (fixed) and `PreBakeLevelMaterials`'s per-CGF material-bake loop (same shape, also fixed — `StartAssetEditing` + cancelable bar). The third, `BakeOrUpdateLevelManifests`'s two bars (:253,:268), is not a per-item loop — two fixed-progress calls around opaque batch operations, nothing to cancel mid-item — left as is.
+- [ ] `A-H12` — **not reproduced this session**: needs an interactive Editor pass (build a level, reimport an entity prefab, inspect fields) that no CLI session can drive. Still `needs-repro` in the register.
+- [x] `A-L17` — traced to the actual calling loop: `CacheSceneGeometryToProject`'s `if (attachCachedPrefabsToScene) { ... }` block (the three `AttachCachedPrefabsToScene` calls whose per-instance override-material resolution is what reaches `PersistMaterialAsset`/`PersistTextureAsset` at :1896/:1953) — wrapped in `StartAssetEditing`/`StopAssetEditing`; left the leaf persist helpers untouched.
+- [x] `A-L18` — added `FcVegetationTerrainService.SetAuthoringData(VegetationTypeEntry[], VegetationInstanceData[])`, a **public** method (not `internal` as originally proposed — matches the existing `Initialize()` convention `FcBrushInstance`/`FcVegetationInstance` already use for editor-time population, no `InternalsVisibleTo` plumbing needed). Assigns both the type-entry and instance arrays in one call; `FcLevelSceneBuilder` calls it once + `EditorUtility.SetDirty`, replacing the SerializedProperty loop for *both* arrays (the register only flagged `_instances`, but `_vegetationTypes` had the identical smaller-N problem right next to it).
+
+**Side effect found while fixing `A-H11`**: removing the per-item flush from `CgfAssetCacheService.SaveAssets` would have silently broken `CgfImporterWindow` (the standalone "import one CGF" tool) — it was the *only* other caller and is a single-shot, non-batched invocation with no `StartAssetEditing` wrapper of its own. Re-added the flush there specifically (`AssetDatabase.SaveAssets()`/`Refresh()` in `CgfImporterWindow.SaveAssets`), verified via `grep` that these two call sites (`FcLevelBuilderWindow`'s batch loop, `CgfImporterWindow`'s single-shot) are the *only* callers of `CgfAssetCacheService.SaveAssets`.
 
 **Verification**:
-- With a dirty untitled scene open, run `OpenFarCry → Build Vegetation Catalog`: a save prompt must appear and Cancel must abort.
-- Build a level with a cold FCData cache: the import progress bar appears once after the loop, is cancelable, and cancelling leaves no half-written cache (or logs that it did).
-- Compare build wall-clock before/after on the same level; record the numbers in the log.
+- With a dirty untitled scene open, run `OpenFarCry → Build Vegetation Catalog`: a save prompt must appear and Cancel must abort. **Not run** — needs the Editor.
+- Build a level with a cold FCData cache: the import progress bar appears once after the loop, is cancelable, and cancelling leaves no half-written cache (or logs that it did). **Not run.**
+- Compare build wall-clock before/after on the same level; record the numbers in the log. **Not run.**
+- Compile-level check only, same constraints as Stage 1 (batch mode unreliable, no `Temp/obj`): manual re-read of every changed region + brace-balance check across all 6 touched files. **The above three checks need an actual Editor session — do them before trusting this stage in Play Mode / a real build.**
 
 **Non-goals**: splitting `FcLevelBuilderWindow` (that is Stage 9).
 

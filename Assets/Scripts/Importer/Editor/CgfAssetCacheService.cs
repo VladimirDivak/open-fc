@@ -115,8 +115,9 @@ namespace OpenFarCry.Importer.Editor
 
                 PrefabUtility.SaveAsPrefabAsset(go, paths.PrefabPath);
 
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                // No SaveAssets/Refresh here: this runs once per cache-miss CGF inside a
+                // batch loop, and callers wrap that loop in StartAssetEditing/StopAssetEditing
+                // so the import pipeline flushes once for the whole batch, not once per item.
 
                 Debug.Log($"[CgfImporter] Saved mesh -> {paths.MeshPath}, prefab -> {paths.PrefabPath}");
             }

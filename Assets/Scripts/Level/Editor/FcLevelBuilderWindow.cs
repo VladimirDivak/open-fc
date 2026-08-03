@@ -782,16 +782,24 @@ namespace OpenFarCry.Level.Editor
             RegisterMeshEntityProfilesFromLevelData(levelName, profilesByPath, ref dummyStats);
 
             var paths = new List<string>(profilesByPath.Keys);
+            AssetDatabase.StartAssetEditing();
             CgfMaterialEditorBakeService.BeginBakeSession();
             try
             {
                 for (int i = 0; i < paths.Count; i++)
                 {
                     string virtualPath = paths[i];
-                    EditorUtility.DisplayProgressBar(
+                    bool cancelled = EditorUtility.DisplayCancelableProgressBar(
                         "Pre-baking CGF materials",
                         $"{i + 1}/{paths.Count}: {virtualPath}",
                         paths.Count > 0 ? (float)(i + 1) / paths.Count : 1f);
+                    if (cancelled)
+                    {
+                        Debug.LogWarning(
+                            $"[FcLevelBuilder] Material pre-bake cancelled at {i + 1}/{paths.Count}. " +
+                            "Materials baked so far are kept.");
+                        break;
+                    }
 
                     if (!TryLoadParsedFile(virtualPath, out var parsedFile))
                     {
@@ -825,6 +833,7 @@ namespace OpenFarCry.Level.Editor
             {
                 CgfMaterialEditorBakeService.EndBakeSession();
                 EditorUtility.ClearProgressBar();
+                AssetDatabase.StopAssetEditing();
             }
 
             AssetDatabase.SaveAssets();
@@ -1092,29 +1101,41 @@ namespace OpenFarCry.Level.Editor
 
             if (attachCachedPrefabsToScene)
             {
-                context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
-                    brushes,
-                    context.CachedPrefabsByPath,
-                    materialOverrideService,
-                    levelName,
-                    materialOverridePersistContext,
-                    ref context.Stats);
-                context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
-                    vegetation,
-                    context.CachedPrefabsByPath,
-                    null,
-                    levelName,
-                    materialOverridePersistContext,
-                    ref context.Stats);
-                if (includeEntityObjectGeometry)
+                // Attaching instantiates scene GameObjects but also persists any newly
+                // resolved override materials/textures per instance (PersistMaterialAsset/
+                // PersistTextureAsset) — batch those CreateAsset calls instead of importing
+                // one at a time.
+                AssetDatabase.StartAssetEditing();
+                try
                 {
                     context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
-                        meshEntities,
+                        brushes,
+                        context.CachedPrefabsByPath,
+                        materialOverrideService,
+                        levelName,
+                        materialOverridePersistContext,
+                        ref context.Stats);
+                    context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
+                        vegetation,
                         context.CachedPrefabsByPath,
                         null,
                         levelName,
                         materialOverridePersistContext,
                         ref context.Stats);
+                    if (includeEntityObjectGeometry)
+                    {
+                        context.Stats.AttachedInstances += AttachCachedPrefabsToScene(
+                            meshEntities,
+                            context.CachedPrefabsByPath,
+                            null,
+                            levelName,
+                            materialOverridePersistContext,
+                            ref context.Stats);
+                    }
+                }
+                finally
+                {
+                    AssetDatabase.StopAssetEditing();
                 }
             }
 
@@ -1144,6 +1165,7 @@ namespace OpenFarCry.Level.Editor
             var cacheService = new CgfAssetCacheService();
             var lodService = new CgfLodImportService();
 
+            AssetDatabase.StartAssetEditing();
             CgfMaterialEditorBakeService.BeginBakeSession();
             try
             {
@@ -1153,10 +1175,17 @@ namespace OpenFarCry.Level.Editor
                     index++;
                     string virtualPath = kv.Key;
                     var profile = kv.Value;
-                    EditorUtility.DisplayProgressBar(
+                    bool cancelled = EditorUtility.DisplayCancelableProgressBar(
                         "Caching level geometry",
                         $"{index}/{profilesByPath.Count}: {virtualPath}",
                         profilesByPath.Count > 0 ? (float)index / profilesByPath.Count : 1f);
+                    if (cancelled)
+                    {
+                        Debug.LogWarning(
+                            $"[FcLevelBuilder] Geometry caching cancelled at {index}/{profilesByPath.Count}. " +
+                            "Prefabs cached so far are kept; the rest will be cached on the next build.");
+                        break;
+                    }
 
                     if (cachedPrefabsByPath.TryGetValue(virtualPath, out var knownPrefab) && knownPrefab != null)
                         continue;
@@ -1211,7 +1240,11 @@ namespace OpenFarCry.Level.Editor
             {
                 CgfMaterialEditorBakeService.EndBakeSession();
                 EditorUtility.ClearProgressBar();
+                AssetDatabase.StopAssetEditing();
             }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
         }
 
         static bool TryLoadParsedFile(string virtualPath, out CgfFile parsedFile)
